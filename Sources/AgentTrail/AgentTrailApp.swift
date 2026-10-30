@@ -24,6 +24,21 @@ enum AgentTrailApp {
         let delegate = AgentTrailApplicationDelegate()
         application.delegate = delegate
         application.setActivationPolicy(.accessory)
+        let menu = NSMenu()
+        let appMenu = NSMenu()
+        let appItem = NSMenuItem()
+        appItem.submenu = appMenu
+        menu.addItem(appItem)
+        let quit = NSMenuItem(title: "Quit Agent Trail", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = application
+        appMenu.addItem(quit)
+        let windowMenu = NSMenu()
+        let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        windowItem.submenu = windowMenu
+        menu.addItem(windowItem)
+        windowMenu.addItem(NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        application.mainMenu = menu
+        application.windowsMenu = windowMenu
         withExtendedLifetime(delegate) {
             application.run()
         }
