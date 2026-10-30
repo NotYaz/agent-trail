@@ -1,0 +1,49 @@
+name: Release artifacts
+
+# Produces reviewable downloads only. Publishing a GitHub release is a separate,
+# deliberate maintainer action; ordinary branch pushes never publish anything.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Run tests
+        run: swift test
+      - name: Build bundle and checksum
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: ./scripts/build-app.sh --arch "$TARGET_ARCH"
+      - name: Verify archive checksum
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        working-directory: dist
+        run: LC_ALL=C shasum -a 256 -c "Agent-Trail-macOS-$TARGET_ARCH.zip.sha256"
+      - name: Save review artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Agent-Trail-macOS-${{ matrix.arch }}
+          path: |
+            dist/Agent-Trail-macOS-${{ matrix.arch }}.zip
+            dist/Agent-Trail-macOS-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

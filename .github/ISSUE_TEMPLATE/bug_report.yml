@@ -1,0 +1,42 @@
+name: Bug report
+description: Report an incorrect result, compatibility issue, or app problem.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep private paths, session logs, conversation text, credentials, and caches out of this report.
+        Use synthetic examples or demo-mode screenshots. For a security issue, follow SECURITY.md.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, Apple Silicon or Intel, Agent Trail version/commit, and Claude version.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the relevant profile layout using fictitious paths.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include a redacted profile notice if relevant.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed real session logs, private paths, conversation content, and secrets.
+          required: true

@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an improvement or an assistant adapter.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What workflow is difficult today?
+      description: Describe the situation and what you want to accomplish.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Local evidence, if proposing an assistant adapter
+      description: Link to public format documentation or describe a synthetic record. Do not upload real session histories.

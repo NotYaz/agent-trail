@@ -1,0 +1,19 @@
+{
+  "refreshInterval": 15,
+  "sources": [
+    {
+      "id": "claude-primary",
+      "name": "Claude · Main",
+      "configDirectory": "~/.claude",
+      "userDataDirectory": "~/Library/Application Support/Claude",
+      "bundleIdentifier": "com.anthropic.claudefordesktop"
+    },
+    {
+      "id": "claude-second",
+      "name": "Claude · Second",
+      "configDirectory": "~/.claude-second",
+      "userDataDirectory": "~/Library/Application Support/Claude-Second",
+      "bundleIdentifier": "com.anthropic.claudefordesktop"
+    }
+  ]
+}

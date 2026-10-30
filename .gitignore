@@ -1,0 +1,19 @@
+.build/
+.swiftpm/
+.DS_Store
+dist/
+*.dSYM/
+*.xcuserstate
+xcuserdata/
+*.xcresult/
+
+# Keep local activity, profile configuration, and release secrets out of Git.
+activity-cache.json
+profiles.json
+support.json
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.mobileprovision
