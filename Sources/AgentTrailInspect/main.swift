@@ -36,6 +36,11 @@ let records: [[String: Any]] = result.projects.map { project in
         "latestActivity": formatter.string(from: project.latestActivity.latestActivity),
         "latestActivitySource": project.latestActivity.sourceID
     ]
+    item["recordedEditCount"] = project.recordedEditCount
+    item["sessionCount"] = project.sessionCount
+    item["dailyHistoryUTC"] = project.history.map {
+        ["day": formatter.string(from: $0.day), "edits": $0.editCount, "sessions": $0.sessionCount] as [String: Any]
+    }
     if let edit = project.latestEdit, let date = edit.latestEdit {
         item["latestRecordedEdit"] = formatter.string(from: date)
         item["latestEditSource"] = edit.sourceID

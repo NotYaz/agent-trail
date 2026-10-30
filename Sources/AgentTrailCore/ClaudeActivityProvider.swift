@@ -17,8 +17,13 @@ public final class ClaudeActivityProvider: ActivityProvider {
         plainISODate.formatOptions = [.withInternetDateTime]
         if let cacheURL, FileManager.default.fileExists(atPath: cacheURL.path) {
             do {
-                let saved = try JSONDecoder().decode(SavedCache.self, from: Data(contentsOf: cacheURL))
-                if saved.version == 1 { cache = saved.transcripts }
+                let data = try Data(contentsOf: cacheURL)
+                let header = try JSONDecoder().decode(CacheHeader.self, from: data)
+                if header.version == 2 {
+                    cache = try JSONDecoder().decode(SavedCache.self, from: data).transcripts
+                } else {
+                    cacheLoadNotice = "Local activity history is being rebuilt once to include daily edit statistics."
+                }
             } catch {
                 cacheLoadNotice = "The local activity cache could not be read; change history will be rebuilt."
             }
@@ -40,18 +45,22 @@ public final class ClaudeActivityProvider: ActivityProvider {
         var notices: [String] = cacheLoadNotice.map { [$0] } ?? []
         cacheLoadNotice = nil
         let tasks = discoverTranscripts(metadata: metadata, notices: &notices)
-        var edits: [String: ProjectActivity] = [:]
+        var edits: [String: ProjectEdits] = [:]
         var lastProgress = Date.distantPast
         for (index, task) in tasks.enumerated() {
             do {
                 let entry = try readTranscript(task)
-                if let edit = entry.latestEdit {
+                if !entry.confirmedEdits.isEmpty {
                     let key = task.session.source.id + "\u{0}" + task.session.projectPath
-                    if edits[key]?.latestEdit ?? .distantPast < edit.date {
-                        edits[key] = ProjectActivity(sourceID: task.session.source.id,
-                            projectPath: task.session.projectPath, latestActivity: edit.date,
-                            latestEdit: edit.date, sessionCount: 0, workspacePath: edit.workspace,
-                            latestEditWorkspacePath: edit.workspace)
+                    if edits[key] == nil {
+                        edits[key] = ProjectEdits(sourceID: task.session.source.id, projectPath: task.session.projectPath)
+                    }
+                    for (id, edit) in entry.confirmedEdits {
+                        if let existing = edits[key]?.byToolID[id] {
+                            edits[key]?.byToolID[id] = firstOccurrence(existing, edit)
+                        } else {
+                            edits[key]?.byToolID[id] = edit
+                        }
                     }
                 }
                 if entry.malformedLines > 0 {
@@ -75,7 +84,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
         if let cacheURL {
             do {
                 try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(SavedCache(version: 1, transcripts: cache))
+                let data = try JSONEncoder().encode(SavedCache(version: 2, transcripts: cache))
                 try data.write(to: cacheURL, options: .atomic)
                 try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
             } catch {
@@ -93,6 +102,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
         let workspacePath: String
         let checkoutRoots: [String]
         let latestActivity: Date
+        let createdAt: Date
     }
 
     private struct Metadata {
@@ -147,10 +157,12 @@ public final class ClaudeActivityProvider: ActivityProvider {
                     var roots = [project, workspace]
                     roots += (record.gitAnchors ?? []).compactMap { absolutePath($0.gitRoot) }
                     if let worktree = absolutePath(record.worktreePath) { roots.append(worktree) }
+                    let creationMilliseconds = record.createdAt.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? milliseconds
                     result.sessions.append(DesktopSession(source: source, id: id, cliIDs: cliIDs,
                         projectPath: project, workspacePath: workspace,
                         checkoutRoots: Array(Set(roots)).sorted { $0.count > $1.count },
-                        latestActivity: Date(timeIntervalSince1970: milliseconds / 1000)))
+                        latestActivity: Date(timeIntervalSince1970: milliseconds / 1000),
+                        createdAt: Date(timeIntervalSince1970: creationMilliseconds / 1000)))
                 } catch { unreadable += 1 }
             }
             if unreadable > 0 { result.notices.append("\(source.name): \(unreadable) coding-session metadata file(s) could not be read.") }
@@ -160,11 +172,26 @@ public final class ClaudeActivityProvider: ActivityProvider {
         return result
     }
 
-    private func result(metadata: Metadata, edits: [String: ProjectActivity], extraNotices: [String]) -> ScanResult {
+    private struct ProjectEdits {
+        let sourceID: String
+        let projectPath: String
+        var byToolID: [String: ConfirmedEdit] = [:]
+    }
+
+    private func result(metadata: Metadata, edits: [String: ProjectEdits], extraNotices: [String]) -> ScanResult {
         let activity = metadata.sessions.map {
             ProjectActivity(sourceID: $0.source.id, projectPath: $0.projectPath,
-                latestActivity: $0.latestActivity, workspacePath: $0.workspacePath)
-        } + Array(edits.values)
+                latestActivity: $0.latestActivity, workspacePath: $0.workspacePath,
+                history: [ActivityDay(day: $0.createdAt, sessionCount: 1)])
+        } + edits.values.compactMap { project -> ProjectActivity? in
+            guard let latest = project.byToolID.values.max(by: { $0.date < $1.date }) else { return nil }
+            let days = Dictionary(grouping: project.byToolID.values, by: { ActivityDay.start(of: $0.date) })
+                .map { ActivityDay(day: $0.key, editCount: $0.value.count) }
+            return ProjectActivity(sourceID: project.sourceID, projectPath: project.projectPath,
+                latestActivity: latest.date, latestEdit: latest.date, sessionCount: 0,
+                workspacePath: latest.workspace, latestEditWorkspacePath: latest.workspace,
+                history: days)
+        }
         return ScanResult(projects: ProjectSummary.merge(activity),
             notices: Array(Set(metadata.notices + extraNotices)).sorted())
     }
@@ -229,6 +256,10 @@ public final class ClaudeActivityProvider: ActivityProvider {
         let date: Date
         let workspace: String
     }
+    private func firstOccurrence(_ first: ConfirmedEdit, _ second: ConfirmedEdit) -> ConfirmedEdit {
+        if first.date != second.date { return first.date < second.date ? first : second }
+        return first.workspace <= second.workspace ? first : second
+    }
     private struct TranscriptCache: Codable {
         var identity: String
         var size: UInt64 = 0
@@ -236,7 +267,9 @@ public final class ClaudeActivityProvider: ActivityProvider {
         var offset: UInt64 = 0
         var checkpoint: UInt64 = 0
         var pending: [String: PendingTool] = [:]
-        var latestEdit: ConfirmedEdit?
+        // Tool IDs make replays idempotent. The second deduplication across files
+        // prevents copied root/subagent records inflating a project's statistics.
+        var confirmedEdits: [String: ConfirmedEdit] = [:]
         var malformedLines: Int = 0
         var oversizedLines: Int = 0
         var droppingOversizedLine: Bool = false
@@ -245,6 +278,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
         let version: Int
         let transcripts: [String: TranscriptCache]
     }
+    private struct CacheHeader: Decodable { let version: Int }
 
     private func readTranscript(_ task: TranscriptTask) throws -> TranscriptCache {
         let attributes = try files.attributesOfItem(atPath: task.url.path)
@@ -345,7 +379,8 @@ public final class ClaudeActivityProvider: ActivityProvider {
                       let date = isoDate.date(from: timestamp) ?? plainISODate.date(from: timestamp),
                       let workspace = editWorkspace(path: details?["filePath"] as? String ?? pending.path,
                           cwd: event["cwd"] as? String, session: task.session) else { continue }
-                if entry.latestEdit?.date ?? .distantPast < date { entry.latestEdit = ConfirmedEdit(date: date, workspace: workspace) }
+                let edit = ConfirmedEdit(date: date, workspace: workspace)
+                entry.confirmedEdits[id] = entry.confirmedEdits[id].map { firstOccurrence($0, edit) } ?? edit
             }
         }
     }

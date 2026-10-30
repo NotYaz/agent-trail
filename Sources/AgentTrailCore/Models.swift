@@ -23,6 +23,33 @@ public struct AgentSource: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+/// Calendar-day counts in UTC, with sessions counted on their creation day.
+public struct ActivityDay: Identifiable, Codable, Equatable, Sendable {
+    public var id: Date { day }
+    public var day: Date
+    public var editCount: Int
+    public var sessionCount: Int
+
+    public init(day: Date, editCount: Int = 0, sessionCount: Int = 0) {
+        self.day = Self.start(of: day)
+        self.editCount = editCount
+        self.sessionCount = sessionCount
+    }
+
+    public static func start(of date: Date) -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar.startOfDay(for: date)
+    }
+
+    public static func merge(_ records: [ActivityDay]) -> [ActivityDay] {
+        Dictionary(grouping: records, by: { start(of: $0.day) }).map { day, values in
+            ActivityDay(day: day, editCount: values.reduce(0) { $0 + $1.editCount },
+                        sessionCount: values.reduce(0) { $0 + $1.sessionCount })
+        }.sorted { $0.day < $1.day }
+    }
+}
+
 public struct ProjectActivity: Sendable {
     public var sourceID: String
     public var projectPath: String
@@ -31,8 +58,9 @@ public struct ProjectActivity: Sendable {
     public var sessionCount: Int
     public var workspacePath: String?
     public var latestEditWorkspacePath: String?
+    public var history: [ActivityDay]
 
-    public init(sourceID: String, projectPath: String, latestActivity: Date, latestEdit: Date? = nil, sessionCount: Int = 1, workspacePath: String? = nil, latestEditWorkspacePath: String? = nil) {
+    public init(sourceID: String, projectPath: String, latestActivity: Date, latestEdit: Date? = nil, sessionCount: Int = 1, workspacePath: String? = nil, latestEditWorkspacePath: String? = nil, history: [ActivityDay] = []) {
         self.sourceID = sourceID
         self.projectPath = projectPath
         self.latestActivity = latestActivity
@@ -40,6 +68,7 @@ public struct ProjectActivity: Sendable {
         self.sessionCount = sessionCount
         self.workspacePath = workspacePath
         self.latestEditWorkspacePath = latestEditWorkspacePath
+        self.history = history
     }
 }
 
@@ -54,6 +83,9 @@ public struct ProjectSummary: Identifiable, Sendable {
         activities.filter { $0.latestEdit != nil }.max { $0.latestEdit! < $1.latestEdit! }
     }
     public var sortDate: Date { latestActivity.latestActivity }
+    public var history: [ActivityDay] { ActivityDay.merge(activities.flatMap(\.history)) }
+    public var recordedEditCount: Int { history.reduce(0) { $0 + $1.editCount } }
+    public var sessionCount: Int { activities.reduce(0) { $0 + $1.sessionCount } }
 
     public static func merge(_ activities: [ProjectActivity]) -> [ProjectSummary] {
         let byPath = Dictionary(grouping: activities) { canonicalPath($0.projectPath) }
@@ -67,7 +99,8 @@ public struct ProjectSummary: Identifiable, Sendable {
                     latestEdit: records.compactMap(\.latestEdit).max(),
                     sessionCount: records.reduce(0) { $0 + $1.sessionCount },
                     workspacePath: lastActive.workspacePath,
-                    latestEditWorkspacePath: lastEdited?.latestEditWorkspacePath ?? lastEdited?.workspacePath)
+                    latestEditWorkspacePath: lastEdited?.latestEditWorkspacePath ?? lastEdited?.workspacePath,
+                    history: ActivityDay.merge(records.flatMap(\.history)))
             }.sorted { $0.latestActivity > $1.latestActivity }
             return ProjectSummary(path: path, activities: merged)
         }.sorted {

@@ -6,10 +6,13 @@ Initial alpha prepared for public release.
 
 - Native menu-bar panel with search, shared-project filtering, worktree context, and quick focus for identified running Claude instances.
 - Separate indicators for successful recorded `Edit`/`Write` operations and general saved activity.
-- Incremental local indexing with a metadata-only cache and profile notices.
+- Growth window with an activity tree, daily edit chart, session totals, and project plus 7/30/90-day or all-history filters.
+- PNG activity portraits saved locally, with project/profile names hidden by default and no folder paths or automatic posting.
+- Daily counts per agent profile: confirmed edits by UTC day and saved sessions by UTC creation day.
+- Incremental local indexing with a version 2 metadata cache, replay/cross-file tool-result deduplication, and profile notices. Older caches rebuild once for daily statistics.
 - Configurable Claude profiles and refresh interval.
-- Demo mode with synthetic projects for safe previews.
+- Demo mode with synthetic projects, plus direct Growth/share-card image rendering for previews.
 - MIT license, contribution and security guidance, and macOS test/build workflows.
 - Architecture-specific and universal2 bundle packaging with ZIP checksums and ad-hoc signatures.
 
-Known limits: Claude Desktop only; shell and external edits are not attributed; focus does not navigate to an exact project or conversation. No global hotkey, launch-at-login item, Developer ID signing, or notarization yet. Claude's private local formats can change.
+Known limits: Claude Desktop only; shell and external edits are not attributed; focus does not navigate to an exact project or conversation. The activity tree is a visual summary, not Git ancestry or a measure of lines of code, code quality, or productivity. No global hotkey, launch-at-login item, Developer ID signing, or notarization yet. Claude's private local formats can change.

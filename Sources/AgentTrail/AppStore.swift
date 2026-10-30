@@ -16,6 +16,7 @@ final class AppStore: ObservableObject {
     let demoMode: Bool
     let configurationURL = ProfileConfiguration.defaultURL
     var showProfiles: (() -> Void)?
+    var showActivity: (() -> Void)?
 
     private let indexer = LocalIndexer()
     private var timer: Timer?

@@ -2,15 +2,15 @@
 
 **Which agent touched this project last?**
 
-A small native macOS menu-bar app that brings your coding projects into one place. See the latest recorded edit, find projects shared across profiles, and jump back to the right running app.
+A small native macOS menu-bar app that brings your coding projects into one place. See the latest recorded edit, find projects shared across profiles, and jump back to the right running app. Open Growth to explore an activity tree and daily statistics, or export a portrait of the work.
 
 **Public alpha · macOS 14+ · Claude Desktop profiles · MIT license**
 
 Agent Trail currently supports multiple Claude Desktop profiles. Codex and other assistants are on the roadmap; their activity is not indexed yet.
 
-<img src="docs/assets/demo.png" width="470" alt="Agent Trail showing synthetic shared projects, recorded edits, and buttons for each Claude profile">
+<img src="docs/assets/growth.png" width="920" alt="Agent Trail Growth view with an activity tree and daily recorded-edit statistics from synthetic sample projects">
 
-*Demo mode. All project names and paths shown are synthetic.*
+*Sample data. Project names, profiles, paths, and counts in these previews are synthetic.*
 
 ## Why it exists
 
@@ -22,7 +22,11 @@ Agent Trail shows each project once, with the profile that made the **last recor
 - Filter to projects shared across profiles.
 - See worktree context alongside recorded edits.
 - Focus an identified running Claude instance with one click.
-- Keep everything local, with no account or analytics.
+- Explore an activity tree and daily edit/session counts by project and agent profile.
+- Export a PNG activity portrait with project and profile names hidden by default.
+- Keep everything local, with no account or telemetry.
+
+<img src="docs/assets/demo.png" width="470" alt="Agent Trail menu-bar panel showing synthetic shared projects and quick-focus buttons">
 
 ## Try it
 
@@ -88,11 +92,31 @@ Instance matching uses the bundle identity, process arguments, and `CLAUDE_CONFI
 
 Claude's on-disk formats are private implementation details and can change without notice. Missing or unreadable data appears as a profile notice. This alpha has not been tested against every Claude version or installation layout.
 
+## Explore project activity
+
+Click **Growth** in the menu-bar panel to open the native **Project growth** window. Choose a project or **All projects**, then filter to **7D**, **30D**, **90D**, or **All**. The activity tree, daily edit chart, and session totals show how the available records accumulate across agent profiles. Explore a tree node to inspect its recorded day.
+
+- **Recorded edits** count confirmed successful `Edit` and `Write` operations, grouped by UTC calendar day and agent profile. One tool operation counts as one edit, regardless of its size.
+- **Saved sessions** are counted on their creation day in UTC. They are not the number of sessions active on each day.
+- Replayed tool results and repeated records across transcript files are deduplicated within each project's profile history.
+
+The tree connects activity over time as a visual summary. It does not show Git ancestry, dependencies between agents, or lines of code. Edit/session counts do not measure code quality, project size, or productivity. Shell and external changes remain outside these statistics, and missing logs mean the history may be incomplete. Day boundaries use UTC even when your Mac uses another time zone.
+
+## Export an activity portrait
+
+From Growth, choose **Share**, then **Export PNG** in the save dialog to save the card to a location on your Mac. The card uses the selected projects and time period. The Share action hides project and profile names, using labels such as “My project” and “Agent 1.” Folder paths are never included in the card. Activity totals and dates remain visible.
+
+<img src="docs/assets/share-card.png" width="700" alt="Sample exported Agent Trail activity portrait with anonymized agent names and synthetic activity counts">
+
+*Sample portrait. Export saves a local PNG; it does not post or upload anything.*
+
+Review a card before sharing it. Hiding names does not hide dates, counts, or patterns of activity.
+
 ## Privacy
 
 Indexing happens on your Mac. Agent Trail reads local desktop session indexes and associated JSONL logs, including subagent logs. It does not send those records anywhere, inject code, install hooks, or edit Claude's data. There are no telemetry, cloud accounts, or automatic update checks.
 
-The incremental cache at `~/Library/Application Support/AgentTrail/activity-cache.json` stores file positions, tool IDs, project/workspace paths, and dates. It does not store prompts, commands, patches, or conversation text. Paths can still be sensitive; keep caches and diagnostic output private. With Agent Trail closed, deleting this cache causes a fresh index on the next launch.
+The version 2 incremental cache at `~/Library/Application Support/AgentTrail/activity-cache.json` stores file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The cache does not store prompts, commands, patches, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Older caches are rebuilt once to populate daily statistics. With Agent Trail closed, deleting the cache causes a fresh index on the next launch.
 
 External links in the app open in your browser only when selected. See [security and reporting](SECURITY.md) before sharing an issue or diagnostic output.
 
@@ -103,6 +127,13 @@ swift run AgentTrail --demo
 ```
 
 Demo mode uses synthetic projects and does not read Claude histories, your profile configuration, or the activity cache. It is suitable for screenshots and walkthroughs. Quit the demo from its menu when finished.
+
+Render sample images directly to files without reading your assistant history:
+
+```sh
+swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
+swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
+```
 
 ## Development
 

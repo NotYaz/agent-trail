@@ -22,6 +22,7 @@ final class ClaudeActivityProviderTests: XCTestCase {
         XCTAssertNil(metadata.projects[0].latestEdit)
         let result = provider.scan(sources: [fixture.source])
         XCTAssertEqual(result.projects[0].latestEdit?.latestEdit, fixture.date(10))
+        XCTAssertEqual(result.projects[0].recordedEditCount, 1)
         XCTAssertEqual(result.projects[0].activities[0].sessionCount, 1)
         XCTAssertEqual(result.projects[0].latestEdit?.latestEditWorkspacePath, fixture.project.path)
     }
@@ -40,6 +41,90 @@ final class ClaudeActivityProviderTests: XCTestCase {
             to: fixture.projectLogs.appendingPathComponent("terminal-only.jsonl"))
         let result = ClaudeActivityProvider().scan(sources: [fixture.source])
         XCTAssertEqual(result.projects[0].latestEdit?.latestEdit, fixture.date(20))
+        XCTAssertEqual(result.projects[0].recordedEditCount, 1)
+    }
+
+    func testReplayAndCopiedLogsCountEachToolOnceAcrossCacheAndAppend() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        let pair = [fixture.request("replayed", path: path), fixture.response("replayed", seconds: 10, path: path)]
+        try fixture.write(pair + pair + [fixture.request("unique", name: "Write", path: path),
+            fixture.response("unique", seconds: 20, path: path)])
+        try fixture.write(pair + [fixture.request("replayed", path: path),
+            fixture.response("replayed", seconds: 90, path: path)],
+            to: fixture.projectLogs.appendingPathComponent("cli-session/subagents/agent-copy.jsonl"))
+        let provider = ClaudeActivityProvider(cacheURL: fixture.cache)
+        let first = provider.scan(sources: [fixture.source])
+        XCTAssertEqual(first.projects[0].recordedEditCount, 2)
+        XCTAssertEqual(first.projects[0].latestEdit?.latestEdit, fixture.date(20))
+        XCTAssertEqual(provider.scan(sources: [fixture.source]).projects[0].recordedEditCount, 2)
+        try fixture.append(pair)
+        let relaunched = ClaudeActivityProvider(cacheURL: fixture.cache)
+        XCTAssertEqual(relaunched.scan(sources: [fixture.source]).projects[0].recordedEditCount, 2)
+        try fixture.append([fixture.request("appended", path: path), fixture.response("appended", seconds: 30, path: path)])
+        XCTAssertEqual(relaunched.scan(sources: [fixture.source]).projects[0].recordedEditCount, 3)
+        XCTAssertEqual(ClaudeActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source]).projects[0].recordedEditCount, 3)
+    }
+
+    func testUTCHistoryBinsSessionsOnCreationDayAndEditsOnResultDay() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let formatter = ISO8601DateFormatter()
+        let creation = try XCTUnwrap(formatter.date(from: "2026-10-29T23:30:00Z"))
+        let lastActivity = try XCTUnwrap(formatter.date(from: "2026-10-31T03:00:00Z"))
+        var session = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.metadata)) as? [String: Any])
+        session["createdAt"] = creation.timeIntervalSince1970 * 1000
+        session["lastActivityAt"] = lastActivity.timeIntervalSince1970 * 1000
+        let sessionData = try JSONSerialization.data(withJSONObject: session)
+        try sessionData.write(to: fixture.metadata)
+        // A copied metadata file for the same desktop session is still one session.
+        try sessionData.write(to: fixture.metadata.deletingLastPathComponent().appendingPathComponent("local_duplicate.json"))
+        session["sessionId"] = "local_fallback"
+        session["cliSessionId"] = "no-transcript"
+        session.removeValue(forKey: "createdAt")
+        try JSONSerialization.data(withJSONObject: session).write(to: fixture.metadata.deletingLastPathComponent().appendingPathComponent("local_fallback.json"))
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        var beforeMidnight = fixture.response("before", seconds: 1, path: path)
+        beforeMidnight["timestamp"] = "2026-10-30T02:59:00.000+03:00"
+        var afterMidnight = fixture.response("after", seconds: 2, path: path)
+        afterMidnight["timestamp"] = "2026-10-30T00:01:00Z"
+        try fixture.write([fixture.request("before", path: path), beforeMidnight,
+            fixture.request("after", path: path), afterMidnight])
+        let provider = ClaudeActivityProvider()
+        let metadata = provider.metadata(sources: [fixture.source]).projects[0]
+        XCTAssertEqual(metadata.sessionCount, 2)
+        XCTAssertEqual(metadata.recordedEditCount, 0)
+        let project = provider.scan(sources: [fixture.source]).projects[0]
+        XCTAssertEqual(project.sessionCount, 2)
+        XCTAssertEqual(project.recordedEditCount, 2)
+        let expectedDays = try ["2026-10-29T00:00:00Z", "2026-10-30T00:00:00Z", "2026-10-31T00:00:00Z"].map {
+            try XCTUnwrap(formatter.date(from: $0))
+        }
+        XCTAssertEqual(project.history.map(\.day), expectedDays)
+        XCTAssertEqual(project.history.map(\.editCount), [1, 1, 0])
+        XCTAssertEqual(project.history.map(\.sessionCount), [1, 0, 1])
+    }
+
+    func testVersionOneCacheReindexesOnceForTrustworthyCounts() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        try fixture.write([fixture.request("first", path: path), fixture.response("first", seconds: 10, path: path)])
+        try FileManager.default.createDirectory(at: fixture.cache.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Older caches retained only a latest edit, so they cannot supply counts.
+        try JSONSerialization.data(withJSONObject: ["version": 1, "transcripts": [:]]).write(to: fixture.cache)
+        let upgraded = ClaudeActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        XCTAssertEqual(upgraded.projects[0].recordedEditCount, 1)
+        XCTAssertTrue(upgraded.notices.contains { $0.contains("rebuilt once") })
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.cache)) as? [String: Any])
+        XCTAssertEqual(saved["version"] as? Int, 2)
+        let reopened = ClaudeActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        XCTAssertEqual(reopened.projects[0].recordedEditCount, 1)
+        XCTAssertFalse(reopened.notices.contains { $0.contains("rebuilt once") })
     }
 
     func testOriginGroupingRetainsHistoricalAndCurrentCheckoutProvenance() throws {

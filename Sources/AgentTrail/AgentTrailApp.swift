@@ -6,13 +6,15 @@ import AgentTrailCore
 enum AgentTrailApp {
     @MainActor static func main() {
         let application = NSApplication.shared
-        if let index = CommandLine.arguments.firstIndex(of: "--render-demo") {
+        let renderFlags = ["--render-demo", "--render-growth-demo", "--render-share-demo"]
+        if let index = CommandLine.arguments.firstIndex(where: { renderFlags.contains($0) }) {
+            application.setActivationPolicy(.prohibited)
             guard index + 1 < CommandLine.arguments.count else {
-                fputs("Usage: AgentTrail --render-demo OUTPUT.png [--light]\n", stderr)
+                fputs("Usage: AgentTrail --render-demo|--render-growth-demo|--render-share-demo OUTPUT.png [--light]\n", stderr)
                 exit(2)
             }
             do {
-                try renderDemo(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                try renderDemo(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]), kind: CommandLine.arguments[index])
             } catch {
                 fputs("Could not render sample data: \(error.localizedDescription)\n", stderr)
                 exit(1)
@@ -27,10 +29,23 @@ enum AgentTrailApp {
         }
     }
 
-    @MainActor private static func renderDemo(to output: URL) throws {
-        let view = NSHostingView(rootView: AgentTrailPanel(store: AppStore(demoMode: true)))
+    @MainActor private static func renderDemo(to output: URL, kind: String) throws {
+        let store = AppStore(demoMode: true)
+        if kind == "--render-share-demo" {
+            let renderer = ImageRenderer(content: ActivityShareCard(projects: store.projects, sources: store.sources, sampleData: true))
+            renderer.scale = 2
+            renderer.isOpaque = true
+            guard let image = renderer.cgImage,
+                  let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+            try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try png.write(to: output, options: .atomic)
+            return
+        }
+        let growth = kind == "--render-growth-demo"
+        let content = growth ? AnyView(ActivityGardenView(store: store)) : AnyView(AgentTrailPanel(store: store))
+        let view = NSHostingView(rootView: content)
         view.appearance = NSAppearance(named: CommandLine.arguments.contains("--light") ? .aqua : .darkAqua)
-        view.frame = NSRect(x: 0, y: 0, width: 470, height: 640)
+        view.frame = NSRect(x: 0, y: 0, width: growth ? 920 : 470, height: growth ? 720 : 640)
         view.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
@@ -49,12 +64,14 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
     private var popover: NSPopover?
     private var store: AppStore?
     private var settingsWindow: NSWindow?
+    private var activityWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let store = AppStore()
         self.store = store
         store.showProfiles = { [weak self] in self?.showProfileSettings() }
+        store.showActivity = { [weak self] in self?.showActivityGarden() }
 
         let popover = NSPopover()
         popover.behavior = .transient
@@ -117,6 +134,22 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         window.contentViewController = NSHostingController(rootView: ProfileSettingsView(store: store, onClose: { [weak window] in window?.close() }))
         settingsWindow = window
         window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+    }
+
+    private func showActivityGarden() {
+        guard let store else { return }
+        popover?.performClose(nil)
+        let window = activityWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        if activityWindow == nil {
+            window.title = "Agent Trail · Project growth"
+            window.isReleasedWhenClosed = false
+            window.contentViewController = NSHostingController(rootView: ActivityGardenView(store: store))
+            activityWindow = window
+            window.center()
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
     }
@@ -350,6 +383,11 @@ private struct AgentTrailPanel: View {
                 .buttonStyle(.borderless)
                 .disabled(store.isScanning)
                 .help("Read the latest local activity")
+                Button { store.showActivity?() } label: {
+                    Label("Growth", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .buttonStyle(.borderless)
+                .help("Explore project activity across your agents")
                 Spacer(minLength: 4)
                 if let progress = store.scanProgress {
                     Text(progress)
@@ -363,6 +401,8 @@ private struct AgentTrailPanel: View {
                         .help("Last refreshed \(lastScan.formatted(date: .abbreviated, time: .standard))")
                 }
                 Menu {
+                    Button("Project growth…") { store.showActivity?() }
+                    Divider()
                     Button("Profiles…") { store.showProfiles?() }
                         .disabled(store.demoMode)
                     Button("Reload profiles") { store.reloadProfiles() }
