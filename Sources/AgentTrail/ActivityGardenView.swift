@@ -5,16 +5,20 @@ import AgentTrailCore
 struct ActivityGardenView: View {
     @ObservedObject var store: AppStore
     let compact: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let animatesCharts: Bool
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var selectedProject = ""
     @State private var period: GardenPeriod = .month
     @State private var inspection: GardenInspection?
     @State private var chartInspection: GardenChartInspection?
 
-    init(store: AppStore, compact: Bool = false) {
+    init(store: AppStore, compact: Bool = false, animatesCharts: Bool = true) {
         self.store = store
         self.compact = compact
+        self.animatesCharts = animatesCharts
     }
+
+    private var reduceMotion: Bool { accessibilityReduceMotion || !animatesCharts }
 
     private var context: GardenContext {
         GardenContext(projectID: selectedProject, period: period, start: startDate, end: endDate)
@@ -27,7 +31,7 @@ struct ActivityGardenView: View {
         guard let chartInspection, chartInspection.context == context else { return nil }
         return chartInspection.date
     }
-    private var contextAnimation: Animation? { reduceMotion ? nil : .smooth(duration: 0.22) }
+    private var contextAnimation: Animation? { reduceMotion ? nil : .smooth(duration: GardenMotion.duration) }
     private var projectSelection: Binding<String> {
         Binding(get: { selectedProject }, set: { value in
             guard value != selectedProject else { return }
@@ -106,23 +110,29 @@ struct ActivityGardenView: View {
     }
 
     var body: some View {
-        ScrollView {
+        // A departing surface keeps its own immutable records while the next one
+        // reveals, rather than asking Charts to morph unrelated project data.
+        let presentation = GardenPresentation(context: context, rootName: rootName, records: records,
+                                              series: series, axisStride: axisStride)
+        return ScrollView {
             VStack(alignment: .leading, spacing: compact ? 14 : 19) {
                 header
                 metrics
                 ZStack(alignment: .top) {
-                    VStack(spacing: compact ? 14 : 19) {
-                        if records.isEmpty {
-                            emptyGarden
-                        } else {
-                            growthMap
-                            dailyChart
+                    GardenRevealSurface(reduceMotion: reduceMotion) { progress in
+                        VStack(spacing: compact ? 14 : 19) {
+                            if presentation.records.isEmpty {
+                                emptyGarden
+                            } else {
+                                growthMap(presentation, progress: progress)
+                                dailyChart(presentation, progress: progress)
+                            }
                         }
                     }
                     .id(context)
                     .transition(.opacity)
                 }
-                .animation(contextAnimation, value: context)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: context)
                 footer
             }
             .padding(compact ? 18 : 26)
@@ -236,12 +246,17 @@ struct ActivityGardenView: View {
         }
         .padding(.vertical, compact ? 12 : 16)
         .animation(contextAnimation, value: editCount)
+        .animation(contextAnimation, value: sessionCount)
+        .animation(contextAnimation, value: series.count)
         .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.055), lineWidth: 1))
     }
 
-    private var growthMap: some View {
-        let renderedContext = context
+    private func growthMap(_ presentation: GardenPresentation, progress: Double) -> some View {
+        let renderedContext = presentation.context
+        let inspectedDay = inspection.flatMap { value in
+            value.context == renderedContext ? presentation.records.first { $0.id == value.recordID } : nil
+        }
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -253,7 +268,7 @@ struct ActivityGardenView: View {
                 Spacer()
                 if let inspectedDay {
                     VStack(alignment: .trailing, spacing: 4) {
-                        Text("\(GardenFormat.day(inspectedDay.day)) · \(sourceName(inspectedDay.sourceID))")
+                        Text("\(GardenFormat.day(inspectedDay.day)) · \(presentation.sourceName(inspectedDay.sourceID))")
                             .font(.system(size: 10, weight: .medium))
                             .lineLimit(1).truncationMode(.middle)
                         Text("\(inspectedDay.edits) \(inspectedDay.edits == 1 ? "edit" : "edits") · \(inspectedDay.sessions) \(inspectedDay.sessions == 1 ? "session" : "sessions")")
@@ -271,15 +286,16 @@ struct ActivityGardenView: View {
             .padding(.horizontal, compact ? 15 : 20)
             .padding(.top, compact ? 14 : 17)
 
-            GardenMap(rootName: rootName, series: series, start: startDate, end: endDate,
-                      compact: compact, inspectedID: inspectedDay?.id, inspect: { record in
+            GardenMap(rootName: presentation.rootName, series: presentation.series,
+                      start: renderedContext.start, end: renderedContext.end,
+                      compact: compact, progress: progress, inspectedID: inspectedDay?.id, inspect: { record in
                           // A departing graph can still deliver a queued hover event.
                           guard renderedContext == context, records.contains(where: { $0.id == record.id }) else { return }
                           inspection = GardenInspection(context: renderedContext, recordID: record.id)
                       })
-                .frame(height: max(compact ? 150 : 174, CGFloat(series.count) * (compact ? 58 : 65)))
+                .frame(height: max(compact ? 150 : 174, CGFloat(presentation.series.count) * (compact ? 58 : 65)))
                 .padding(.horizontal, compact ? 8 : 14)
-                .transaction { $0.animation = nil }
+                .animation(contextAnimation, value: progress)
 
             HStack(spacing: compact ? 10 : 14) {
                 HStack(spacing: 5) {
@@ -304,21 +320,22 @@ struct ActivityGardenView: View {
         .accessibilityLabel("Growth map. Recorded activity grouped by project, profile, and UTC day. Connections do not represent Git ancestry.")
     }
 
-    private var dailyChart: some View {
-        let renderedContext = context
+    private func dailyChart(_ presentation: GardenPresentation, progress: Double) -> some View {
+        let renderedContext = presentation.context
+        let selectedChartDate = chartInspection.flatMap { $0.context == renderedContext ? $0.date : nil }
         return VStack(alignment: .leading, spacing: compact ? 10 : 12) {
             HStack {
                 Text("Daily edits").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 if let date = selectedChartDate {
                     let day = ActivityDay.start(of: date)
-                    let total = records.filter { $0.day == day }.reduce(0) { $0 + $1.edits }
+                    let total = presentation.records.filter { $0.day == day }.reduce(0) { $0 + $1.edits }
                     Text("\(GardenFormat.day(day)) · \(total) recorded \(total == 1 ? "edit" : "edits")")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 } else {
                     ScrollView(.horizontal) {
                         HStack(spacing: 12) {
-                            ForEach(series) { item in
+                            ForEach(presentation.series) { item in
                                 HStack(spacing: 5) {
                                     Circle().fill(item.color).frame(width: 5, height: 5)
                                     Text(item.name).fixedSize()
@@ -332,19 +349,19 @@ struct ActivityGardenView: View {
                     .font(.system(size: compact ? 9 : 10)).foregroundStyle(.secondary)
                 }
             }
-            if editCount == 0 {
+            if presentation.editCount == 0 {
                 Text("No successful Edit/Write operations recorded in this period")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 86)
             } else {
                 Chart {
-                    ForEach(records.filter { $0.edits > 0 }) { record in
+                    ForEach(presentation.records.filter { $0.edits > 0 }) { record in
                         BarMark(x: .value("UTC day", record.day, unit: .day),
-                                y: .value("Recorded edits", record.edits), width: .ratio(0.65))
+                                y: .value("Recorded edits", Double(record.edits) * progress), width: .ratio(0.65))
                             .foregroundStyle(by: .value("Profile", record.sourceID))
                             .cornerRadius(2)
-                            .accessibilityLabel("\(sourceName(record.sourceID)), \(GardenFormat.day(record.day))")
+                            .accessibilityLabel("\(presentation.sourceName(record.sourceID)), \(GardenFormat.day(record.day))")
                             .accessibilityValue("\(record.edits) recorded edits")
                     }
                     if let date = selectedChartDate {
@@ -353,11 +370,12 @@ struct ActivityGardenView: View {
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     }
                 }
-                .chartForegroundStyleScale(domain: series.map(\.id), range: series.map(\.color))
+                .chartForegroundStyleScale(domain: presentation.series.map(\.id), range: presentation.series.map(\.color))
                 .chartLegend(.hidden)
-                .chartXScale(domain: startDate...endDate)
+                .chartXScale(domain: renderedContext.start...renderedContext.end)
+                .chartYScale(domain: 0...presentation.chartMaximum)
                 .chartXAxis {
-                    AxisMarks(values: .stride(by: .day, count: axisStride)) { value in
+                    AxisMarks(values: .stride(by: .day, count: presentation.axisStride)) { value in
                         AxisValueLabel {
                             if let date = value.as(Date.self) {
                                 Text(GardenFormat.shortDay(date)).foregroundStyle(Color.white.opacity(0.45))
@@ -366,11 +384,12 @@ struct ActivityGardenView: View {
                     }
                 }
                 .chartYAxis {
-                    AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                    AxisMarks(position: .leading, values: presentation.chartAxisValues) { value in
                         AxisGridLine().foregroundStyle(.white.opacity(0.045))
                         AxisValueLabel {
-                            if let count = value.as(Int.self) {
-                                Text(count.formatted()).foregroundStyle(Color.white.opacity(0.35))
+                            if let count = value.as(Double.self) {
+                                Text(count.formatted(.number.precision(.fractionLength(0))))
+                                    .foregroundStyle(Color.white.opacity(0.35))
                             }
                         }
                     }
@@ -380,7 +399,7 @@ struct ActivityGardenView: View {
                 .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
                 .frame(height: compact ? 80 : 90)
                 .id(renderedContext)
-                .transaction { $0.animation = nil }
+                .animation(contextAnimation, value: progress)
             }
         }
         .padding(compact ? 14 : 18)
@@ -451,14 +470,47 @@ struct ActivityGardenView: View {
     }
 }
 
-private struct GardenMap: View {
+/// Each selection owns its reveal state and cancellation task. Departing views
+/// can finish fading without resetting the next selection's progress.
+private struct GardenRevealSurface<Content: View>: View {
+    let reduceMotion: Bool
+    let content: (Double) -> Content
+    @State private var progress = 0.0
+
+    var body: some View {
+        content(reduceMotion ? 1 : progress)
+            .transaction { transaction in
+                if reduceMotion {
+                    transaction.animation = nil
+                    transaction.disablesAnimations = true
+                }
+            }
+            .task(id: reduceMotion) {
+                if reduceMotion { progress = 1; return }
+                guard progress < 1 else { return }
+                // Commit a zero-height first frame with the final, fixed axes.
+                do { try await Task.sleep(for: .milliseconds(24)) }
+                catch { return }
+                guard !Task.isCancelled else { return }
+                withAnimation(.smooth(duration: GardenMotion.duration)) { progress = 1 }
+            }
+    }
+}
+
+private struct GardenMap: View, Animatable {
     let rootName: String
     let series: [GardenSeries]
     let start: Date
     let end: Date
     let compact: Bool
+    var progress: Double
     let inspectedID: String?
     let inspect: (GardenRecord) -> Void
+
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -482,7 +534,9 @@ private struct GardenMap: View {
                                           control2: CGPoint(x: middleX, y: next.y))
                             previous = next
                         }
-                        context.stroke(path, with: .color(item.color.opacity(0.26)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        context.stroke(path.trimmedPath(from: 0, to: max(0, min(1, progress))),
+                                       with: .color(item.color.opacity(0.26)),
+                                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
                     }
                 }
                 .accessibilityHidden(true)
@@ -513,11 +567,13 @@ private struct GardenMap: View {
                     .frame(width: compact ? 100 : 130, alignment: .leading)
                     .position(x: compact ? size.width * 0.32 : 231,
                               y: branchY(index, height: size.height) - (compact ? 27 : 16))
+                    .opacity(0.35 + 0.65 * progress)
                     .help(item.name)
                     ForEach(item.records) { record in
                         let location = point(record, index: index,
                                              maxEdits: max(1, item.records.map(\.edits).max() ?? 1), size: size)
                         let radius = nodeRadius(record)
+                        let nodeReveal = nodeProgress(record)
                         Button { inspect(record) } label: {
                             Circle()
                                 .fill(record.edits > 0 ? item.color : GardenPalette.card)
@@ -525,17 +581,24 @@ private struct GardenMap: View {
                                 .frame(width: radius * 2, height: radius * 2)
                                 .shadow(color: item.color.opacity(inspectedID == record.id ? 0.7 : 0.15), radius: inspectedID == record.id ? 8 : 4)
                                 .overlay(Circle().stroke(.white.opacity(inspectedID == record.id ? 0.8 : 0), lineWidth: 1).padding(-3))
+                                .scaleEffect(0.45 + 0.55 * nodeReveal)
+                                .opacity(nodeReveal)
                                 .frame(width: max(compact ? 12 : 20, radius * 2 + 5), height: max(compact ? 12 : 20, radius * 2 + 5))
                                 .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
                         .position(location)
+                        .allowsHitTesting(nodeReveal > 0.65)
+                        .accessibilityHidden(nodeReveal < 0.99)
                         .onHover { inside in if inside { inspect(record) } }
                         .help("\(GardenFormat.day(record.day)) UTC · \(item.name)\n\(record.edits) recorded edits · \(record.sessions) sessions")
                         .accessibilityLabel("\(item.name), \(GardenFormat.day(record.day)), \(record.edits) recorded edits and \(record.sessions) sessions")
                     }
                 }
             }
+            // The one animatable progress value drives drawing and node reveal;
+            // unrelated geometry never receives an implicit morph animation.
+            .transaction { $0.animation = nil }
         }
     }
 
@@ -555,6 +618,11 @@ private struct GardenMap: View {
     private func nodeRadius(_ record: GardenRecord) -> CGFloat {
         let radius = record.edits == 0 ? 3 : min(8, 2.9 + CGFloat(sqrt(Double(record.edits))) * 0.48)
         return radius * (compact ? 0.72 : 1)
+    }
+    private func nodeProgress(_ record: GardenRecord) -> Double {
+        let fraction = max(0, min(1, record.day.addingTimeInterval(43_200).timeIntervalSince(start)
+                                 / max(86_400, end.timeIntervalSince(start))))
+        return max(0, min(1, (progress - (0.28 + fraction * 0.5)) / 0.2))
     }
 }
 
@@ -596,6 +664,29 @@ private struct GardenContext: Hashable {
     let period: GardenPeriod
     let start: Date
     let end: Date
+}
+private struct GardenPresentation {
+    let context: GardenContext
+    let rootName: String
+    let records: [GardenRecord]
+    let series: [GardenSeries]
+    let axisStride: Int
+    var editCount: Int { records.reduce(0) { $0 + $1.edits } }
+    var chartMaximum: Double {
+        let dailyTotals = Dictionary(grouping: records, by: \.day).values.map { $0.reduce(0) { $0 + $1.edits } }
+        return Double(max(1, dailyTotals.max() ?? 1)) * 1.12
+    }
+    var chartAxisValues: [Double] {
+        let roughStep = max(1, chartMaximum / 3)
+        let power = pow(10, floor(log10(roughStep)))
+        let normalized = roughStep / power
+        let step = (normalized >= 5 ? 5.0 : normalized >= 2 ? 2.0 : 1.0) * power
+        return Array(stride(from: 0.0, through: chartMaximum, by: step))
+    }
+    func sourceName(_ id: String) -> String { series.first { $0.id == id }?.name ?? id }
+}
+private enum GardenMotion {
+    static let duration = 0.42
 }
 private struct GardenInspection {
     let context: GardenContext

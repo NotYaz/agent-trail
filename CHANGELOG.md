@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0-alpha.3 — 2026-10-30
+
+- Combined project history and live session state in the Projects tab. Cards show working/idle/unknown counts in total and by profile, with expandable workspace and last-report details.
+- Projects with reported working sessions sort first; the Working now filter can combine with search and Shared only.
+- Historical projects without live reports remain distinct from idle projects. Live-only projects appear without fabricated edit/session history.
+- Projects and Growth are now the two tabs in the same 600 × 680 panel. The former Live preview command remains an alias for the merged Projects view.
+- Project/period changes draw Growth branches outward, reveal activity nodes, and grow bars from zero using the actual data scale. Totals stay synchronized with the selection; Reduce Motion disables the growth animation.
+- Updated synthetic Projects/Growth previews and removed the separate Live preview image.
+
+Live polling and process verification are unchanged: local checks every 3 seconds, explicit Claude status reports, verified process identity, and the 90-second fallback for unverifiable starts. Claude Desktop remains the only supported assistant, and donations remain unconfigured.
+
 ## 0.1.0-alpha.2 — 2026-10-30
 
 - Projects, Live, and Growth now share one 600 × 680 menu-bar panel.

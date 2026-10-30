@@ -16,7 +16,9 @@ Local paths, profile names, tool IDs, and timestamps can reveal private informat
 
 Working/Idle are explicit reports from Claude, not proof of actual file activity or completion. Claude writes reports on status changes rather than a guaranteed heartbeat. A recognized report may remain valid for the same verified running process despite its age. Without verified process-start identity, the fallback requires a report no older than 90 seconds. Unsupported flags, implausibly future-dated reports, and stale fallback reports are Unknown. Report age stays visible to the user; CPU usage, file modification times, and saved history do not establish live status.
 
-Live rows can show private project/workspace paths, profile names, process IDs, and report times. Use sample mode for public images; do not publish real registry records or unredacted Live screenshots.
+Project cards combine history and reported live sessions without treating one as evidence for the other. A missing live report is not Idle. A project present only in live reports must not gain invented edit/session history. Mixed working/idle/unknown counts remain separate, including by profile.
+
+Project cards and expanded live details can show private project/workspace paths, profile names, process IDs, and report times. Use sample mode for public images; do not publish real registry records or unredacted project screenshots.
 
 ## Activity images
 
@@ -24,7 +26,7 @@ Growth visualizes available local records; the tree is not Git ancestry and its 
 
 PNG export saves only to a user-selected local location and never posts or uploads a card. The Share action hides project/profile names and excludes folder paths. Totals, dates, and activity patterns remain visible. Review an image before sharing it.
 
-`--demo`, `--render-growth-demo`, `--render-live-demo`, and `--render-share-demo` use synthetic sample data rather than reading local assistant history or process-registry records. Use them for public screenshots. Screenshots of the ordinary app may contain private project names and paths.
+`--demo`, `--render-demo`, `--render-growth-demo`, and `--render-share-demo` use synthetic sample data rather than reading local assistant history or process-registry records. The older `--render-live-demo` flag is an alias for the combined Projects preview. Use these modes for public screenshots. Screenshots of the ordinary app may contain private project names and paths.
 
 ## Input and distribution
 

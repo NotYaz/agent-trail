@@ -56,8 +56,9 @@ enum AgentTrailApp {
             try png.write(to: output, options: .atomic)
             return
         }
-        store.panelSection = kind == "--render-growth-demo" ? .growth : kind == "--render-live-demo" ? .live : .projects
-        let view = NSHostingView(rootView: AgentTrailShell(store: store))
+        // Keep the former Live render flag as an alias for the combined view.
+        store.panelSection = kind == "--render-growth-demo" ? .growth : .projects
+        let view = NSHostingView(rootView: AgentTrailShell(store: store, animatesCharts: false))
         view.appearance = NSAppearance(named: CommandLine.arguments.contains("--light") ? .aqua : .darkAqua)
         view.frame = NSRect(x: 0, y: 0, width: 600, height: 680)
         view.layoutSubtreeIfNeeded()
@@ -161,6 +162,7 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
 /// All primary views share one stable floating panel and retain their selection.
 private struct AgentTrailShell: View {
     @ObservedObject var store: AppStore
+    var animatesCharts = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var navigation
 
@@ -169,9 +171,8 @@ private struct AgentTrailShell: View {
             navigationBar
             Divider()
             ZStack {
-                section(.projects) { AgentTrailPanel(store: store) }
-                section(.live) { LiveActivityView(store: store, isActive: store.panelSection == .live) }
-                section(.growth) { ActivityGardenView(store: store, compact: true) }
+                section(.projects) { AgentTrailPanel(store: store, isActive: store.panelSection == .projects) }
+                section(.growth) { ActivityGardenView(store: store, compact: true, animatesCharts: animatesCharts) }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
@@ -181,7 +182,7 @@ private struct AgentTrailShell: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: store.panelSection)
     }
 
-    private var workingCount: Int { store.liveSessions.filter { $0.status == .working }.count }
+    private var workingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.workingCount ?? 0) } }
 
     private var navigationBar: some View {
         HStack(spacing: 5) {
@@ -203,7 +204,7 @@ private struct AgentTrailShell: View {
             HStack(spacing: 6) {
                 Image(systemName: section.symbol)
                 Text(section.rawValue)
-                if section == .live && workingCount > 0 {
+                if section == .projects && workingCount > 0 {
                     Text(String(workingCount))
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .padding(.horizontal, 5).padding(.vertical, 2)
@@ -242,22 +243,27 @@ private struct AgentTrailShell: View {
 
 private struct AgentTrailPanel: View {
     @ObservedObject var store: AppStore
+    var isActive = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var search = ""
     @State private var sharedOnly = false
+    @State private var workingOnly = false
     @State private var showNotices = false
 
-    private var visibleProjects: [ProjectSummary] {
+    private var visibleProjects: [ProjectOverview] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return store.projects.filter { project in
+        return store.projectOverviews.filter { project in
             (!sharedOnly || project.isShared) &&
+            (!workingOnly || (project.live?.workingCount ?? 0) > 0) &&
             (query.isEmpty || project.path.localizedCaseInsensitiveContains(query) ||
-             project.activities.contains { activity in
-                 sourceName(activity.sourceID).localizedCaseInsensitiveContains(query)
-             })
+             project.sourceIDs.contains { sourceName($0).localizedCaseInsensitiveContains(query) } ||
+             (project.live?.sessions.contains { $0.workspacePath.localizedCaseInsensitiveContains(query) } ?? false))
         }
     }
 
-    private var sharedCount: Int { store.projects.filter(\.isShared).count }
+    private var sharedCount: Int { store.projectOverviews.filter(\.isShared).count }
+    private var workingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.workingCount ?? 0) } }
+    private var combinedNotices: [String] { Array(Set(store.notices + store.liveNotices)).sorted() }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -275,7 +281,7 @@ private struct AgentTrailPanel: View {
                     .padding(.bottom, 10)
             }
 
-            if store.projects.isEmpty && store.isScanning {
+            if store.projectOverviews.isEmpty && store.isScanning {
                 loadingState
             } else if visibleProjects.isEmpty {
                 emptyState
@@ -283,7 +289,7 @@ private struct AgentTrailPanel: View {
                 projectList
             }
 
-            if !store.notices.isEmpty { notices }
+            if !combinedNotices.isEmpty { notices }
             footer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -300,7 +306,7 @@ private struct AgentTrailPanel: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Agent Trail")
                         .font(.system(size: 19, weight: .semibold))
-                    Text(store.demoMode ? "Sample data · no local history" : "Your projects, across assistants")
+                    Text(store.demoMode ? "Sample data · no local history" : "\(store.sources.count) profiles · \(store.runningSourceIDs.count) apps open")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -312,17 +318,32 @@ private struct AgentTrailPanel: View {
             }
 
             HStack(spacing: 6) {
-                Text("\(store.projects.count)")
+                Text("\(store.projectOverviews.count)")
                     .fontWeight(.semibold)
                     .foregroundStyle(.primary)
-                Text(store.projects.count == 1 ? "project" : "projects")
+                Text(store.projectOverviews.count == 1 ? "project" : "projects")
                 Text("·").padding(.horizontal, 3)
                 Text("\(sharedCount)")
                     .fontWeight(.semibold)
                     .foregroundStyle(.primary)
                 Text("shared")
                 Spacer()
-                Text(store.demoMode ? "\(store.sources.count) sample profiles" : "\(store.sources.count) profiles · \(store.runningSourceIDs.count) running")
+                if store.lastLiveScan == nil {
+                    Text("Checking live status…")
+                } else if store.liveSessions.isEmpty {
+                    Text("No live sessions reported")
+                } else {
+                    HStack(spacing: 5) {
+                        Circle().fill(workingCount > 0 ? .green : .secondary).frame(width: 5, height: 5)
+                        Text(workingCount.formatted())
+                            .fontWeight(.semibold).monospacedDigit()
+                            .contentTransition(.numericText())
+                        Text("working now")
+                    }
+                    .foregroundStyle(workingCount > 0 ? Color.green : Color.secondary)
+                    .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: workingCount)
+                    .help("Claude's reported busy sessions, checked every 3 seconds. Expand a project's live details for workspace and report age.")
+                }
             }
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
@@ -355,11 +376,19 @@ private struct AgentTrailPanel: View {
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(.primary.opacity(0.07), lineWidth: 1))
 
             HStack {
-                Text("RECENT PROJECTS")
+                Text("PROJECTS")
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(1.1)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Toggle(isOn: $workingOnly) {
+                    Label("Working now", systemImage: "dot.radiowaves.left.and.right")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Show projects with at least one reported working session")
                 Toggle(isOn: $sharedOnly) {
                     Label("Shared only", systemImage: "square.on.square")
                         .font(.system(size: 11, weight: .medium))
@@ -381,12 +410,14 @@ private struct AgentTrailPanel: View {
                     ProjectCard(project: project, sources: store.sources,
                                 runningSourceIDs: store.runningSourceIDs,
                                 isScanning: store.isScanning,
-                                open: store.focus, reveal: { store.reveal(project) },
-                                copyPath: { store.copyPath(project) })
+                                lastLiveScan: store.lastLiveScan, isActive: isActive, demoMode: store.demoMode,
+                                open: store.focus, reveal: { store.reveal(path: project.path) },
+                                copyPath: { store.copyPath(project.path) })
                 }
             }
             .padding(.horizontal, 18)
             .padding(.bottom, 16)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: visibleProjects.map(\.id))
         }
         .scrollIndicators(.automatic)
     }
@@ -410,18 +441,19 @@ private struct AgentTrailPanel: View {
             Image(systemName: search.isEmpty ? "folder.badge.questionmark" : "magnifyingglass")
                 .font(.system(size: 31, weight: .light))
                 .foregroundStyle(.tertiary)
-            Text(search.isEmpty ? (sharedOnly ? "No shared projects yet" : "No projects found yet") : "No matching projects")
+            Text(search.isEmpty ? (workingOnly ? "No working projects reported" : sharedOnly ? "No shared projects yet" : "No projects found yet") : "No matching projects")
                 .font(.system(size: 14, weight: .semibold))
             Text(search.isEmpty
-                 ? (sharedOnly ? "A project appears here when more than one profile works in the same folder."
+                 ? (workingOnly ? "Projects appear here when Claude reports a working session that matches these filters."
+                    : sharedOnly ? "A project appears here when more than one profile works in the same folder."
                     : "Projects appear when Claude saves a local coding session. Check the profile notices below for details.")
                  : "Try a different folder name or assistant profile.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            if sharedOnly || !search.isEmpty {
-                Button("Show all projects") { search = ""; sharedOnly = false }
+            if sharedOnly || workingOnly || !search.isEmpty {
+                Button("Show all projects") { search = ""; sharedOnly = false; workingOnly = false }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .padding(.top, 4)
@@ -435,7 +467,7 @@ private struct AgentTrailPanel: View {
         DisclosureGroup(isExpanded: $showNotices) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 7) {
-                    ForEach(Array(store.notices.enumerated()), id: \.offset) { _, notice in
+                    ForEach(Array(combinedNotices.enumerated()), id: \.offset) { _, notice in
                         Text(notice)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
@@ -447,7 +479,7 @@ private struct AgentTrailPanel: View {
             }
             .frame(maxHeight: 100)
         } label: {
-            Label("\(store.notices.count) profile \(store.notices.count == 1 ? "notice" : "notices")", systemImage: "info.circle")
+            Label("\(combinedNotices.count) profile \(combinedNotices.count == 1 ? "notice" : "notices")", systemImage: "info.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -514,24 +546,29 @@ private struct AgentTrailPanel: View {
 }
 
 private struct ProjectCard: View {
-    let project: ProjectSummary
+    let project: ProjectOverview
     let sources: [AgentSource]
     let runningSourceIDs: Set<String>
     let isScanning: Bool
+    let lastLiveScan: Date?
+    let isActive: Bool
+    let demoMode: Bool
     let open: (AgentSource) -> Void
     let reveal: () -> Void
     let copyPath: () -> Void
 
     private var involvedSources: [AgentSource] {
-        project.activities.compactMap { activity in sources.first { $0.id == activity.sourceID } }
+        sources.filter { project.sourceIDs.contains($0.id) }
     }
 
+    private var latestActivity: ProjectActivity? { project.history?.activities.max { $0.latestActivity < $1.latestActivity } }
     private var activityMatchesEdit: Bool {
-        project.latestEdit?.sourceID == project.latestActivity.sourceID
+        guard let latestActivity else { return false }
+        return project.history?.latestEdit?.sourceID == latestActivity.sourceID
     }
 
     private var activityHelp: String {
-        let activity = project.latestActivity
+        guard let activity = latestActivity else { return "Saved activity has not been indexed yet." }
         let sourceName = sources.first { $0.id == activity.sourceID }?.name ?? activity.sourceID
         return "Latest activity · \(sourceName)\nThe most recent saved session activity, which may not include a file change.\nWorkspace: \(activity.workspacePath ?? project.path)\n\(activity.latestActivity.formatted(date: .abbreviated, time: .standard))"
     }
@@ -579,8 +616,18 @@ private struct ProjectCard: View {
                     .help(project.path)
             }
 
+            if let live = project.live {
+                ProjectLiveStatusView(activity: live, sources: sources, lastScan: lastLiveScan,
+                                      isActive: isActive, demoMode: demoMode, focus: open)
+            } else {
+                Text(lastLiveScan == nil ? "Checking live status…" : "No live sessions reported")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .help("A missing live report does not establish that a project is idle.")
+            }
+
             VStack(alignment: .leading, spacing: 6) {
-                if let edit = project.latestEdit, let date = edit.latestEdit {
+                if let edit = project.history?.latestEdit, let date = edit.latestEdit {
                     activityLine(title: "Last recorded edit", sourceID: edit.sourceID, date: date, prominent: true)
                         .help("Successful recorded Edit/Write tools; shell and external changes are not attributed. \(date.formatted(date: .abbreviated, time: .standard))")
                     if let worktree = edit.latestEditWorkspacePath, worktree != project.path {
@@ -594,14 +641,15 @@ private struct ProjectCard: View {
                 } else {
                     HStack(spacing: 5) {
                         Image(systemName: "pencil.line").font(.system(size: 10))
-                        Text(isScanning ? "Checking edit history…" : "No recorded file edits").font(.system(size: 11))
+                        Text(isScanning ? "Checking edit history…" : project.history == nil ? "Saved history not indexed yet" : "No recorded file edits")
+                            .font(.system(size: 11))
                     }
                     .foregroundStyle(.tertiary)
                     .help("Successful recorded Edit/Write tools; shell and external changes are not attributed.")
                 }
-                if !activityMatchesEdit {
-                    activityLine(title: "Latest activity", sourceID: project.latestActivity.sourceID,
-                                 date: project.latestActivity.latestActivity, prominent: false)
+                if !activityMatchesEdit, let activity = latestActivity {
+                    activityLine(title: "Latest activity", sourceID: activity.sourceID,
+                                 date: activity.latestActivity, prominent: false)
                         .help(activityHelp)
                 }
             }
@@ -633,9 +681,9 @@ private struct ProjectCard: View {
                     .accessibilityLabel("Focus \(source.name) for \(project.name)")
                 }
                 Spacer(minLength: 0)
-                if activityMatchesEdit {
+                if activityMatchesEdit, let activity = latestActivity {
                     TimelineView(.periodic(from: .now, by: 30)) { context in
-                        Text("Seen \(relativeDate(project.latestActivity.latestActivity, now: context.date))")
+                        Text("Seen \(relativeDate(activity.latestActivity, now: context.date))")
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)

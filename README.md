@@ -2,13 +2,13 @@
 
 **Which agent touched this project last?**
 
-A small native macOS menu-bar app that brings your coding projects into one place. See the latest recorded edit, check reported live status, and jump back to the right running app. Projects, Live, and Growth share one compact floating panel.
+A small native macOS menu-bar app that brings your coding projects into one place. See recorded edits and reported live status together on each project, then jump back to the right running app. Projects and Growth share one compact floating panel.
 
-**0.1.0-alpha.2 · Public alpha · macOS 14+ · Claude Desktop profiles · MIT license**
+**0.1.0-alpha.3 · Public alpha · macOS 14+ · Claude Desktop profiles · MIT license**
 
 Agent Trail currently supports multiple Claude Desktop profiles. Codex and Grok adapters are not implemented; other assistants remain on the roadmap.
 
-<img src="docs/assets/growth.png" width="600" alt="Agent Trail floating panel on the Growth tab, with an activity tree and daily recorded-edit statistics from synthetic sample projects">
+<img src="docs/assets/demo.png" width="600" alt="Agent Trail Projects tab showing synthetic projects with live session counts, recorded edits, and quick-focus buttons">
 
 *Sample data. Project names, profiles, paths, and counts in these previews are synthetic.*
 
@@ -16,18 +16,19 @@ Agent Trail currently supports multiple Claude Desktop profiles. Codex and Grok 
 
 Two assistant instances. The same project open in both. Different worktrees, conversations, and changes. Returning to work should not begin with guessing which window has the latest context.
 
-Agent Trail shows each project once, with the profile that made the **last recorded edit** and the profile with the **latest saved activity**. A shared project stays connected to its original folder even when work happens in a separate Claude worktree.
+Agent Trail shows each project once, bringing its reported live sessions together with the **last recorded edit** and **latest saved activity** where history is available. A shared project stays connected to its original folder even when work happens in a separate Claude worktree.
 
 - Search by project path or profile name.
 - Filter to projects shared across profiles.
 - See worktree context alongside recorded edits.
 - Focus an identified running Claude instance with one click.
-- Check Claude's reported Working, Idle, or Unknown status in Live.
+- See live Working, Idle, and Unknown session counts inside each project card.
+- Working projects sort first; **Working now** filters to those projects.
 - Explore an activity tree and daily edit/session counts by project and agent profile.
 - Export a PNG activity portrait with project and profile names hidden by default.
 - Keep everything local, with no account or telemetry.
 
-<img src="docs/assets/demo.png" width="600" alt="Agent Trail floating panel on the Projects tab, showing synthetic shared projects and quick-focus buttons">
+<img src="docs/assets/growth.png" width="600" alt="Agent Trail Growth tab showing an activity tree and daily recorded-edit chart from synthetic sample projects">
 
 ## Try it
 
@@ -39,7 +40,7 @@ swift test
 open "dist/Agent Trail.app"
 ```
 
-Run these commands from the repository folder. The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects**, **Live**, and **Growth** inside the same 600 × 680 panel. Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; Live checks its separate local status records every 3 seconds.
+Run these commands from the repository folder. The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects** and **Growth** inside the same 600 × 680 panel. Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; live status checks run separately every 3 seconds.
 
 Routine refreshes keep the last complete history visible while the next scan finishes. Tab changes and updates use gentle transitions that respect macOS Reduce Motion.
 
@@ -95,11 +96,13 @@ Instance matching uses the bundle identity, process arguments, and `CLAUDE_CONFI
 
 Claude's on-disk formats are private implementation details and can change without notice. Missing or unreadable data appears as a profile notice. This alpha has not been tested against every Claude version or installation layout.
 
-## Check reported live status
+## Check live status on a project
 
-Choose **Live** to see coding sessions matched to your configured Claude Desktop profiles, grouped by profile and project. Rows include the actual workspace, worktree context, and the age of Claude's last status report. Terminal-only and unmatched sessions are omitted.
+The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with reported working sessions sort first. Enable **Working now** to filter to those projects; it can be combined with search and **Shared only**.
 
-<img src="docs/assets/live.png" width="600" alt="Agent Trail Live tab showing synthetic Claude profiles with reported Working and Idle sessions">
+Expand a card's live details with the chevron to see each session's actual workspace, worktree context, and last-report age. The sessions are matched to your configured Claude Desktop profiles; terminal-only and unmatched sessions are omitted.
+
+A project can have both working and idle sessions, so the card keeps separate counts instead of hiding them behind one state. **No live sessions reported** does not mean idle. Projects found only through live reports still appear, without inventing saved sessions or edit history for them.
 
 | Status | Meaning |
 | --- | --- |
@@ -109,11 +112,13 @@ Choose **Live** to see coding sessions matched to your configured Claude Desktop
 
 Claude writes these registry reports when status changes, rather than sending a regular heartbeat. A busy or idle report can remain valid while the same verified process is alive, even when the report is old. Agent Trail shows that report's age. If the process start cannot be verified, the fallback accepts only reports from the last 90 seconds; older reports become Unknown. Unrecognized or implausibly future-dated reports are also Unknown. Dead processes and reused process IDs are omitted.
 
-**Working means “Claude reported busy.”** It does not claim that a file is being written or that work has succeeded. Recent history, file modification times, and CPU usage do not determine live status. An empty Live tab means no matching sessions were reported, not that every assistant has stopped.
+**Working means “Claude reported busy.”** It does not claim that a file is being written or that work has succeeded. Recent history, file modification times, and CPU usage do not determine live status. Missing live reports do not establish that every assistant has stopped.
 
 ## Explore project activity
 
 Choose the **Growth** tab in the floating panel. Select a project or **All projects**, then filter to **7D**, **30D**, **90D**, or **All**. The activity tree, daily edit chart, and session totals show how the available records accumulate across agent profiles. Explore a tree node to inspect its recorded day. Changing projects clears the previous graph's inspection so the labels and selected project stay aligned.
+
+Project and period changes animate branches outward, bring in activity nodes, and grow chart bars from zero against the selected data's actual scale. Totals update with the same selection. Reduce Motion shows the result without the growth animation.
 
 - **Recorded edits** count confirmed successful `Edit` and `Write` operations, grouped by UTC calendar day and agent profile. One tool operation counts as one edit, regardless of its size.
 - **Saved sessions** are counted on their creation day in UTC. They are not the number of sessions active on each day.
@@ -133,7 +138,7 @@ Review a card before sharing it. Hiding names does not hide dates, counts, or pa
 
 ## Privacy
 
-Indexing happens on your Mac. Agent Trail reads local desktop session indexes and associated JSONL logs, including subagent logs. Live also reads Claude's small local process-registry records and checks process identity; it does not use transcript history to guess status. The app does not send those records anywhere, inject code, install hooks, or edit Claude's data. There are no telemetry, cloud accounts, or automatic update checks.
+Indexing happens on your Mac. Agent Trail reads local desktop session indexes and associated JSONL logs, including subagent logs. Live status comes from Claude's small local process-registry records and process identity checks; it does not use transcript history to guess status. The app does not send those records anywhere, inject code, install hooks, or edit Claude's data. There are no telemetry, cloud accounts, or automatic update checks.
 
 The version 2 incremental cache at `~/Library/Application Support/AgentTrail/activity-cache.json` stores file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The cache does not store prompts, commands, patches, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Older caches are rebuilt once to populate daily statistics. With Agent Trail closed, deleting the cache causes a fresh index on the next launch.
 
@@ -150,10 +155,12 @@ Demo mode uses synthetic projects and live states. It does not read Claude histo
 Render sample images directly to files without reading your assistant history:
 
 ```sh
+swift run AgentTrail --render-demo /tmp/agent-trail-projects.png
 swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
-swift run AgentTrail --render-live-demo /tmp/agent-trail-live.png
 swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
+
+The older `--render-live-demo` flag remains an alias for the combined Projects preview.
 
 ## Development
 

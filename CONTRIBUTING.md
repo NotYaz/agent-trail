@@ -14,27 +14,29 @@ swift run AgentTrail --demo
 
 The app uses AppKit and SwiftUI; the core and tests are a Swift package. No third-party package dependencies or developer account are required for a local build.
 
-For sample Growth, Live, and share-card images, render synthetic data directly:
+For sample Projects, Growth, and share-card images, render synthetic data directly:
 
 ```sh
+swift run AgentTrail --render-demo /tmp/agent-trail-projects.png
 swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
-swift run AgentTrail --render-live-demo /tmp/agent-trail-live.png
 swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
 
-These commands do not read assistant history or live process-registry data. The README previews use sample images at `docs/assets/growth.png`, `docs/assets/live.png`, `docs/assets/demo.png`, and `docs/assets/share-card.png`. Projects, Live, and Growth previews should show the same 600 × 680 floating-panel layout.
+These commands do not read assistant history or live process-registry data. The README previews use sample images at `docs/assets/demo.png`, `docs/assets/growth.png`, and `docs/assets/share-card.png`. Projects and Growth previews should show the same 600 × 680 floating-panel layout. `--render-live-demo` remains a compatibility alias for the merged Projects preview; do not add a separate Live-tab screenshot.
 
 ## Make a focused change
 
 Describe the user-visible problem, the proposed behavior, and how you checked it. Keep changes small enough to review. Run `swift test` and a release build before opening a pull request. For interface changes, include a screenshot from demo mode and verify readability in light and dark appearances.
 
-For panel changes, check that project switching clears old graph inspection and that routine background scans do not replace complete history with partial totals. Keep transitions quiet and respect macOS Reduce Motion.
+For panel changes, check that project switching clears old graph inspection and that routine background scans do not replace complete history with partial totals. Check graph transitions on both project and period changes: bars start at zero against the target data's actual scale, branches/nodes reveal together, and totals reflect the selected data. Keep transitions quiet and respect macOS Reduce Motion.
 
 Tests should cover behavior and regressions using synthetic fixtures. Never commit real session logs, conversation content, project paths, profile settings, caches, tokens, or signing material. Diagnostic output can contain sensitive paths even when it contains no conversation text.
 
 For history changes, cover UTC day boundaries, sessions assigned to creation day, replayed results, cross-file duplicates, incremental scans, and rebuilding older caches. Keep counts grounded in confirmed tool operations: a successful `Edit`/`Write` is one edit, not an estimate of changed lines. Activity trees and charts must not imply Git ancestry, code quality, or productivity.
 
 For Live changes, use synthetic registry records and injected process checks. Cover desktop/profile matching, process start verification, PID reuse, dead processes, unknown statuses, and the fallback freshness limit. Claude's registry records reflect status transitions, not a guaranteed heartbeat. Do not infer Working/Idle from recent history, CPU usage, or file timestamps, or describe Working as proof of file writes.
+
+For combined project cards, cover mixed working/idle/unknown sessions, per-profile counts, working-first sorting, and the Working now filter. Missing live reports must not become Idle, and live-only projects must not gain fabricated saved history. Keep workspace and report-age details attached to the correct project/profile.
 
 For export changes, preserve local-only PNG saving, names hidden by default, and exclusion of folder paths in every mode. Check the resulting image for private labels and clipping. An anonymized card can still reveal dates, totals, and activity patterns; do not describe it as containing no sensitive information.
 
