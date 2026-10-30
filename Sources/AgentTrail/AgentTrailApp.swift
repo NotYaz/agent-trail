@@ -142,7 +142,7 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         guard let store else { return }
         popover?.performClose(nil)
         let window = activityWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         if activityWindow == nil {
             window.title = "Agent Trail · Project growth"
             window.isReleasedWhenClosed = false

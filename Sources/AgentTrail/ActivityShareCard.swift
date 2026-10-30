@@ -337,7 +337,16 @@ private struct ActivityPortraitTree: View {
     }
 
     private func interpolatedY(x: CGFloat, target: CGFloat) -> CGFloat {
-        let progress = min(1, max(0, (x - 25) / 387))
+        // Find the actual cubic trunk point at x so every twig stays attached.
+        var lower: CGFloat = 0
+        var upper: CGFloat = 1
+        for _ in 0..<24 {
+            let t = (lower + upper) / 2
+            let u = 1 - t
+            let curveX = u * u * u * 25 + 3 * u * u * t * 155 + 3 * u * t * t * 155 + t * t * t * 412
+            if curveX < x { lower = t } else { upper = t }
+        }
+        let progress = (lower + upper) / 2
         let smooth = progress * progress * (3 - 2 * progress)
         return 149 + (target - 149) * smooth
     }
