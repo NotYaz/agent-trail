@@ -6,11 +6,11 @@ import AgentTrailCore
 enum AgentTrailApp {
     @MainActor static func main() {
         let application = NSApplication.shared
-        let renderFlags = ["--render-demo", "--render-growth-demo", "--render-share-demo"]
+        let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo"]
         if let index = CommandLine.arguments.firstIndex(where: { renderFlags.contains($0) }) {
             application.setActivationPolicy(.prohibited)
             guard index + 1 < CommandLine.arguments.count else {
-                fputs("Usage: AgentTrail --render-demo|--render-growth-demo|--render-share-demo OUTPUT.png [--light]\n", stderr)
+                fputs("Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo OUTPUT.png [--light]\n", stderr)
                 exit(2)
             }
             do {
@@ -56,11 +56,10 @@ enum AgentTrailApp {
             try png.write(to: output, options: .atomic)
             return
         }
-        let growth = kind == "--render-growth-demo"
-        let content = growth ? AnyView(ActivityGardenView(store: store)) : AnyView(AgentTrailPanel(store: store))
-        let view = NSHostingView(rootView: content)
+        store.panelSection = kind == "--render-growth-demo" ? .growth : kind == "--render-live-demo" ? .live : .projects
+        let view = NSHostingView(rootView: AgentTrailShell(store: store))
         view.appearance = NSAppearance(named: CommandLine.arguments.contains("--light") ? .aqua : .darkAqua)
-        view.frame = NSRect(x: 0, y: 0, width: growth ? 920 : 470, height: growth ? 720 : 640)
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 680)
         view.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
@@ -79,7 +78,6 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
     private var popover: NSPopover?
     private var store: AppStore?
     private var settingsWindow: NSWindow?
-    private var activityWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -90,8 +88,8 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
 
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 470, height: 640)
-        popover.contentViewController = NSHostingController(rootView: AgentTrailPanel(store: store))
+        popover.contentSize = NSSize(width: 600, height: 680)
+        popover.contentViewController = NSHostingController(rootView: AgentTrailShell(store: store))
         self.popover = popover
 
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -155,18 +153,90 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
 
     private func showActivityGarden() {
         guard let store else { return }
-        popover?.performClose(nil)
-        let window = activityWindow ?? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        if activityWindow == nil {
-            window.title = "Agent Trail · Project growth"
-            window.isReleasedWhenClosed = false
-            window.contentViewController = NSHostingController(rootView: ActivityGardenView(store: store))
-            activityWindow = window
-            window.center()
+        store.panelSection = .growth
+        showPanel()
+    }
+}
+
+/// All primary views share one stable floating panel and retain their selection.
+private struct AgentTrailShell: View {
+    @ObservedObject var store: AppStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var navigation
+
+    var body: some View {
+        VStack(spacing: 0) {
+            navigationBar
+            Divider()
+            ZStack {
+                section(.projects) { AgentTrailPanel(store: store) }
+                section(.live) { LiveActivityView(store: store, isActive: store.panelSection == .live) }
+                section(.growth) { ActivityGardenView(store: store, compact: true) }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
         }
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        .frame(width: 600, height: 680)
+        .background(.regularMaterial)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: store.panelSection)
+    }
+
+    private var workingCount: Int { store.liveSessions.filter { $0.status == .working }.count }
+
+    private var navigationBar: some View {
+        HStack(spacing: 5) {
+            ForEach(PanelSection.allCases, id: \.self) { section in
+                navigationButton(section)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.tint)
+                .help("Agent Trail")
+        }
+        .padding(.horizontal, 16).padding(.vertical, 9)
+    }
+
+    private func navigationButton(_ section: PanelSection) -> some View {
+        let selected = store.panelSection == section
+        return Button { store.panelSection = section } label: {
+            HStack(spacing: 6) {
+                Image(systemName: section.symbol)
+                Text(section.rawValue)
+                if section == .live && workingCount > 0 {
+                    Text(String(workingCount))
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(.green.opacity(0.14), in: Capsule())
+                        .foregroundStyle(.green)
+                }
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .padding(.horizontal, 15).padding(.vertical, 9)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(.primary.opacity(0.07))
+                        .matchedGeometryEffect(id: "selection", in: navigation)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(section.rawValue)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func section<Content: View>(_ section: PanelSection, @ViewBuilder content: () -> Content) -> some View {
+        let selected = store.panelSection == section
+        return content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .opacity(selected ? 1 : 0)
+            .offset(y: selected || reduceMotion ? 0 : 5)
+            .allowsHitTesting(selected)
+            .disabled(!selected)
+            .accessibilityHidden(!selected)
     }
 }
 
@@ -216,9 +286,7 @@ private struct AgentTrailPanel: View {
             if !store.notices.isEmpty { notices }
             footer
         }
-        .frame(width: 470, height: 640)
-        .background(.regularMaterial)
-        .task { store.refresh() }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var header: some View {
@@ -398,11 +466,6 @@ private struct AgentTrailPanel: View {
                 .buttonStyle(.borderless)
                 .disabled(store.isScanning)
                 .help("Read the latest local activity")
-                Button { store.showActivity?() } label: {
-                    Label("Growth", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-                .buttonStyle(.borderless)
-                .help("Explore project activity across your agents")
                 Spacer(minLength: 4)
                 if let progress = store.scanProgress {
                     Text(progress)
@@ -572,7 +635,7 @@ private struct ProjectCard: View {
                 Spacer(minLength: 0)
                 if activityMatchesEdit {
                     TimelineView(.periodic(from: .now, by: 30)) { context in
-                        Text("Active \(relativeDate(project.latestActivity.latestActivity, now: context.date))")
+                        Text("Seen \(relativeDate(project.latestActivity.latestActivity, now: context.date))")
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)

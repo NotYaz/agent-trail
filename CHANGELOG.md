@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.2 — 2026-10-30
+
+- Projects, Live, and Growth now share one 600 × 680 menu-bar panel.
+- Live tab shows Claude Desktop's reported Working, Idle, or Unknown state, matched to configured profiles and desktop sessions. Process identity checks preserve status-change reports for the same running process; records without a verified process start use a 90-second freshness fallback. Dead/reused processes are omitted.
+- Live reports show their age and remain separate from recorded-edit history. A reported busy state does not claim that a file is being written.
+- Switching Growth projects resets graph inspection and keeps node identity aligned with the selection.
+- Routine refreshes preserve the last complete history while indexing, preventing partial totals and chart flicker.
+- Gentle tab/update transitions respect macOS Reduce Motion.
+- Updated synthetic panel previews and added direct Live demo-image rendering.
+
+Claude Desktop remains the only supported assistant; Codex and Grok adapters are not implemented. Donations remain unconfigured. Existing edit-attribution and distribution limitations still apply.
+
 ## 0.1.0-alpha.1 — 2026-10-30
 
 Initial alpha prepared for public release.

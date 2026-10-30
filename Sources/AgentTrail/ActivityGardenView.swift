@@ -4,10 +4,44 @@ import AgentTrailCore
 
 struct ActivityGardenView: View {
     @ObservedObject var store: AppStore
+    let compact: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedProject = ""
     @State private var period: GardenPeriod = .month
-    @State private var inspectedDay: GardenRecord?
-    @State private var selectedChartDate: Date?
+    @State private var inspection: GardenInspection?
+    @State private var chartInspection: GardenChartInspection?
+
+    init(store: AppStore, compact: Bool = false) {
+        self.store = store
+        self.compact = compact
+    }
+
+    private var context: GardenContext {
+        GardenContext(projectID: selectedProject, period: period, start: startDate, end: endDate)
+    }
+    private var inspectedDay: GardenRecord? {
+        guard let inspection, inspection.context == context else { return nil }
+        return records.first { $0.id == inspection.recordID }
+    }
+    private var selectedChartDate: Date? {
+        guard let chartInspection, chartInspection.context == context else { return nil }
+        return chartInspection.date
+    }
+    private var contextAnimation: Animation? { reduceMotion ? nil : .smooth(duration: 0.22) }
+    private var projectSelection: Binding<String> {
+        Binding(get: { selectedProject }, set: { value in
+            guard value != selectedProject else { return }
+            clearInspection()
+            selectedProject = value
+        })
+    }
+    private var periodSelection: Binding<GardenPeriod> {
+        Binding(get: { period }, set: { value in
+            guard value != period else { return }
+            clearInspection()
+            period = value
+        })
+    }
 
     private var projects: [ProjectSummary] {
         selectedProject.isEmpty ? store.projects : store.projects.filter { $0.id == selectedProject }
@@ -73,18 +107,25 @@ struct ActivityGardenView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 19) {
+            VStack(alignment: .leading, spacing: compact ? 14 : 19) {
                 header
                 metrics
-                if records.isEmpty {
-                    emptyGarden
-                } else {
-                    growthMap
-                    dailyChart
+                ZStack(alignment: .top) {
+                    VStack(spacing: compact ? 14 : 19) {
+                        if records.isEmpty {
+                            emptyGarden
+                        } else {
+                            growthMap
+                            dailyChart
+                        }
+                    }
+                    .id(context)
+                    .transition(.opacity)
                 }
+                .animation(contextAnimation, value: context)
                 footer
             }
-            .padding(26)
+            .padding(compact ? 18 : 26)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(
@@ -92,21 +133,43 @@ struct ActivityGardenView: View {
                                     Color(red: 0.042, green: 0.052, blue: 0.073)],
                            startPoint: .topLeading, endPoint: .bottomTrailing)
         )
-        .preferredColorScheme(.dark)
-        .frame(minWidth: 820, minHeight: 650)
-        .onChange(of: selectedProject) { _, _ in clearInspection() }
-        .onChange(of: period) { _, _ in clearInspection() }
+        .environment(\.colorScheme, .dark)
+        .frame(minWidth: compact ? 0 : 820, minHeight: compact ? 0 : 650)
         .onChange(of: store.projects.map(\.id)) { _, ids in
-            if !selectedProject.isEmpty && !ids.contains(selectedProject) { selectedProject = "" }
+            if !selectedProject.isEmpty && !ids.contains(selectedProject) { projectSelection.wrappedValue = "" }
         }
     }
 
+    @ViewBuilder
     private var header: some View {
-        HStack(alignment: .center, spacing: 16) {
+        if compact {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    heading
+                    Spacer(minLength: 8)
+                    shareButton
+                }
+                HStack(spacing: 12) {
+                    projectPicker.frame(maxWidth: .infinity)
+                    periodPicker.frame(width: 180)
+                }
+            }
+        } else {
+            HStack(alignment: .center, spacing: 16) {
+                heading
+                Spacer(minLength: 12)
+                projectPicker.frame(width: 160)
+                periodPicker.frame(width: 180)
+                shareButton
+            }
+        }
+    }
+
+    private var heading: some View {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 9) {
                     Text("Project growth")
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(.system(size: compact ? 22 : 26, weight: .semibold))
                         .tracking(-0.6)
                     if store.demoMode {
                         Text("DEMO")
@@ -124,11 +187,13 @@ struct ActivityGardenView: View {
                             .help(store.scanProgress ?? "Indexing recorded history")
                     }
                 }
-                .font(.system(size: 12))
+                .font(.system(size: compact ? 11 : 12))
                 .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 12)
-            Picker("Project", selection: $selectedProject) {
+    }
+
+    private var projectPicker: some View {
+            Picker("Project", selection: projectSelection) {
                 Text("All projects").tag("")
                 ForEach(store.projects) { project in
                     Text(project.name).tag(project.id).help(project.path)
@@ -136,15 +201,19 @@ struct ActivityGardenView: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
-            .frame(width: 160)
             .controlSize(.regular)
-            Picker("Period", selection: $period) {
+    }
+
+    private var periodPicker: some View {
+            Picker("Period", selection: periodSelection) {
                 ForEach(GardenPeriod.allCases) { option in Text(option.rawValue).tag(option) }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 180)
             .help("Filter the recorded UTC days shown in the map, chart, and export")
+    }
+
+    private var shareButton: some View {
             Button {
                 ActivityShareExporter.export(projects: exportProjects, sources: store.sources,
                                              anonymize: true, sampleData: store.demoMode)
@@ -155,24 +224,25 @@ struct ActivityGardenView: View {
             .buttonStyle(.bordered)
             .disabled(records.isEmpty || store.isScanning)
             .help(store.isScanning ? "Wait for history indexing to finish before exporting" : "Save an anonymized image of the selected projects and period")
-        }
     }
 
     private var metrics: some View {
         HStack(spacing: 0) {
-            GardenMetric(value: editCount, title: "RECORDED EDITS", note: "Successful file operations", color: .white)
+            GardenMetric(value: editCount, title: "RECORDED EDITS", note: "Successful file operations", color: .white, compact: compact)
             Rectangle().fill(.white.opacity(0.07)).frame(width: 1, height: 35)
-            GardenMetric(value: sessionCount, title: "SESSIONS", note: "Counted on their first UTC day", color: .white)
+            GardenMetric(value: sessionCount, title: "SESSIONS", note: "Counted on their first UTC day", color: .white, compact: compact)
             Rectangle().fill(.white.opacity(0.07)).frame(width: 1, height: 35)
-            GardenMetric(value: series.count, title: "ACTIVE PROFILES", note: "With recorded activity in this period", color: .white)
+            GardenMetric(value: series.count, title: "ACTIVE PROFILES", note: "With recorded activity in this period", color: .white, compact: compact)
         }
-        .padding(.vertical, 16)
+        .padding(.vertical, compact ? 12 : 16)
+        .animation(contextAnimation, value: editCount)
         .background(.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.055), lineWidth: 1))
     }
 
     private var growthMap: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let renderedContext = context
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Growth map").font(.system(size: 13, weight: .semibold))
@@ -185,10 +255,12 @@ struct ActivityGardenView: View {
                     VStack(alignment: .trailing, spacing: 4) {
                         Text("\(GardenFormat.day(inspectedDay.day)) · \(sourceName(inspectedDay.sourceID))")
                             .font(.system(size: 10, weight: .medium))
+                            .lineLimit(1).truncationMode(.middle)
                         Text("\(inspectedDay.edits) \(inspectedDay.edits == 1 ? "edit" : "edits") · \(inspectedDay.sessions) \(inspectedDay.sessions == 1 ? "session" : "sessions")")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
+                    .frame(maxWidth: compact ? 205 : 320, alignment: .trailing)
                     .transition(.opacity)
                 } else {
                     Text("Explore a node to see the day")
@@ -196,30 +268,35 @@ struct ActivityGardenView: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 17)
+            .padding(.horizontal, compact ? 15 : 20)
+            .padding(.top, compact ? 14 : 17)
 
             GardenMap(rootName: rootName, series: series, start: startDate, end: endDate,
-                      inspectedID: inspectedDay?.id, inspect: { inspectedDay = $0 })
-                .frame(height: max(174, CGFloat(series.count) * 65))
-                .padding(.horizontal, 14)
+                      compact: compact, inspectedID: inspectedDay?.id, inspect: { record in
+                          // A departing graph can still deliver a queued hover event.
+                          guard renderedContext == context, records.contains(where: { $0.id == record.id }) else { return }
+                          inspection = GardenInspection(context: renderedContext, recordID: record.id)
+                      })
+                .frame(height: max(compact ? 150 : 174, CGFloat(series.count) * (compact ? 58 : 65)))
+                .padding(.horizontal, compact ? 8 : 14)
+                .transaction { $0.animation = nil }
 
-            HStack(spacing: 14) {
+            HStack(spacing: compact ? 10 : 14) {
                 HStack(spacing: 5) {
                     Circle().fill(.white.opacity(0.65)).frame(width: 5, height: 5)
-                    Text("Larger nodes · more edits")
+                    Text(compact ? "Larger · more edits" : "Larger nodes · more edits")
                 }
                 HStack(spacing: 5) {
                     Circle().stroke(.white.opacity(0.5), lineWidth: 1).frame(width: 5, height: 5)
-                    Text("Hollow nodes · sessions only")
+                    Text(compact ? "Hollow · sessions only" : "Hollow nodes · sessions only")
                 }
                 Spacer()
                 Text("UTC days →")
             }
             .font(.system(size: 9))
             .foregroundStyle(.tertiary)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 15)
+            .padding(.horizontal, compact ? 15 : 20)
+            .padding(.bottom, compact ? 12 : 15)
         }
         .background(GardenPalette.card, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.055), lineWidth: 1))
@@ -228,7 +305,8 @@ struct ActivityGardenView: View {
     }
 
     private var dailyChart: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let renderedContext = context
+        return VStack(alignment: .leading, spacing: compact ? 10 : 12) {
             HStack {
                 Text("Daily edits").font(.system(size: 13, weight: .semibold))
                 Spacer()
@@ -238,15 +316,20 @@ struct ActivityGardenView: View {
                     Text("\(GardenFormat.day(day)) · \(total) recorded \(total == 1 ? "edit" : "edits")")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 } else {
-                    HStack(spacing: 12) {
-                        ForEach(series) { item in
-                            HStack(spacing: 5) {
-                                Circle().fill(item.color).frame(width: 5, height: 5)
-                                Text(item.name)
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 12) {
+                            ForEach(series) { item in
+                                HStack(spacing: 5) {
+                                    Circle().fill(item.color).frame(width: 5, height: 5)
+                                    Text(item.name).fixedSize()
+                                }
                             }
                         }
                     }
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .scrollIndicators(.hidden)
+                    .frame(maxWidth: compact ? 280 : 510)
+                    .frame(height: 13)
+                    .font(.system(size: compact ? 9 : 10)).foregroundStyle(.secondary)
                 }
             }
             if editCount == 0 {
@@ -292,13 +375,15 @@ struct ActivityGardenView: View {
                         }
                     }
                 }
-                .chartXSelection(value: $selectedChartDate)
+                .chartXSelection(value: chartSelection(for: renderedContext))
                 .environment(\.calendar, GardenFormat.utcCalendar)
                 .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
-                .frame(height: 90)
+                .frame(height: compact ? 80 : 90)
+                .id(renderedContext)
+                .transaction { $0.animation = nil }
             }
         }
-        .padding(18)
+        .padding(compact ? 14 : 18)
         .background(GardenPalette.card, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.055), lineWidth: 1))
     }
@@ -319,20 +404,21 @@ struct ActivityGardenView: View {
                 .frame(maxWidth: 390)
             if store.isScanning { ProgressView().controlSize(.small).padding(.top, 4) }
         }
-        .frame(maxWidth: .infinity, minHeight: 330)
+        .frame(maxWidth: .infinity, minHeight: compact ? 260 : 330)
         .background(GardenPalette.card, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.055), lineWidth: 1))
     }
 
     private var footer: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "info.circle")
-            Text("Successful recorded Edit/Write operations · Dates in UTC")
-            Spacer()
-            if store.isScanning {
-                Text("History is still indexing…")
-            } else {
-                Text("Connections group activity, not commits")
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                Label("Successful recorded Edit/Write operations · Dates in UTC", systemImage: "info.circle")
+                Spacer()
+                Text(store.isScanning ? "History is still indexing…" : "Connections group activity, not commits")
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Successful recorded Edit/Write operations · Dates in UTC", systemImage: "info.circle")
+                Text(store.isScanning ? "History is still indexing…" : "Connections group activity, not commits")
             }
         }
         .font(.system(size: 9))
@@ -348,7 +434,21 @@ struct ActivityGardenView: View {
         return max(30, days / 6)
     }
     private func sourceName(_ id: String) -> String { store.sources.first { $0.id == id }?.name ?? id }
-    private func clearInspection() { inspectedDay = nil; selectedChartDate = nil }
+    private func clearInspection() { inspection = nil; chartInspection = nil }
+    private func chartSelection(for renderedContext: GardenContext) -> Binding<Date?> {
+        Binding(get: {
+            guard renderedContext == context else { return nil }
+            return selectedChartDate
+        }, set: { value in
+            // Chart can send selection events while its previous domain is departing.
+            guard renderedContext == context else { return }
+            guard let value, value >= renderedContext.start, value < renderedContext.end else {
+                chartInspection = nil
+                return
+            }
+            chartInspection = GardenChartInspection(context: renderedContext, date: value)
+        })
+    }
 }
 
 private struct GardenMap: View {
@@ -356,23 +456,25 @@ private struct GardenMap: View {
     let series: [GardenSeries]
     let start: Date
     let end: Date
+    let compact: Bool
     let inspectedID: String?
     let inspect: (GardenRecord) -> Void
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            let root = CGPoint(x: 76, y: size.height / 2 - 1)
+            let root = CGPoint(x: compact ? size.width * 0.105 : 76, y: size.height / 2 - 1)
             ZStack(alignment: .topLeading) {
                 Canvas { context, canvasSize in
                     for (index, item) in series.enumerated() {
                         let baseline = branchY(index, height: canvasSize.height)
-                        let points = item.records.map { point($0, index: index, size: canvasSize) }
+                        let maxEdits = max(1, item.records.map(\.edits).max() ?? 1)
+                        let points = item.records.map { point($0, index: index, maxEdits: maxEdits, size: canvasSize) }
                         var path = Path()
                         path.move(to: CGPoint(x: root.x + 16, y: root.y))
-                        let branch = CGPoint(x: 241, y: baseline)
-                        path.addCurve(to: branch, control1: CGPoint(x: 160, y: root.y),
-                                      control2: CGPoint(x: 165, y: baseline))
+                        let branch = CGPoint(x: compact ? canvasSize.width * 0.32 : 241, y: baseline)
+                        path.addCurve(to: branch, control1: CGPoint(x: compact ? canvasSize.width * 0.22 : 160, y: root.y),
+                                      control2: CGPoint(x: compact ? canvasSize.width * 0.23 : 165, y: baseline))
                         var previous = branch
                         for next in points {
                             let middleX = (previous.x + next.x) / 2
@@ -387,17 +489,17 @@ private struct GardenMap: View {
 
                 VStack(spacing: 10) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 23, weight: .light))
+                        .font(.system(size: compact ? 18 : 23, weight: .light))
                         .foregroundStyle(Color(red: 0.63, green: 0.77, blue: 0.90))
-                        .frame(width: 43, height: 43)
+                        .frame(width: compact ? 35 : 43, height: compact ? 35 : 43)
                         .background(.white.opacity(0.035), in: Circle())
                         .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
                     Text(rootName)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: compact ? 10 : 11, weight: .medium))
                         .foregroundStyle(.white.opacity(0.82))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
-                        .frame(width: 130)
+                        .frame(width: compact ? 83 : 130)
                 }
                 .position(x: root.x, y: root.y + 13)
 
@@ -406,12 +508,15 @@ private struct GardenMap: View {
                         Circle().fill(item.color).frame(width: 5, height: 5)
                         Text(item.name).lineLimit(1)
                     }
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: compact ? 9 : 10, weight: .medium))
                     .foregroundStyle(item.color.opacity(0.95))
-                    .frame(width: 130, alignment: .leading)
-                    .position(x: 231, y: branchY(index, height: size.height) - 16)
+                    .frame(width: compact ? 100 : 130, alignment: .leading)
+                    .position(x: compact ? size.width * 0.32 : 231,
+                              y: branchY(index, height: size.height) - (compact ? 27 : 16))
+                    .help(item.name)
                     ForEach(item.records) { record in
-                        let location = point(record, index: index, size: size)
+                        let location = point(record, index: index,
+                                             maxEdits: max(1, item.records.map(\.edits).max() ?? 1), size: size)
                         let radius = nodeRadius(record)
                         Button { inspect(record) } label: {
                             Circle()
@@ -420,7 +525,7 @@ private struct GardenMap: View {
                                 .frame(width: radius * 2, height: radius * 2)
                                 .shadow(color: item.color.opacity(inspectedID == record.id ? 0.7 : 0.15), radius: inspectedID == record.id ? 8 : 4)
                                 .overlay(Circle().stroke(.white.opacity(inspectedID == record.id ? 0.8 : 0), lineWidth: 1).padding(-3))
-                                .frame(width: max(20, radius * 2 + 8), height: max(20, radius * 2 + 8))
+                                .frame(width: max(compact ? 12 : 20, radius * 2 + 5), height: max(compact ? 12 : 20, radius * 2 + 5))
                                 .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
@@ -438,16 +543,18 @@ private struct GardenMap: View {
         let available = height - 54
         return 32 + available * CGFloat(index + 1) / CGFloat(series.count + 1)
     }
-    private func point(_ record: GardenRecord, index: Int, size: CGSize) -> CGPoint {
+    private func point(_ record: GardenRecord, index: Int, maxEdits: Int, size: CGSize) -> CGPoint {
         let duration = max(86_400, end.timeIntervalSince(start))
         let fraction = record.day.addingTimeInterval(43_200).timeIntervalSince(start) / duration
-        let x = 316 + (size.width - 340) * fraction
-        let maxEdits = max(1, series[index].records.map(\.edits).max() ?? 1)
+        let plotStart = compact ? size.width * 0.45 : 316
+        let plotWidth = max(1, size.width - plotStart - (compact ? 14 : 24))
+        let x = plotStart + plotWidth * fraction
         let activityHeight = CGFloat(record.edits) / CGFloat(maxEdits) * 32
         return CGPoint(x: x, y: branchY(index, height: size.height) + 14 - activityHeight)
     }
     private func nodeRadius(_ record: GardenRecord) -> CGFloat {
-        record.edits == 0 ? 3 : min(8, 2.9 + CGFloat(sqrt(Double(record.edits))) * 0.48)
+        let radius = record.edits == 0 ? 3 : min(8, 2.9 + CGFloat(sqrt(Double(record.edits))) * 0.48)
+        return radius * (compact ? 0.72 : 1)
     }
 }
 
@@ -456,20 +563,47 @@ private struct GardenMetric: View {
     let title: String
     let note: String
     let color: Color
+    let compact: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 9) {
-                Text(value.formatted()).font(.system(size: 28, weight: .medium, design: .rounded))
-                    .foregroundStyle(color)
-                    .contentTransition(.numericText())
-                Text(title).font(.system(size: 9, weight: .semibold)).tracking(0.8)
-                    .foregroundStyle(.secondary)
+            if compact {
+                valueText
+                titleText
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 9) {
+                    valueText
+                    titleText
+                }
+                Text(note).font(.system(size: 10)).foregroundStyle(.tertiary)
             }
-            Text(note).font(.system(size: 10)).foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, compact ? 14 : 20)
+        .help(note)
     }
+    private var valueText: some View {
+        Text(value.formatted()).font(.system(size: compact ? 24 : 28, weight: .medium, design: .rounded))
+            .foregroundStyle(color).contentTransition(.numericText())
+    }
+    private var titleText: some View {
+        Text(title).font(.system(size: compact ? 8 : 9, weight: .semibold)).tracking(0.8)
+            .foregroundStyle(.secondary).lineLimit(1)
+    }
+}
+
+private struct GardenContext: Hashable {
+    let projectID: String
+    let period: GardenPeriod
+    let start: Date
+    let end: Date
+}
+private struct GardenInspection {
+    let context: GardenContext
+    let recordID: String
+}
+private struct GardenChartInspection {
+    let context: GardenContext
+    let date: Date
 }
 
 private struct GardenRecord: Identifiable {

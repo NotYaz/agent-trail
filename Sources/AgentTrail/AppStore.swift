@@ -2,6 +2,20 @@ import AppKit
 import SwiftUI
 import AgentTrailCore
 
+enum PanelSection: String, CaseIterable {
+    case projects = "Projects"
+    case live = "Live"
+    case growth = "Growth"
+
+    var symbol: String {
+        switch self {
+        case .projects: return "square.stack.3d.up"
+        case .live: return "dot.radiowaves.left.and.right"
+        case .growth: return "point.3.connected.trianglepath.dotted"
+        }
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     @Published var projects: [ProjectSummary] = []
@@ -13,13 +27,20 @@ final class AppStore: ObservableObject {
     @Published var runningSourceIDs: Set<String> = []
     @Published var scanProgress: String?
     @Published var refreshInterval: Double = 15
+    @Published var panelSection: PanelSection = .projects
+    @Published var liveSessions: [LiveAgentSession] = []
+    @Published var liveNotices: [String] = []
+    @Published var lastLiveScan: Date?
     let demoMode: Bool
     let configurationURL = ProfileConfiguration.defaultURL
     var showProfiles: (() -> Void)?
     var showActivity: (() -> Void)?
 
     private let indexer = LocalIndexer()
+    private let liveReader = LiveReader()
     private var timer: Timer?
+    private var liveTimer: Timer?
+    private var isLiveScanning = false
     private let cacheURL: URL
     private var generation = UUID()
     private var configurationIsValid = false
@@ -31,6 +52,7 @@ final class AppStore: ObservableObject {
         cacheURL = support.appendingPathComponent("activity-cache.json")
         if demoMode {
             sources = DemoData.sources
+            scheduleRefresh()
             refresh()
         } else {
             reloadProfiles()
@@ -41,6 +63,10 @@ final class AppStore: ObservableObject {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
+        }
+        liveTimer?.invalidate()
+        liveTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshLive() }
         }
     }
 
@@ -60,6 +86,8 @@ final class AppStore: ObservableObject {
             lastScan = nil
             runningSourceIDs = []
             timer?.invalidate()
+            liveTimer?.invalidate()
+            resetLive()
             errorMessage = error.localizedDescription
         }
     }
@@ -82,7 +110,9 @@ final class AppStore: ObservableObject {
         isScanning = false
         scanProgress = nil
         lastScan = nil
+        resetLive()
         scheduleRefresh()
+        refreshLive()
         refresh()
     }
 
@@ -91,6 +121,7 @@ final class AppStore: ObservableObject {
             let result = DemoData.result()
             projects = result.projects
             lastScan = result.scannedAt
+            refreshLive()
             return
         }
         guard configurationIsValid else { return }
@@ -133,6 +164,9 @@ final class AppStore: ObservableObject {
     }
 
     private func applyProgress(_ incoming: [ProjectSummary]) {
+        // Routine refreshes must keep the last complete history intact. Publishing
+        // partial daily bins here made graphs briefly shrink and lose selection.
+        guard lastScan == nil else { return }
         let previous = Dictionary(uniqueKeysWithValues: projects.map { ($0.path, $0) })
         projects = incoming.map { project in
             var updated = project
@@ -145,6 +179,40 @@ final class AppStore: ObservableObject {
                 updated.activities[index].latestEditWorkspacePath = oldActivity.latestEditWorkspacePath
             }
             return updated
+        }
+    }
+
+    private func resetLive() {
+        isLiveScanning = false
+        liveSessions = []
+        liveNotices = []
+        lastLiveScan = nil
+    }
+
+    func refreshLive() {
+        if demoMode {
+            let now = Date()
+            liveSessions = [
+                LiveAgentSession(sourceID: sources[0].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
+                                 sessionID: "sample-working", status: .working, updatedAt: now, pid: 4101),
+                LiveAgentSession(sourceID: sources[1].id, projectPath: "/Demo/Projects/atlas", workspacePath: "/Demo/Projects/atlas/.worktrees/design",
+                                 sessionID: "sample-idle", status: .idle, updatedAt: now.addingTimeInterval(-120), pid: 4102)
+            ]
+            lastLiveScan = now
+            return
+        }
+        guard configurationIsValid, !isLiveScanning else { return }
+        isLiveScanning = true
+        let currentGeneration = generation
+        liveReader.scan(sources: sources) { [weak self] snapshot in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == currentGeneration else { return }
+                self.liveSessions = snapshot.sessions
+                self.liveNotices = snapshot.notices
+                self.lastLiveScan = snapshot.scannedAt
+                self.isLiveScanning = false
+                self.runningSourceIDs = Set(InstanceController.runningInstances(sources: self.sources).keys)
+            }
         }
     }
 
@@ -161,6 +229,16 @@ final class AppStore: ObservableObject {
     func copyPath(_ project: ProjectSummary) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(project.path, forType: .string)
+    }
+}
+
+/// Live metadata has its own queue so a first history index cannot delay it.
+private final class LiveReader: @unchecked Sendable {
+    private let worker = DispatchQueue(label: "app.agenttrail.live", qos: .utility)
+    private let provider = LiveActivityProvider()
+
+    func scan(sources: [AgentSource], completion: @escaping (LiveSnapshot) -> Void) {
+        worker.async { completion(self.provider.scan(sources: sources)) }
     }
 }
 
