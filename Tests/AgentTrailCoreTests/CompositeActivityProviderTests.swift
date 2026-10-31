@@ -99,7 +99,8 @@ final class CompositeActivityProviderTests: XCTestCase {
             for (index, name) in names.enumerated() {
                 let data = try Data(contentsOf: directory.appendingPathComponent(name))
                 let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-                XCTAssertEqual(object["version"] as? Int, 2)
+                // Claude keeps its transcript cache; Codex and Grok store raw evidence.
+                XCTAssertEqual(object["version"] as? Int, index == 0 ? 2 : 4)
                 XCTAssertNotNil(object[index == 0 ? "transcripts" : "files"])
             }
         }

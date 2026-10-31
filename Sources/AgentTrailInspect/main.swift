@@ -8,6 +8,11 @@ let cacheURL: URL? = cacheIndex.flatMap { index in
     guard index + 1 < arguments.count else { return nil }
     return URL(fileURLWithPath: arguments[index + 1])
 }
+let locationsIndex = arguments.firstIndex(of: "--locations")
+if let index = locationsIndex, index + 1 >= arguments.count || arguments[index + 1].hasPrefix("--") {
+    fputs("--locations requires a project-locations.json path\n", stderr)
+    exit(2)
+}
 let profileIndex = arguments.firstIndex(of: "--profiles")
 let profileURL = profileIndex.flatMap { index -> URL? in
     guard index + 1 < arguments.count else { return nil }
@@ -40,7 +45,16 @@ if arguments.contains("--live") {
     FileHandle.standardOutput.write(Data([10]))
     exit(0)
 }
-let provider = CompositeActivityProvider(cacheURL: cacheURL)
+// Learned project locations are read but never written by diagnostics.
+let locationsURL = locationsIndex.map { URL(fileURLWithPath: arguments[$0 + 1]) } ?? ProjectLocationRegistry.defaultURL
+let savedLocations: ProjectLocationRegistry
+do {
+    savedLocations = try ProjectLocationRegistry.load(from: locationsURL)
+} catch {
+    fputs("Project locations at \(locationsURL.path) could not be read: \(error.localizedDescription)\n", stderr)
+    savedLocations = ProjectLocationRegistry()
+}
+let provider = CompositeActivityProvider(cacheURL: cacheURL, projectLocations: savedLocations)
 let result = arguments.contains("--metadata-only")
     ? provider.metadata(sources: sources)
     : provider.scan(sources: sources)
@@ -54,6 +68,8 @@ let records: [[String: Any]] = result.projects.map { project in
         "latestActivitySource": project.latestActivity.sourceID
     ]
     item["recordedEditCount"] = project.recordedEditCount
+    item["workspaces"] = Array(Set(project.activities.compactMap(\.workspacePath))).sorted()
+    item["folderAvailable"] = !result.unavailableProjects.contains(project.path)
     item["sessionCount"] = project.sessionCount
     item["dailyHistoryUTC"] = project.history.map {
         ["day": formatter.string(from: $0.day), "edits": $0.editCount, "sessions": $0.sessionCount] as [String: Any]
@@ -70,7 +86,20 @@ let report: [String: Any] = [
     "sharedCount": result.projects.filter(\.isShared).count,
     "elapsedSeconds": Date().timeIntervalSince(started),
     "notices": result.notices,
-    "projects": records
+    "projects": records,
+    "sessionProjects": result.sessionProjects.map {
+        ["sourceID": $0.sourceID, "sessionID": $0.sessionID, "recordedWorkspace": $0.recordedWorkspace, "project": $0.projectPath]
+    },
+    "projectLocations": result.projectLocations.locations.map { location -> [String: Any] in
+        ["currentPath": location.currentPath, "present": location.isPresent,
+         "previousLocations": location.previousLocations.map {
+             ["path": $0.path, "origin": $0.origin.rawValue, "observedAt": formatter.string(from: $0.observedAt),
+              "shadowed": $0.shadowedSince != nil] as [String: Any]
+         }]
+    },
+    "missingFolders": result.missingFolders.map {
+        ["sourceID": $0.sourceID, "project": $0.projectPath, "path": $0.path, "edits": $0.editCount] as [String: Any]
+    }
 ]
 let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
 FileHandle.standardOutput.write(data)

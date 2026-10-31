@@ -86,6 +86,7 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         self.store = store
         store.showProfiles = { [weak self] in self?.showProfileSettings() }
         store.showActivity = { [weak self] in self?.showActivityGarden() }
+        store.showPanel = { [weak self] in self?.showPanel() }
 
         let popover = NSPopover()
         popover.behavior = .transient
@@ -262,7 +263,12 @@ private struct AgentTrailPanel: View {
              (waitingOnly && (project.live?.waitingCount ?? 0) > 0)) &&
             (query.isEmpty || project.path.localizedCaseInsensitiveContains(query) ||
              project.sourceIDs.contains { sourceName($0).localizedCaseInsensitiveContains(query) } ||
-             (project.live?.sessions.contains { $0.workspacePath.localizedCaseInsensitiveContains(query) } ?? false))
+             (project.live?.sessions.contains { $0.workspacePath.localizedCaseInsensitiveContains(query) } ?? false) ||
+             (store.location(for: project.path)?.previousPaths.contains { $0.localizedCaseInsensitiveContains(query) } ?? false) ||
+             (project.history?.activities.contains {
+                 ($0.workspacePath ?? "").localizedCaseInsensitiveContains(query)
+                     || ($0.latestEditWorkspacePath ?? "").localizedCaseInsensitiveContains(query)
+             } ?? false))
         }
     }
 
@@ -277,7 +283,16 @@ private struct AgentTrailPanel: View {
             searchAndFilters
 
             if let error = store.errorMessage, !error.isEmpty {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
+                HStack(alignment: .top, spacing: 8) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button { store.errorMessage = nil } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss")
+                    .accessibilityLabel("Dismiss message")
+                }
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -285,6 +300,22 @@ private struct AgentTrailPanel: View {
                     .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                     .padding(.horizontal, 18)
                     .padding(.bottom, 10)
+            }
+
+            if let info = store.infoMessage, !info.isEmpty {
+                Label(info, systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 10)
+                    .transition(.opacity)
+                    .task(id: info) {
+                        try? await Task.sleep(for: .seconds(6))
+                        if store.infoMessage == info { store.infoMessage = nil }
+                    }
             }
 
             if store.projectOverviews.isEmpty && store.isScanning {
@@ -425,7 +456,7 @@ private struct AgentTrailPanel: View {
                 .toggleStyle(.button)
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Show projects found in more than one assistant profile")
+                .help("Show projects worked on by more than one assistant profile")
             }
         }
         .padding(.horizontal, 18)
@@ -440,8 +471,15 @@ private struct AgentTrailPanel: View {
                                 runningSourceIDs: store.runningSourceIDs,
                                 isScanning: store.isScanning,
                                 lastLiveScan: store.lastLiveScan, isActive: isActive, demoMode: store.demoMode,
+                                location: store.location(for: project.path),
+                                missingFolder: store.missingFolder(for: project.path),
+                                isUnavailable: store.unavailableProjects.contains(project.path),
+                                isLinking: store.pendingLocationLink == project.path,
                                 open: store.focus, reveal: { store.reveal(path: project.path) },
-                                copyPath: { store.copyPath(project.path) })
+                                copyPath: { store.copyPath($0) },
+                                locate: { store.locateMovedFolder(projectPath: project.path, missing: $0) },
+                                forget: { store.forgetPreviousLocations(of: project.path) },
+                                abbreviate: store.abbreviate)
                 }
             }
             .padding(.horizontal, 18)
@@ -476,7 +514,7 @@ private struct AgentTrailPanel: View {
                  ? (waitingOnly || workingOnly ? "Projects appear here when an assistant reports a matching live state. Idle sessions do not establish an outstanding request for input."
                     : sharedOnly ? "A project appears here when more than one profile works in the same folder."
                     : "Projects appear when Claude, Codex, or Grok saves a local coding session. Check the profile notices below for details.")
-                 : "Try a different folder name or assistant profile.")
+                 : "Try a different folder name, an earlier location, or an assistant profile.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -590,9 +628,17 @@ private struct ProjectCard: View {
     let lastLiveScan: Date?
     let isActive: Bool
     let demoMode: Bool
+    let location: ProjectLocation?
+    let missingFolder: MissingFolder?
+    let isUnavailable: Bool
+    let isLinking: Bool
     let open: (AgentSource) -> Void
     let reveal: () -> Void
-    let copyPath: () -> Void
+    let copyPath: (String) -> Void
+    let locate: (MissingFolder?) -> Void
+    let forget: () -> Void
+    let abbreviate: (String) -> String
+    @State private var confirmForget = false
 
     private var involvedSources: [AgentSource] {
         sources.filter { project.sourceIDs.contains($0.id) }
@@ -629,12 +675,11 @@ private struct ProjectCard: View {
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
                             .background(.primary.opacity(0.06), in: Capsule())
-                            .help("The same project folder appears in multiple assistant profiles")
+                            .help("More than one assistant profile worked in this project")
                     }
                     Spacer(minLength: 0)
                     Menu {
-                        Button("Reveal in Finder", systemImage: "folder") { reveal() }
-                        Button("Copy project path", systemImage: "doc.on.doc") { copyPath() }
+                        projectActions
                     } label: {
                         Image(systemName: "ellipsis")
                             .foregroundStyle(.secondary)
@@ -645,12 +690,43 @@ private struct ProjectCard: View {
                     .fixedSize()
                     .help("Project actions")
                 }
-                Text(abbreviatedPath(project.path))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(project.path)
+                if isUnavailable {
+                    HStack(spacing: 6) {
+                        HStack(spacing: 6) {
+                            Label("Folder not found", systemImage: "questionmark.folder")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.orange)
+                            Text(abbreviatedPath(project.path))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Project folder not found at \(project.path)")
+                        Spacer(minLength: 4)
+                        if canLocateFolder { locateButton(nil) }
+                    }
+                    .help(canLocateFolder
+                          ? "This folder is no longer at \(project.path). If it was moved, locate it so its history follows it."
+                          : "This folder is no longer at \(project.path). Its recorded history is kept here.")
+                } else {
+                    Text(abbreviatedPath(project.path))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(project.path)
+                }
+                if let location, !location.previousLocations.isEmpty {
+                    Label(previousTitle(location), systemImage: "clock.arrow.circlepath")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(previousHelp(location))
+                        .accessibilityLabel("Previously at \(location.previousPaths.joined(separator: ", "))")
+                }
             }
 
             if let live = project.live {
@@ -667,13 +743,14 @@ private struct ProjectCard: View {
                 if let edit = project.history?.latestEdit, let date = edit.latestEdit {
                     activityLine(title: "Last recorded edit", sourceID: edit.sourceID, date: date, prominent: true)
                         .help("Confirmed recorded file edits; shell commands and external changes are not attributed. \(date.formatted(date: .abbreviated, time: .standard))")
-                    if let worktree = edit.latestEditWorkspacePath, worktree != project.path {
-                        Label("Worktree · \(URL(fileURLWithPath: worktree).lastPathComponent)", systemImage: "arrow.triangle.branch")
+                    if let workspace = edit.latestEditWorkspacePath,
+                       let label = WorkspaceLabel.make(workspace: workspace, project: project.path) {
+                        Label(label.title(abbreviate: abbreviate), systemImage: label.symbol)
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                            .help("This edit was made in a separate worktree: \(worktree)\nProject origin: \(project.path)")
+                            .help(label.help(workspace: workspace, project: project.path))
                     }
                 } else {
                     HStack(spacing: 5) {
@@ -688,6 +765,19 @@ private struct ProjectCard: View {
                     activityLine(title: "Latest activity", sourceID: activity.sourceID,
                                  date: activity.latestActivity, prominent: false)
                         .help(activityHelp)
+                }
+                if let missingFolder {
+                    HStack(spacing: 6) {
+                        Label("\(missingFolder.editCount) \(missingFolder.editCount == 1 ? "edit" : "edits") in a folder that no longer exists · \(URL(fileURLWithPath: missingFolder.path).lastPathComponent)",
+                              systemImage: "questionmark.folder")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange.opacity(0.85))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        locateButton(missingFolder)
+                    }
+                    .help("\(missingFolder.path)\nIf this folder was moved, choose its new location so these edits join that project. If it was deleted, there is nothing to do.")
                 }
             }
 
@@ -743,10 +833,83 @@ private struct ProjectCard: View {
         .padding(13)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.7), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.primary.opacity(0.055), lineWidth: 1))
-        .contextMenu {
-            Button("Reveal in Finder", systemImage: "folder") { reveal() }
-            Button("Copy project path", systemImage: "doc.on.doc") { copyPath() }
+        .contextMenu { projectActions }
+        .alert("Forget earlier locations of “\(project.name)”?", isPresented: $confirmForget) {
+            Button("Forget", role: .destructive) { forget() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Session logs that mention those paths stop counting toward this project. A link still at an earlier path is learned again. Nothing on disk changes.")
         }
+    }
+
+    @ViewBuilder private var projectActions: some View {
+        Button("Reveal in Finder", systemImage: "folder") { reveal() }
+            .disabled(isUnavailable)
+        Button("Copy project path", systemImage: "doc.on.doc") { copyPath(project.path) }
+        if let location, !location.previousLocations.isEmpty {
+            if location.previousLocations.count == 1, let earlier = location.previousPaths.first {
+                Button("Copy earlier path", systemImage: "clock.arrow.circlepath") { copyPath(earlier) }
+            } else {
+                Menu("Copy earlier path") {
+                    ForEach(location.previousPaths, id: \.self) { earlier in
+                        Button(abbreviate(earlier)) { copyPath(earlier) }
+                    }
+                }
+            }
+        }
+        if canLocateFolder || missingFolder != nil {
+            Divider()
+            Button("Locate moved folder…", systemImage: "folder.badge.questionmark") { locate(canLocateFolder ? nil : missingFolder) }
+                .disabled(demoMode || isLinking)
+        }
+        if let location, !location.previousLocations.isEmpty {
+            Divider()
+            Button("Forget earlier locations…", role: .destructive) { confirmForget = true }
+                .disabled(demoMode)
+        }
+    }
+
+    /// A vanished project folder can be located only when Agent Trail knew it
+    /// as a checkout; a plain launch folder has no evidence to check against.
+    private var canLocateFolder: Bool { isUnavailable && location != nil }
+
+    @ViewBuilder private func locateButton(_ missing: MissingFolder?) -> some View {
+        if isLinking {
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("Linking folder…").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+        } else {
+            Button("Locate…") { locate(missing) }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .disabled(demoMode)
+                .help(demoMode ? "Not available with sample data"
+                      : "Choose where this project lives now. Agent Trail checks the folder's Git metadata and links the earlier path to it.")
+                .accessibilityLabel("Locate the moved folder for \(project.name)")
+        }
+    }
+
+    private func previousTitle(_ location: ProjectLocation) -> String {
+        if location.previousLocations.count == 1, let earlier = location.previousPaths.first {
+            return "Previously at · \(abbreviate(earlier))"
+        }
+        return "Previously at · \(location.previousLocations.count) earlier locations"
+    }
+
+    private func previousHelp(_ location: ProjectLocation) -> String {
+        let lines = location.previousLocations.map { earlier -> String in
+            let how: String
+            switch earlier.origin {
+            case .link: how = "a link pointed here"
+            case .move: how = "the folder moved"
+            case .manual: how = "you linked it"
+            }
+            let shadow = earlier.shadowedSince == nil ? "" : " · another folder is there now, so only older records count"
+            return "• \(earlier.path) — \(how), noticed \(earlier.observedAt.formatted(date: .abbreviated, time: .omitted))\(shadow)"
+        }
+        return (["Agent Trail remembers where this folder used to be, so older session logs still count here."] + lines
+                + ["Use the project menu to copy or forget these."]).joined(separator: "\n")
     }
 
     private func activityLine(title: String, sourceID: String, date: Date, prominent: Bool) -> some View {

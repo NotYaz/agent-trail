@@ -226,12 +226,163 @@ final class GrokActivityProviderTests: XCTestCase {
         entry["edits"] = edits
         entries[key] = entry
         saved["files"] = entries
-        saved["version"] = 1
+        saved["version"] = 3
         try JSONSerialization.data(withJSONObject: saved).write(to: fixture.cache)
 
         let result = GrokActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
         XCTAssertEqual(result.projects[0].recordedEditCount, 1)
         XCTAssertTrue(result.notices.contains { $0.contains("rebuilt once") })
+        let rebuilt = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.cache)) as? [String: Any])
+        XCTAssertEqual(rebuilt["version"] as? Int, 4)
+    }
+
+    func testConfirmedTargetsIdentifyOneChildRepositoryWithoutChangingRecordedWorkspace() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = fixture.project.appendingPathComponent("agent-trail", isDirectory: true)
+        try fixture.git(repository)
+        let path = repository.appendingPathComponent("Sources/file.swift").path
+        try fixture.write(summary: true, updates: [
+            fixture.call("edit", name: "write", file: path, seconds: 5),
+            fixture.finish("edit", status: "completed", absolute: path, output: "SearchReplace", seconds: 6)
+        ])
+        let provider = GrokActivityProvider(cacheURL: fixture.cache)
+        let metadata = provider.metadata(sources: [fixture.source])
+        XCTAssertEqual(metadata.projects.map(\.path), [canonicalPath(fixture.project.path)])
+        XCTAssertTrue(metadata.sessionProjects.isEmpty)
+        let result = provider.scan(sources: [fixture.source])
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.path, canonicalPath(repository.path))
+        XCTAssertEqual(project.recordedEditCount, 1)
+        XCTAssertEqual(project.sessionCount, 1)
+        XCTAssertEqual(project.latestActivity.workspacePath, canonicalPath(fixture.project.path))
+        XCTAssertEqual(result.sessionProjects, [SessionProjectAssociation(sourceID: fixture.source.id,
+            sessionID: "session-1", recordedWorkspace: fixture.project.path, projectPath: canonicalPath(repository.path))])
+        let reloaded = GrokActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        XCTAssertEqual(reloaded.projects.map(\.path), result.projects.map(\.path))
+        XCTAssertEqual(reloaded.sessionProjects, result.sessionProjects)
+    }
+
+    func testRecordedWorkspaceInsideRepositoryCanResolveBeforeAnyEdit() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.git(fixture.project)
+        let workspace = fixture.project.appendingPathComponent("Sources", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try fixture.write(summary: true, updates: nil, recordedWorkspace: workspace.path)
+        let result = GrokActivityProvider().metadata(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path), [canonicalPath(fixture.project.path)])
+        XCTAssertEqual(result.sessionProjects.first?.recordedWorkspace, workspace.path)
+        XCTAssertEqual(result.projects.first?.latestActivity.workspacePath, canonicalPath(workspace.path))
+    }
+
+    func testAppendingASecondRepositoryReturnsTheSessionButKeepsEachEdit() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let first = fixture.project.appendingPathComponent("first", isDirectory: true)
+        let second = fixture.project.appendingPathComponent("second", isDirectory: true)
+        try fixture.git(first)
+        try fixture.git(second)
+        let firstFile = first.appendingPathComponent("file.swift").path
+        let secondFile = second.appendingPathComponent("file.swift").path
+        try fixture.write(summary: true, updates: [
+            fixture.call("first", name: "write", file: firstFile, seconds: 1),
+            fixture.finish("first", status: "completed", absolute: firstFile, output: "SearchReplace", seconds: 2)
+        ])
+        let provider = GrokActivityProvider(cacheURL: fixture.cache)
+        XCTAssertEqual(provider.scan(sources: [fixture.source]).projects.map(\.path), [canonicalPath(first.path)])
+        for record in [fixture.call("second", name: "write", file: secondFile, seconds: 3),
+                       fixture.finish("second", status: "completed", absolute: secondFile, output: "SearchReplace", seconds: 4)] {
+            try fixture.append(JSONSerialization.data(withJSONObject: record) + Data([10]))
+        }
+        let result = provider.scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: result.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[canonicalPath(fixture.project.path)]?.sessionCount, 1)
+        XCTAssertEqual(byPath[canonicalPath(first.path)]?.recordedEditCount, 1)
+        XCTAssertEqual(byPath[canonicalPath(second.path)]?.latestEdit?.latestEdit, fixture.date(4))
+        XCTAssertTrue(result.sessionProjects.isEmpty)
+        let reloaded = GrokActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        XCTAssertEqual(Set(reloaded.projects.map(\.path)), Set(result.projects.map(\.path)))
+        XCTAssertEqual(reloaded.projects.reduce(0) { $0 + $1.recordedEditCount }, 2)
+    }
+
+    func testDuplicateSessionCopiesAggregateAllEvidenceBeforeChoosingTheSessionHome() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let first = fixture.project.appendingPathComponent("first", isDirectory: true)
+        let second = fixture.project.appendingPathComponent("second", isDirectory: true)
+        try fixture.git(first)
+        try fixture.git(second)
+        let firstFile = first.appendingPathComponent("file.swift").path
+        let secondFile = second.appendingPathComponent("file.swift").path
+        try fixture.write(summary: true, updates: [
+            fixture.call("first", name: "write", file: firstFile, seconds: 1),
+            fixture.finish("first", status: "completed", absolute: firstFile, output: "SearchReplace", seconds: 2)
+        ])
+        let copy = fixture.root.appendingPathComponent("sessions/other-copy/session-1", isDirectory: true)
+        try fixture.write(summary: true, updates: [
+            fixture.call("first", name: "write", file: firstFile, seconds: 5),
+            fixture.finish("first", status: "completed", absolute: firstFile, output: "SearchReplace", seconds: 6),
+            fixture.call("second", name: "write", file: secondFile, seconds: 7),
+            fixture.finish("second", status: "completed", absolute: secondFile, output: "SearchReplace", seconds: 8)
+        ], directoryOverride: copy)
+        let result = GrokActivityProvider().scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: result.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[canonicalPath(fixture.project.path)]?.sessionCount, 1)
+        XCTAssertEqual(result.projects.reduce(0) { $0 + $1.sessionCount }, 1)
+        XCTAssertEqual(byPath[canonicalPath(first.path)]?.recordedEditCount, 1)
+        XCTAssertEqual(byPath[canonicalPath(first.path)]?.latestEdit?.latestEdit, fixture.date(2))
+        XCTAssertEqual(byPath[canonicalPath(second.path)]?.recordedEditCount, 1)
+        XCTAssertTrue(result.sessionProjects.isEmpty)
+    }
+
+    func testSymlinkedMoveGroupsOldAndCurrentTargetsAndLearnedLocationOutlivesTheLink() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let old = fixture.project.appendingPathComponent("agent-trail", isDirectory: true)
+        let current = fixture.root.appendingPathComponent("Dev/agent-trail", isDirectory: true)
+        try fixture.git(old)
+        try FileManager.default.createDirectory(at: current.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: old, to: current)
+        try FileManager.default.createSymbolicLink(at: old, withDestinationURL: current)
+        let oldFile = old.appendingPathComponent("Sources/old.swift").path
+        let newFile = current.appendingPathComponent("Sources/new.swift").path
+        let outside = fixture.root.appendingPathComponent("other/outside.swift").path
+        try fixture.write(summary: true, updates: [
+            fixture.call("old", name: "write", file: oldFile, seconds: 1),
+            fixture.finish("old", status: "completed", absolute: oldFile, output: "SearchReplace", seconds: 2),
+            fixture.call("new", name: "write", file: newFile, seconds: 3),
+            fixture.finish("new", status: "completed", absolute: newFile, output: "SearchReplace", seconds: 4),
+            fixture.call("outside", name: "write", file: outside, seconds: 5),
+            fixture.finish("outside", status: "completed", absolute: outside, output: "SearchReplace", seconds: 6)
+        ])
+        let locationsURL = fixture.root.appendingPathComponent("support/project-locations.json")
+        let composite = CompositeActivityProvider(cacheURL: fixture.root.appendingPathComponent("support/activity-cache.json"),
+                                                  locationsURL: locationsURL)
+        let result = composite.scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path), [canonicalPath(current.path)])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        XCTAssertEqual(result.projects.first?.sessionCount, 1)
+        XCTAssertEqual(result.projects.first?.latestEdit?.latestEdit, fixture.date(4))
+        XCTAssertEqual(result.sessionProjects.first?.recordedWorkspace, fixture.project.path)
+        let learned = try XCTUnwrap(result.projectLocations.location(forCurrentPath: canonicalPath(current.path)))
+        XCTAssertEqual(learned.previousLocations.map(\.path), [old.path])
+        XCTAssertEqual(learned.previousLocations.first?.origin, .link)
+
+        // Deleting the link keeps the grouping, from the saved catalog alone.
+        try FileManager.default.removeItem(at: old)
+        let relaunched = CompositeActivityProvider(cacheURL: fixture.root.appendingPathComponent("support/activity-cache.json"),
+                                                   locationsURL: locationsURL).scan(sources: [fixture.source])
+        XCTAssertEqual(relaunched.projects.map(\.path), [canonicalPath(current.path)])
+        XCTAssertEqual(relaunched.projects.first?.recordedEditCount, 2)
+
+        // Without that catalog, the old edit stays with the folder it was made from.
+        let forgotten = GrokActivityProvider().scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: forgotten.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[canonicalPath(current.path)]?.sessionCount, 1)
+        XCTAssertEqual(byPath[canonicalPath(current.path)]?.recordedEditCount, 1)
+        XCTAssertEqual(byPath[canonicalPath(fixture.project.path)]?.recordedEditCount, 1)
+        XCTAssertEqual(forgotten.missingFolders.first?.path, old.path)
     }
 }
 
@@ -298,12 +449,12 @@ private final class Fixture {
         ]
     }
 
-    func write(summary: Bool, title: String = "title", created: String? = nil, active: String? = nil, updates: [[String: Any]]?, sessionID: String = "session-1") throws {
-        let directory = sessionDir.deletingLastPathComponent().appendingPathComponent(sessionID, isDirectory: true)
+    func write(summary: Bool, title: String = "title", created: String? = nil, active: String? = nil, updates: [[String: Any]]?, sessionID: String = "session-1", recordedWorkspace: String? = nil, directoryOverride: URL? = nil) throws {
+        let directory = directoryOverride ?? sessionDir.deletingLastPathComponent().appendingPathComponent(sessionID, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if summary {
             let object: [String: Any] = [
-                "info": ["id": sessionID, "cwd": project.path],
+                "info": ["id": sessionID, "cwd": recordedWorkspace ?? project.path],
                 "created_at": created ?? stamp(0),
                 "last_active_at": active ?? stamp(30),
                 "generated_title": title
@@ -324,5 +475,12 @@ private final class Fixture {
         defer { try? handle.close() }
         try handle.seekToEnd()
         try handle.write(contentsOf: data)
+    }
+
+    func git(_ directory: URL) throws {
+        let metadata = directory.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: metadata.appendingPathComponent("objects"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: metadata.appendingPathComponent("refs"), withIntermediateDirectories: true)
+        try Data("ref: refs/heads/main\n".utf8).write(to: metadata.appendingPathComponent("HEAD"))
     }
 }

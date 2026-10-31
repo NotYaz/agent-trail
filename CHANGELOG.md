@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- A project is now the Git checkout where confirmed edits landed. Each Claude, Codex, or Grok edit counts for the checkout containing its files after following links. A session started in a parent folder joins that checkout when its edits landed in exactly one, and its card shows **Launched from**. Edits spanning several checkouts are not merged, and repositories are never matched by name or remote.
+- Moved repositories keep their history. A link left at the old path is remembered, so removing it later changes nothing. A plain move on the same disk is followed through a bookmark and folder identity. A move never seen can be fixed once with **Locate…**. Cards show **Previously at** and offer **Forget earlier locations…**.
+- A new folder at an earlier location stays a separate project; only records made before it appeared count for the moved one. A repository at the home folder or above it is never treated as a project.
+- Codex helper threads with no repository edits of their own join their parent thread's project when started in the same folder.
+- Live Codex and Grok sessions started outside a project appear on the project their edits landed in. Claude windows still reporting a moved folder appear at its new location.
+- Files written outside any checkout stay on the folder the session was started in. Edits under a vanished folder are reported with a **Locate…** action.
+- Search matches earlier locations and launch folders. Live session rows say Worktree, Subfolder, or Launched outside instead of calling every other folder a worktree.
+- New `project-locations.json` (mode 0600) stores paths, bookmarks, and folder identity only. Codex and Grok caches rebuild once as version 4 and now keep recorded evidence, so learned locations never require reparsing logs. The Claude cache is unchanged.
+- `AgentTrailInspect` reports learned locations, re-homed sessions, and missing folders, and accepts `--locations`.
+- Fixed a folder-walk loop that could exhaust memory for paths outside every repository in the unreleased resolver.
+
 ## 0.1.0-alpha.6 — 2026-10-31
 
 - Live Codex status joins verified app-server thread-writer handles to explicit turn metadata, opened read-only. Loaded in-progress turns show Working; ended turns show Idle. Leftover lock files and unloaded historical turns do not create live sessions. Codex approval/input dialogs cannot yet be distinguished from an in-progress turn.

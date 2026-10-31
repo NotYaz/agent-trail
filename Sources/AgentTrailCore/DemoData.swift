@@ -13,7 +13,7 @@ public enum DemoData {
             ProjectActivity(sourceID: main, projectPath: atlas, latestActivity: now.addingTimeInterval(-240), latestEdit: now.addingTimeInterval(-900), workspacePath: atlas),
             ProjectActivity(sourceID: second, projectPath: atlas, latestActivity: now.addingTimeInterval(-600), latestEdit: now.addingTimeInterval(-1_800), workspacePath: atlas),
             ProjectActivity(sourceID: main, projectPath: notes, latestActivity: now.addingTimeInterval(-3_600), latestEdit: now.addingTimeInterval(-4_800), workspacePath: notes),
-            ProjectActivity(sourceID: "codex", projectPath: orbit, latestActivity: now.addingTimeInterval(-15), latestEdit: now.addingTimeInterval(-80), workspacePath: orbit),
+            ProjectActivity(sourceID: "codex", projectPath: orbit, latestActivity: now.addingTimeInterval(-15), latestEdit: now.addingTimeInterval(-80), workspacePath: "/Demo/Codex/2026-10-30/launch", latestEditWorkspacePath: "/Demo/Codex/2026-10-30/launch"),
             ProjectActivity(sourceID: "grok", projectPath: orbit, latestActivity: now.addingTimeInterval(-70), latestEdit: now.addingTimeInterval(-150), workspacePath: orbit)
         ]
         for index in records.indices {
@@ -26,6 +26,8 @@ public enum DemoData {
             records[index].history = history
             records[index].sessionCount = history.reduce(0) { $0 + $1.sessionCount }
         }
-        return ScanResult(projects: ProjectSummary.merge(records), scannedAt: now)
+        // Atlas was moved; Agent Trail remembers where it used to be.
+        let locations = ProjectLocationRegistry.demo([(atlas, [("/Demo/Archive/atlas", .move)])], now: now)
+        return ScanResult(projects: ProjectSummary.merge(records), scannedAt: now, projectLocations: locations)
     }
 }

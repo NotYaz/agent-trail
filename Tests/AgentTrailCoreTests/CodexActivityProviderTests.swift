@@ -148,7 +148,7 @@ final class CodexActivityProviderTests: XCTestCase {
         XCTAssertNil(project.latestEdit)
         XCTAssertTrue(result.notices.contains { $0.contains("rebuilt once") })
         let rebuiltCache = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.cache)) as? [String: Any])
-        XCTAssertEqual(rebuiltCache["version"] as? Int, 2)
+        XCTAssertEqual(rebuiltCache["version"] as? Int, 4)
     }
 
     func testNestedWorkspaceRootIsPreservedWithoutATurnCwdChange() throws {
@@ -221,6 +221,296 @@ final class CodexActivityProviderTests: XCTestCase {
         let project = try XCTUnwrap(CodexActivityProvider().scan(sources: [fixture.source]).projects.first)
         XCTAssertEqual(project.sessionCount, 1)
     }
+
+    func testParentWorkspaceUsesTheOneCheckoutContainingEveryConfirmedTarget() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = try fixture.git("repository")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("repo-edit", status: "completed", files: [repository.appendingPathComponent("Sources/main.swift").path: "add"], seconds: 10)
+        ])
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.path, repository.path)
+        XCTAssertEqual(project.recordedEditCount, 1)
+        XCTAssertEqual(project.sessionCount, 1)
+        XCTAssertEqual(project.latestEdit?.latestEditWorkspacePath, fixture.project.path)
+        XCTAssertEqual(result.sessionProjects.count, 1)
+        XCTAssertEqual(result.sessionProjects.first?.recordedWorkspace, fixture.project.path)
+        XCTAssertEqual(result.sessionProjects.first?.projectPath, repository.path)
+        XCTAssertEqual(result.sessionProjects.first?.sessionID, "session-1")
+    }
+
+    func testMetadataDoesNotGuessAChildRepositoryFromFolderContents() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = try fixture.git("repository")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("repo-edit", status: "completed", files: [repository.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        let metadata = CodexActivityProvider().metadata(sources: [fixture.source])
+        XCTAssertEqual(metadata.projects.first?.path, fixture.project.path)
+        XCTAssertTrue(metadata.sessionProjects.isEmpty)
+        XCTAssertNil(metadata.projects.first?.latestEdit)
+    }
+
+    func testDifferentRecordedSubfoldersOfOneCheckoutMergeWithSeparateSessions() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = try fixture.git("repository")
+        let sourceDirectory = repository.appendingPathComponent("Sources")
+        let testDirectory = repository.appendingPathComponent("Tests")
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: testDirectory, withIntermediateDirectories: true)
+        try fixture.write(fixture.sessionLines(cwd: sourceDirectory.path) + [
+            fixture.fileChange("source-edit", status: "completed", files: [sourceDirectory.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        try fixture.write(fixture.sessionLines(cwd: testDirectory.path, sessionID: "session-2") + [
+            fixture.fileChange("test-edit", status: "completed", files: [testDirectory.appendingPathComponent("main.swift").path: "add"], seconds: 20)
+        ], to: fixture.root.appendingPathComponent("sessions/rollout-second.jsonl"))
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.count, 1)
+        XCTAssertEqual(result.projects.first?.path, repository.path)
+        XCTAssertEqual(result.projects.first?.sessionCount, 2)
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        XCTAssertEqual(result.projects.first?.latestEdit?.latestEditWorkspacePath, testDirectory.path)
+        XCTAssertEqual(result.sessionProjects.count, 2)
+    }
+
+    func testSessionTouchingTwoCheckoutsCountsEachEditWhereItLanded() throws {
+        // Each edit belongs to the checkout it physically landed in. With two
+        // checkouts there is no single home, so the session stays where it began.
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let first = try fixture.git("first")
+        let second = try fixture.git("second")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("first-edit", status: "completed", files: [first.appendingPathComponent("main.swift").path: "add"], seconds: 10),
+            fixture.fileChange("second-edit", status: "completed", files: [second.appendingPathComponent("main.swift").path: "add"], seconds: 20)
+        ])
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: result.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[first.path]?.recordedEditCount, 1)
+        XCTAssertEqual(byPath[second.path]?.recordedEditCount, 1)
+        XCTAssertEqual(byPath[first.path]?.sessionCount, 0)
+        XCTAssertEqual(byPath[fixture.project.path]?.sessionCount, 1)
+        XCTAssertEqual(byPath[fixture.project.path]?.recordedEditCount, 0)
+        XCTAssertTrue(result.sessionProjects.isEmpty)
+    }
+
+    func testAppendingASecondCheckoutReturnsTheSessionButKeepsEachEdit() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let first = try fixture.git("first")
+        let second = try fixture.git("second")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("first-edit", status: "completed", files: [first.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        let provider = CodexActivityProvider(cacheURL: fixture.cache)
+        let initial = provider.scan(sources: [fixture.source])
+        XCTAssertEqual(initial.projects.map(\.path), [first.path])
+        XCTAssertEqual(initial.sessionProjects.first?.projectPath, first.path)
+        try fixture.append([fixture.fileChange("second-edit", status: "completed", files: [second.appendingPathComponent("main.swift").path: "add"], seconds: 20)])
+        let rescanned = provider.scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: rescanned.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[fixture.project.path]?.sessionCount, 1)
+        XCTAssertEqual(byPath[first.path]?.recordedEditCount, 1)
+        XCTAssertEqual(byPath[second.path]?.recordedEditCount, 1)
+        XCTAssertTrue(rescanned.sessionProjects.isEmpty)
+        let reloaded = CodexActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        XCTAssertEqual(Set(reloaded.projects.map(\.path)), Set(rescanned.projects.map(\.path)))
+    }
+
+    func testDuplicateRolloutsAggregateAllEvidenceBeforeChoosingTheSessionHome() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let first = try fixture.git("first")
+        let second = try fixture.git("second")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("first-edit", status: "completed", files: [first.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("second-edit", status: "completed", files: [second.appendingPathComponent("main.swift").path: "add"], seconds: 20)
+        ], to: fixture.root.appendingPathComponent("archived_sessions/rollout-copy.jsonl"))
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: result.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[fixture.project.path]?.sessionCount, 1)
+        XCTAssertEqual(result.projects.reduce(0) { $0 + $1.sessionCount }, 1)
+        XCTAssertEqual(byPath[first.path]?.recordedEditCount, 1)
+        XCTAssertEqual(byPath[second.path]?.recordedEditCount, 1)
+        XCTAssertTrue(result.sessionProjects.isEmpty)
+    }
+
+    func testPreviousCacheVersionRebuildsRawEvidence() throws {
+        // Version 3 dropped edits through links and to moved paths while
+        // parsing. Version 4 keeps recorded evidence and decides when folding.
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = try fixture.git("repository")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("repo-edit", status: "completed", files: [repository.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        _ = CodexActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        var cache = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.cache)) as? [String: Any])
+        cache["version"] = 3
+        var cachedFiles = try XCTUnwrap(cache["files"] as? [String: [String: Any]])
+        for key in cachedFiles.keys {
+            var file = try XCTUnwrap(cachedFiles[key])
+            file["edits"] = [String: Any]()
+            cachedFiles[key] = file
+        }
+        cache["files"] = cachedFiles
+        try JSONSerialization.data(withJSONObject: cache).write(to: fixture.cache)
+        let result = CodexActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.first?.path, repository.path)
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertTrue(result.notices.contains { $0.contains("rebuilt once") })
+        let rebuilt = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.cache)) as? [String: Any])
+        XCTAssertEqual(rebuilt["version"] as? Int, 4)
+    }
+
+    func testSymlinkedMoveGroupsOldAndNewTargetsWithoutRegistration() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let oldRepository = try fixture.git("old-repository")
+        let newRepository = fixture.root.appendingPathComponent("Dev/current-repository")
+        try FileManager.default.createDirectory(at: newRepository.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: oldRepository, to: newRepository)
+        try FileManager.default.createSymbolicLink(at: oldRepository, withDestinationURL: newRepository)
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("old-path", status: "completed", files: [oldRepository.appendingPathComponent("old.swift").path: "add"], seconds: 10),
+            fixture.fileChange("new-path", status: "completed", files: [newRepository.appendingPathComponent("new.swift").path: "add"], seconds: 20)
+        ])
+        let provider = CodexActivityProvider(cacheURL: fixture.cache)
+        let result = provider.scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path), [newRepository.path])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        XCTAssertEqual(result.projects.first?.sessionCount, 1)
+        XCTAssertEqual(result.projects.first?.latestEdit?.latestEditWorkspacePath, fixture.project.path)
+        XCTAssertEqual(result.sessionProjects.first?.recordedWorkspace, fixture.project.path)
+        XCTAssertEqual(result.sessionProjects.first?.projectPath, newRepository.path)
+        // The cache keeps the recorded spelling, so a learned location can
+        // regroup it later without reading the log again.
+        let cached = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.cache)) as? [String: Any])
+        let directories = ((cached["files"] as? [String: [String: Any]])?.values.compactMap { $0["edits"] as? [String: [String: Any]] } ?? [])
+            .flatMap(\.values).flatMap { ($0["targetDirectories"] as? [String]) ?? [] }
+        XCTAssertTrue(directories.contains(oldRepository.path))
+        XCTAssertTrue(directories.contains(newRepository.path))
+    }
+
+    func testEditThroughASymlinkCountsWhereTheWriteLanded() throws {
+        // A link inside the launch folder pointing at another checkout is where
+        // the write physically landed; that checkout gets the edit.
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let outsideRepository = try fixture.git("outside", in: fixture.root)
+        let link = fixture.project.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outsideRepository)
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("through-link", status: "completed", files: [link.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path), [outsideRepository.path])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(result.sessionProjects.first?.projectPath, outsideRepository.path)
+    }
+
+    func testScratchFilesBesideACheckoutStayWithTheLaunchFolder() throws {
+        // A session started in a plain folder that mostly edits one checkout
+        // belongs to that checkout. Notes it wrote outside any checkout are
+        // still counted, on the launch folder, and never inflate the checkout.
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = try fixture.git("repository")
+        let notes = fixture.project.appendingPathComponent("work")
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("code", status: "completed", files: [repository.appendingPathComponent("Sources/main.swift").path: "add"], seconds: 10),
+            fixture.fileChange("more-code", status: "completed", files: [repository.appendingPathComponent("README.md").path: "update"], seconds: 20),
+            fixture.fileChange("notes", status: "completed", files: [notes.appendingPathComponent("release-notes.md").path: "add"], seconds: 30)
+        ])
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: result.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[repository.path]?.sessionCount, 1)
+        XCTAssertEqual(byPath[repository.path]?.recordedEditCount, 2)
+        XCTAssertEqual(byPath[fixture.project.path]?.sessionCount, 0)
+        XCTAssertEqual(byPath[fixture.project.path]?.recordedEditCount, 1)
+        XCTAssertEqual(result.sessionProjects.first?.projectPath, repository.path)
+    }
+
+    func testSpawnedThreadWithoutRepositoryEditsJoinsItsParentsCheckout() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = try fixture.git("repository")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("code", status: "completed", files: [repository.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        try fixture.write(fixture.sessionLines(sessionID: "reviewer", parent: "session-1"),
+                          to: fixture.root.appendingPathComponent("sessions/rollout-reviewer.jsonl"))
+        let other = fixture.root.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try fixture.write(fixture.sessionLines(cwd: other.path, sessionID: "unrelated", parent: "session-1"),
+                          to: fixture.root.appendingPathComponent("sessions/rollout-unrelated.jsonl"))
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        let byPath = Dictionary(uniqueKeysWithValues: result.projects.map { ($0.path, $0) })
+        XCTAssertEqual(byPath[repository.path]?.sessionCount, 2)
+        XCTAssertNil(byPath[fixture.project.path])
+        // A thread started somewhere else is not pulled in by its parent.
+        XCTAssertEqual(byPath[other.path]?.sessionCount, 1)
+        XCTAssertEqual(Set(result.sessionProjects.map(\.sessionID)), ["session-1", "reviewer"])
+    }
+
+    func testEditsUnderAMissingFolderAreReportedForLocating() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let vanished = fixture.project.appendingPathComponent("outputs/AgentTrail")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("a", status: "completed", files: [vanished.appendingPathComponent("Sources/a.swift").path: "add"], seconds: 10),
+            fixture.fileChange("b", status: "completed", files: [vanished.appendingPathComponent("README.md").path: "add"], seconds: 20)
+        ])
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.first?.path, fixture.project.path)
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        let missing = try XCTUnwrap(result.missingFolders.first)
+        XCTAssertEqual(result.missingFolders.count, 1)
+        XCTAssertEqual(missing.path, fixture.project.appendingPathComponent("outputs").path)
+        XCTAssertEqual(missing.projectPath, fixture.project.path)
+        XCTAssertEqual(missing.editCount, 2)
+    }
+
+    func testQuickListingUsesCachedEvidenceSoSessionsDoNotJumpBetweenProjects() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let repository = try fixture.git("repository")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("code", status: "completed", files: [repository.appendingPathComponent("main.swift").path: "add"], seconds: 10)
+        ])
+        _ = CodexActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        let relaunched = CodexActivityProvider(cacheURL: fixture.cache).metadata(sources: [fixture.source])
+        XCTAssertEqual(relaunched.projects.map(\.path), [repository.path])
+        XCTAssertEqual(relaunched.sessionProjects.first?.projectPath, repository.path)
+    }
+
+    func testLearnedEarlierLocationRegroupsWithoutReparsing() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let oldRepository = try fixture.git("old-repository")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("before-move", status: "completed", files: [oldRepository.appendingPathComponent("a.swift").path: "add"], seconds: 10)
+        ])
+        let provider = CodexActivityProvider(cacheURL: fixture.cache)
+        XCTAssertEqual(provider.scan(sources: [fixture.source]).projects.map(\.path), [oldRepository.path])
+        let newRepository = fixture.root.appendingPathComponent("Dev/moved")
+        try FileManager.default.createDirectory(at: newRepository.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: oldRepository, to: newRepository)
+        var locations = ProjectLocationRegistry()
+        try locations.register(path: newRepository.path, previousPaths: [oldRepository.path])
+        provider.projectLocations = locations
+        let rescanned = provider.scan(sources: [fixture.source])
+        XCTAssertEqual(rescanned.projects.map(\.path), [newRepository.path])
+        XCTAssertEqual(rescanned.projects.first?.recordedEditCount, 1)
+        XCTAssertFalse(rescanned.notices.contains { $0.contains("rebuilt") })
+    }
 }
 
 private final class Fixture {
@@ -232,7 +522,7 @@ private final class Fixture {
     let base: Date
 
     init() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("agent-trail-codex-\(UUID().uuidString)", isDirectory: true)
+        root = URL(fileURLWithPath: canonicalPath(FileManager.default.temporaryDirectory.appendingPathComponent("agent-trail-codex-\(UUID().uuidString)", isDirectory: true).path), isDirectory: true)
         project = root.appendingPathComponent("project", isDirectory: true)
         rollout = root.appendingPathComponent("sessions/2026/10/30/rollout-session.jsonl")
         cache = root.appendingPathComponent("cache/activity-cache-codex.json")
@@ -253,18 +543,25 @@ private final class Fixture {
         return formatter.string(from: date(seconds))
     }
 
-    func sessionLines(timestamp: String? = nil, roots: [String]? = nil) -> [[String: Any]] {
-        [[
+    func sessionLines(timestamp: String? = nil, roots: [String]? = nil, cwd: String? = nil, sessionID: String = "session-1",
+                      parent: String? = nil) -> [[String: Any]] {
+        var payload: [String: Any] = [
+            "id": sessionID,
             "timestamp": timestamp ?? stamp(0),
-            "ordinal": 1,
-            "type": "session_meta",
-            "payload": [
-                "id": "session-1",
-                "timestamp": timestamp ?? stamp(0),
-                "cwd": project.path,
-                "runtime_workspace_roots": roots ?? [project.path]
-            ]
-        ]]
+            "cwd": cwd ?? project.path,
+            "runtime_workspace_roots": roots ?? [cwd ?? project.path]
+        ]
+        if let parent { payload["parent_thread_id"] = parent }
+        return [["timestamp": timestamp ?? stamp(0), "ordinal": 1, "type": "session_meta", "payload": payload]]
+    }
+
+    func git(_ name: String, in parent: URL? = nil) throws -> URL {
+        let repository = (parent ?? project).appendingPathComponent(name)
+        let metadata = repository.appendingPathComponent(".git")
+        try FileManager.default.createDirectory(at: metadata.appendingPathComponent("objects"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: metadata.appendingPathComponent("refs"), withIntermediateDirectories: true)
+        try Data("ref: refs/heads/main\n".utf8).write(to: metadata.appendingPathComponent("HEAD"))
+        return repository
     }
 
     func turn(_ cwd: String) -> [String: Any] {
