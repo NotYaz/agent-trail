@@ -68,6 +68,30 @@ final class ProcessIdentityTests: XCTestCase {
         }
     }
 
+    func testCodexAndGrokHomesDoNotMatchClaudeProfiles() throws {
+        let home = self.home
+        let codex = AgentSource(id: "codex", name: "Codex", configDirectory: "\(home)/.codex", assistant: .codex)
+        let custom = AgentSource(id: "codex-work", name: "Codex Work", configDirectory: "/tmp/codex-work", assistant: .codex)
+        let grok = AgentSource(id: "grok", name: "Grok", configDirectory: "\(home)/.grok", assistant: .grok)
+        let plain = try XCTUnwrap(ProcessIdentity.parseKernelArguments(record()))
+        XCTAssertTrue(plain.matches(source: codex, homeDirectory: home))
+        XCTAssertFalse(plain.matches(source: custom, homeDirectory: home))
+        XCTAssertTrue(plain.matches(source: grok, homeDirectory: home))
+        XCTAssertTrue(plain.matches(source: sources[0], homeDirectory: home))
+
+        let codexOverride = try XCTUnwrap(ProcessIdentity.parseKernelArguments(record(environment: ["CODEX_HOME=/tmp/codex-work"])))
+        XCTAssertTrue(codexOverride.matches(source: custom, homeDirectory: home))
+        XCTAssertFalse(codexOverride.matches(source: codex, homeDirectory: home))
+        XCTAssertTrue(codexOverride.matches(source: sources[0], homeDirectory: home))
+
+        let relative = try XCTUnwrap(ProcessIdentity.parseKernelArguments(record(environment: ["GROK_HOME=relative-home"])))
+        let customGrok = AgentSource(id: "grok-work", name: "Grok Work", configDirectory: "/tmp/grok-work", assistant: .grok)
+        XCTAssertFalse(relative.matches(source: customGrok, homeDirectory: home))
+        XCTAssertFalse(relative.matches(source: grok, homeDirectory: home))
+        XCTAssertNil(ProcessIdentity.parseKernelArguments(record(environment: ["CODEX_HOME=/tmp/one", "CODEX_HOME=/tmp/two"])))
+        XCTAssertNil(ProcessIdentity.parseKernelArguments(record(environment: ["GROK_HOME="])))
+    }
+
     func testSecondaryRequiresBothEffectiveDirectoriesToMatch() throws {
         for data in [
             record(arguments: ["--user-data-dir=\(sources[1].userDataDirectory!)"]),

@@ -1,24 +1,68 @@
 import Foundation
 
+/// Which local assistant a profile reads. Missing values in older settings stay Claude.
+public enum AssistantKind: String, Codable, CaseIterable, Sendable {
+    case claude
+    case codex
+    case grok
+
+    public var displayName: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .grok: return "Grok"
+        }
+    }
+
+    /// Standard home used for new profiles. Set configDirectory explicitly when
+    /// Codex or Grok is launched with a custom home environment variable.
+    public func defaultHome(home: String) -> String {
+        switch self {
+        case .claude: return "\(home)/.claude"
+        case .codex: return "\(home)/.codex"
+        case .grok: return "\(home)/.grok"
+        }
+    }
+}
+
 public struct AgentSource: Identifiable, Codable, Hashable, Sendable {
     public var id: String
     public var name: String
     public var configDirectory: String
     public var userDataDirectory: String?
     public var bundleIdentifier: String
+    public var assistant: AssistantKind
 
-    public init(id: String, name: String, configDirectory: String, userDataDirectory: String? = nil, bundleIdentifier: String = "com.anthropic.claudefordesktop") {
+    public init(id: String, name: String, configDirectory: String, userDataDirectory: String? = nil, bundleIdentifier: String? = nil, assistant: AssistantKind = .claude) {
         self.id = id
         self.name = name
         self.configDirectory = configDirectory
         self.userDataDirectory = userDataDirectory
-        self.bundleIdentifier = bundleIdentifier
+        self.assistant = assistant
+        self.bundleIdentifier = bundleIdentifier ?? (assistant == .claude ? "com.anthropic.claudefordesktop" : "")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, configDirectory, userDataDirectory, bundleIdentifier, assistant
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        configDirectory = try values.decode(String.self, forKey: .configDirectory)
+        userDataDirectory = try values.decodeIfPresent(String.self, forKey: .userDataDirectory)
+        assistant = try values.decodeIfPresent(AssistantKind.self, forKey: .assistant) ?? .claude
+        bundleIdentifier = try values.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+            ?? (assistant == .claude ? "com.anthropic.claudefordesktop" : "")
     }
 
     public static func defaults(home: String = NSHomeDirectory()) -> [AgentSource] {
         [
             AgentSource(id: "claude-primary", name: "Claude · Main", configDirectory: "\(home)/.claude"),
-            AgentSource(id: "claude-second", name: "Claude · Second", configDirectory: "\(home)/.claude-second", userDataDirectory: "\(home)/Library/Application Support/Claude-Second")
+            AgentSource(id: "claude-second", name: "Claude · Second", configDirectory: "\(home)/.claude-second", userDataDirectory: "\(home)/Library/Application Support/Claude-Second"),
+            AgentSource(id: "codex", name: "Codex", configDirectory: AssistantKind.codex.defaultHome(home: home), assistant: .codex),
+            AgentSource(id: "grok", name: "Grok", configDirectory: AssistantKind.grok.defaultHome(home: home), assistant: .grok)
         ]
     }
 }

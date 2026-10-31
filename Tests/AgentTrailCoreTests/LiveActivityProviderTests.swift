@@ -20,6 +20,58 @@ final class LiveActivityProviderTests: XCTestCase {
         XCTAssertTrue(result.notices.isEmpty)
     }
 
+    func testFreshAndVerifiedLongWaitingAreExplicitAttentionStates() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.desktop("fresh-waiting")
+        try fixture.desktop("long-waiting")
+        let start = "Fri Oct 30 10:02:00 2026"
+        try fixture.live("fresh-waiting", pid: 101, status: "waiting", secondsAgo: 10)
+        try fixture.live("long-waiting", pid: 102, status: "waiting", secondsAgo: 3600, procStart: start)
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true }, processStartTimes: { _ in [102: start] })
+        let result = provider.scan(sources: [fixture.source], now: fixture.now)
+        XCTAssertEqual(result.sessions.map(\.status), [.waiting, .waiting])
+        XCTAssertTrue(result.notices.isEmpty)
+    }
+
+    func testStaleFutureOrReusedWaitingCannotClaimCurrentAttention() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        for id in ["stale-waiting", "future-waiting", "reused-waiting"] { try fixture.desktop(id) }
+        let start = "Fri Oct 30 10:02:00 2026"
+        try fixture.live("stale-waiting", pid: 101, status: "waiting", secondsAgo: 91)
+        try fixture.live("future-waiting", pid: 102, status: "waiting", secondsAgo: -30, procStart: start)
+        try fixture.live("reused-waiting", pid: 103, status: "waiting", secondsAgo: 1, procStart: start)
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true }, processStartTimes: { _ in
+            [102: start, 103: "Fri Oct 30 11:30:00 2026"]
+        })
+        let result = provider.scan(sources: [fixture.source], now: fixture.now)
+        XCTAssertEqual(result.sessions.count, 2)
+        XCTAssertTrue(result.sessions.allSatisfy { $0.status == .unknown })
+        XCTAssertFalse(result.sessions.contains { $0.sessionID == "reused-waiting" })
+    }
+
+    func testProviderPrioritizesWaitingThenWorkingIdleAndUnknown() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        for id in ["working", "waiting", "idle", "unknown"] { try fixture.desktop(id) }
+        try fixture.live("working", pid: 101, status: "busy", secondsAgo: 1)
+        try fixture.live("waiting", pid: 102, status: "waiting", secondsAgo: 60)
+        try fixture.live("idle", pid: 103, status: "idle", secondsAgo: 0)
+        try fixture.live("unknown", pid: 104, status: nil, secondsAgo: 0)
+        let result = LiveActivityProvider(isProcessAlive: { _ in true }).scan(sources: [fixture.source], now: fixture.now)
+        XCTAssertEqual(result.sessions.map(\.status), [.waiting, .working, .idle, .unknown])
+    }
+
+    func testIdleDoesNotBecomeWaitingFromAReasonOrPromptReadiness() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.desktop("idle")
+        try fixture.live("idle", pid: 101, status: "idle", secondsAgo: 1, waitingFor: "input needed")
+        let result = LiveActivityProvider(isProcessAlive: { _ in true }).scan(sources: [fixture.source], now: fixture.now)
+        XCTAssertEqual(result.sessions[0].status, .idle)
+    }
+
     func testStaleFlagAndFutureTimestampCannotClaimWorking() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -200,6 +252,21 @@ final class LiveActivityProviderTests: XCTestCase {
         XCTAssertEqual(LiveActivityProvider(freshnessTTL: .nan).freshnessTTL, 90)
     }
 
+    func testCodexAndGrokProfilesAreNotReadAsClaudeLiveStatus() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("agent-trail-live-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("sessions"), withIntermediateDirectories: true)
+        let registry = root.appendingPathComponent("sessions/101.json")
+        let record: [String: Any] = ["pid": 101, "sessionId": "cli", "cwd": "/tmp/project", "status": "busy",
+            "statusUpdatedAt": Date().timeIntervalSince1970 * 1000, "entrypoint": "claude-desktop"]
+        try JSONSerialization.data(withJSONObject: record).write(to: registry)
+        let codex = AgentSource(id: "codex", name: "Codex", configDirectory: root.path, assistant: .codex)
+        let grok = AgentSource(id: "grok", name: "Grok", configDirectory: root.path, assistant: .grok)
+        let result = LiveActivityProvider(isProcessAlive: { _ in true }).scan(sources: [codex, grok])
+        XCTAssertTrue(result.sessions.isEmpty)
+        XCTAssertTrue(result.notices.isEmpty)
+        try FileManager.default.removeItem(at: root)
+    }
+
     private final class Fixture {
         let root: URL
         let project: URL
@@ -235,7 +302,7 @@ final class LiveActivityProviderTests: XCTestCase {
         func live(_ cliID: String, pid: Int32, status: String?, secondsAgo: TimeInterval,
                   statusSecondsAgo: TimeInterval? = nil, cwd: URL? = nil,
                   entrypoint: String = "claude-desktop", domain: String = "darwin", filename: String? = nil,
-                  procStart: String? = nil) throws {
+                  procStart: String? = nil, waitingFor: String? = nil) throws {
             var record: [String: Any] = ["pid": Int(pid), "sessionId": cliID, "cwd": (cwd ?? project).path,
                 "entrypoint": entrypoint, "pidDomain": domain,
                 "updatedAt": now.addingTimeInterval(-secondsAgo).timeIntervalSince1970 * 1000,
@@ -243,6 +310,7 @@ final class LiveActivityProviderTests: XCTestCase {
                 "name": "PRIVATE_PROMPT_MARKER"]
             if let status { record["status"] = status }
             if let procStart { record["procStart"] = procStart }
+            if let waitingFor { record["waitingFor"] = waitingFor }
             try JSONSerialization.data(withJSONObject: record).write(to: registry.appendingPathComponent(filename ?? "\(pid).json"))
         }
     }

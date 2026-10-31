@@ -50,7 +50,7 @@ struct ProfileSettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Profiles")
                     .font(.system(size: 15, weight: .semibold))
-                Text("Connect the Claude instances you work with.")
+                Text("Connect the Claude, Codex, and Grok profiles you work with.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -71,7 +71,7 @@ struct ProfileSettingsView: View {
 
     private var profileList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("CLAUDE PROFILES")
+            Text("PROFILES")
                 .font(.system(size: 9, weight: .semibold))
                 .tracking(1)
                 .foregroundStyle(.secondary)
@@ -108,8 +108,8 @@ struct ProfileSettingsView: View {
             }
             HStack(spacing: 0) {
                 Button(action: addProfile) { Image(systemName: "plus").frame(width: 26, height: 24) }
-                    .help("Add a Claude profile")
-                    .accessibilityLabel("Add a Claude profile")
+                    .help("Add a profile")
+                    .accessibilityLabel("Add a profile")
                 Divider().frame(height: 12)
                 Button(action: removeProfile) { Image(systemName: "minus").frame(width: 26, height: 24) }
                     .disabled(selectedIndex == nil || draftSources.count <= 1)
@@ -128,7 +128,19 @@ struct ProfileSettingsView: View {
     private var profileEditor: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 17) {
-                if selectedIndex != nil {
+                if let index = selectedIndex {
+                    VStack(alignment: .leading, spacing: 6) {
+                        fieldLabel("Assistant", symbol: "sparkles")
+                        Picker("Assistant", selection: assistantBinding) {
+                            ForEach(AssistantKind.allCases, id: \.self) { kind in
+                                Text(kind.displayName).tag(kind)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .accessibilityLabel("Assistant")
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         fieldLabel("Profile name", symbol: "person.crop.circle")
                         TextField("e.g. Claude · Work", text: sourceBinding(\.name))
@@ -136,13 +148,21 @@ struct ProfileSettingsView: View {
                             .accessibilityLabel("Profile name")
                     }
 
-                    folderField("Claude config folder", symbol: "folder", placeholder: "~/.claude",
+                    folderField(configTitle(draftSources[index].assistant), symbol: "folder",
+                                placeholder: draftSources[index].assistant.defaultHome(home: "~"),
                                 value: sourceBinding(\.configDirectory), field: .config)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        folderField("Desktop user-data folder", symbol: "macwindow", placeholder: "Default Claude desktop profile",
-                                    value: userDataBinding, field: .userData)
-                        Text("Leave blank only for the default Claude profile. For custom config folders, enter the matching --user-data-dir folder.")
+                    if draftSources[index].assistant == .claude {
+                        VStack(alignment: .leading, spacing: 6) {
+                            folderField("Desktop user-data folder", symbol: "macwindow", placeholder: "Default Claude desktop profile",
+                                        value: userDataBinding, field: .userData)
+                            Text("Leave blank only for the default Claude profile. For custom config folders, enter the matching --user-data-dir folder.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        Text("\(draftSources[index].assistant.displayName) history is read from this home. Shell commands are not counted as file edits, and there is no live status yet.")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -183,7 +203,7 @@ struct ProfileSettingsView: View {
             }
             HStack(spacing: 12) {
                 Text(store.demoMode ? "Demo profiles are a preview. Relaunch without --demo to connect yours."
-                     : "Reads local records. Saving never restarts Claude.")
+                     : "Reads local records. Saving never restarts an assistant.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -233,6 +253,40 @@ struct ProfileSettingsView: View {
         }
     }
 
+    private var assistantBinding: Binding<AssistantKind> {
+        Binding {
+            guard let index = selectedIndex else { return .claude }
+            return draftSources[index].assistant
+        } set: { kind in
+            setAssistant(kind)
+        }
+    }
+
+    private func configTitle(_ assistant: AssistantKind) -> String {
+        switch assistant {
+        case .claude: return "Claude config folder"
+        case .codex: return "Codex home"
+        case .grok: return "Grok home"
+        }
+    }
+
+    private func setAssistant(_ kind: AssistantKind) {
+        guard let index = selectedIndex, draftSources[index].assistant != kind else { return }
+        let previous = draftSources[index].assistant
+        draftSources[index].assistant = kind
+        if kind == .claude {
+            draftSources[index].bundleIdentifier = "com.anthropic.claudefordesktop"
+        } else {
+            draftSources[index].userDataDirectory = nil
+            draftSources[index].bundleIdentifier = ""
+        }
+        let previousHome = previous.defaultHome(home: "~")
+        if draftSources[index].configDirectory.isEmpty || draftSources[index].configDirectory == previousHome {
+            draftSources[index].configDirectory = kind.defaultHome(home: "~")
+        }
+        validationMessage = nil
+    }
+
     private var userDataBinding: Binding<String> {
         Binding {
             guard let index = selectedIndex else { return "" }
@@ -252,7 +306,8 @@ struct ProfileSettingsView: View {
         let currentPath = field == .config ? draftSources[index].configDirectory
             : (draftSources[index].userDataDirectory ?? "")
         let panel = NSOpenPanel()
-        panel.title = field == .config ? "Choose Claude config folder" : "Choose desktop user-data folder"
+        let assistant = draftSources[index].assistant.displayName
+        panel.title = field == .config ? "Choose \(assistant) home folder" : "Choose desktop user-data folder"
         panel.prompt = "Choose folder"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true

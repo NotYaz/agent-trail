@@ -183,6 +183,7 @@ private struct AgentTrailShell: View {
     }
 
     private var workingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.workingCount ?? 0) } }
+    private var waitingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.waitingCount ?? 0) } }
 
     private var navigationBar: some View {
         HStack(spacing: 5) {
@@ -204,12 +205,13 @@ private struct AgentTrailShell: View {
             HStack(spacing: 6) {
                 Image(systemName: section.symbol)
                 Text(section.rawValue)
-                if section == .projects && workingCount > 0 {
-                    Text(String(workingCount))
+                if section == .projects && (waitingCount > 0 || workingCount > 0) {
+                    Text(String(waitingCount > 0 ? waitingCount : workingCount))
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(.green.opacity(0.14), in: Capsule())
-                        .foregroundStyle(.green)
+                        .background((waitingCount > 0 ? Color.orange : Color.green).opacity(0.14), in: Capsule())
+                        .foregroundStyle(waitingCount > 0 ? Color.orange : Color.green)
+                        .help(waitingCount > 0 ? "\(waitingCount) sessions need input" : "\(workingCount) sessions reported working")
                 }
             }
             .font(.system(size: 11, weight: .medium))
@@ -248,13 +250,16 @@ private struct AgentTrailPanel: View {
     @State private var search = ""
     @State private var sharedOnly = false
     @State private var workingOnly = false
+    @State private var waitingOnly = false
     @State private var showNotices = false
 
     private var visibleProjects: [ProjectOverview] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return store.projectOverviews.filter { project in
             (!sharedOnly || project.isShared) &&
-            (!workingOnly || (project.live?.workingCount ?? 0) > 0) &&
+            ((!workingOnly && !waitingOnly) ||
+             (workingOnly && (project.live?.workingCount ?? 0) > 0) ||
+             (waitingOnly && (project.live?.waitingCount ?? 0) > 0)) &&
             (query.isEmpty || project.path.localizedCaseInsensitiveContains(query) ||
              project.sourceIDs.contains { sourceName($0).localizedCaseInsensitiveContains(query) } ||
              (project.live?.sessions.contains { $0.workspacePath.localizedCaseInsensitiveContains(query) } ?? false))
@@ -263,6 +268,7 @@ private struct AgentTrailPanel: View {
 
     private var sharedCount: Int { store.projectOverviews.filter(\.isShared).count }
     private var workingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.workingCount ?? 0) } }
+    private var waitingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.waitingCount ?? 0) } }
     private var combinedNotices: [String] { Array(Set(store.notices + store.liveNotices)).sorted() }
 
     var body: some View {
@@ -333,6 +339,20 @@ private struct AgentTrailPanel: View {
                 } else if store.liveSessions.isEmpty {
                     Text("No live sessions reported")
                 } else {
+                    if waitingCount > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "hand.raised.fill")
+                                .font(.system(size: 10))
+                            Text(waitingCount.formatted())
+                                .fontWeight(.semibold).monospacedDigit()
+                                .contentTransition(.numericText())
+                            Text("needs input")
+                        }
+                        .foregroundStyle(.orange)
+                        .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: waitingCount)
+                        .help("Claude explicitly reported waiting for user attention. Open the corresponding profile to respond.")
+                        Text("·").foregroundStyle(.tertiary)
+                    }
                     HStack(spacing: 5) {
                         Circle().fill(workingCount > 0 ? .green : .secondary).frame(width: 5, height: 5)
                         Text(workingCount.formatted())
@@ -381,6 +401,15 @@ private struct AgentTrailPanel: View {
                     .tracking(1.1)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Toggle(isOn: $waitingOnly) {
+                    Label("Needs input", systemImage: "hand.raised")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.orange)
+                .help("Show projects with a reported request for user attention. Select both live filters to include either state.")
                 Toggle(isOn: $workingOnly) {
                     Label("Working now", systemImage: "dot.radiowaves.left.and.right")
                         .font(.system(size: 11, weight: .medium))
@@ -441,19 +470,19 @@ private struct AgentTrailPanel: View {
             Image(systemName: search.isEmpty ? "folder.badge.questionmark" : "magnifyingglass")
                 .font(.system(size: 31, weight: .light))
                 .foregroundStyle(.tertiary)
-            Text(search.isEmpty ? (workingOnly ? "No working projects reported" : sharedOnly ? "No shared projects yet" : "No projects found yet") : "No matching projects")
+            Text(emptyTitle)
                 .font(.system(size: 14, weight: .semibold))
             Text(search.isEmpty
-                 ? (workingOnly ? "Projects appear here when Claude reports a working session that matches these filters."
+                 ? (waitingOnly || workingOnly ? "Projects appear here when Claude reports a matching live state. Idle sessions do not establish an outstanding request for input."
                     : sharedOnly ? "A project appears here when more than one profile works in the same folder."
-                    : "Projects appear when Claude saves a local coding session. Check the profile notices below for details.")
+                    : "Projects appear when Claude, Codex, or Grok saves a local coding session. Check the profile notices below for details.")
                  : "Try a different folder name or assistant profile.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            if sharedOnly || workingOnly || !search.isEmpty {
-                Button("Show all projects") { search = ""; sharedOnly = false; workingOnly = false }
+            if sharedOnly || workingOnly || waitingOnly || !search.isEmpty {
+                Button("Show all projects") { search = ""; sharedOnly = false; workingOnly = false; waitingOnly = false }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .padding(.top, 4)
@@ -543,6 +572,14 @@ private struct AgentTrailPanel: View {
     private func sourceName(_ id: String) -> String {
         store.sources.first { $0.id == id }?.name ?? id
     }
+
+    private var emptyTitle: String {
+        if !search.isEmpty { return "No matching projects" }
+        if waitingOnly && workingOnly { return "No matching live projects reported" }
+        if waitingOnly { return "No input requests reported" }
+        if workingOnly { return "No working projects reported" }
+        return sharedOnly ? "No shared projects yet" : "No projects found yet"
+    }
 }
 
 private struct ProjectCard: View {
@@ -629,7 +666,7 @@ private struct ProjectCard: View {
             VStack(alignment: .leading, spacing: 6) {
                 if let edit = project.history?.latestEdit, let date = edit.latestEdit {
                     activityLine(title: "Last recorded edit", sourceID: edit.sourceID, date: date, prominent: true)
-                        .help("Successful recorded Edit/Write tools; shell and external changes are not attributed. \(date.formatted(date: .abbreviated, time: .standard))")
+                        .help("Confirmed recorded file edits; shell commands and external changes are not attributed. \(date.formatted(date: .abbreviated, time: .standard))")
                     if let worktree = edit.latestEditWorkspacePath, worktree != project.path {
                         Label("Worktree · \(URL(fileURLWithPath: worktree).lastPathComponent)", systemImage: "arrow.triangle.branch")
                             .font(.system(size: 10))
@@ -645,7 +682,7 @@ private struct ProjectCard: View {
                             .font(.system(size: 11))
                     }
                     .foregroundStyle(.tertiary)
-                    .help("Successful recorded Edit/Write tools; shell and external changes are not attributed.")
+                    .help("Confirmed recorded file edits; shell commands and external changes are not attributed.")
                 }
                 if !activityMatchesEdit, let activity = latestActivity {
                     activityLine(title: "Latest activity", sourceID: activity.sourceID,
@@ -656,6 +693,17 @@ private struct ProjectCard: View {
 
             HStack(spacing: 7) {
                 ForEach(involvedSources) { source in
+                    if source.bundleIdentifier.isEmpty {
+                        HStack(spacing: 5) {
+                            Circle().fill(sourceColor(source.id)).frame(width: 5, height: 5)
+                            Text(source.name)
+                            Text("History").foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(sourceColor(source.id).opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+                        .help("\(source.name) provides recorded history. No desktop app is configured for focus.")
+                    } else {
                     Button { open(source) } label: {
                         HStack(spacing: 5) {
                             Circle()
@@ -679,6 +727,7 @@ private struct ProjectCard: View {
                           ? "Focus the running \(source.name) instance"
                           : "\(source.name) is not currently identified as running. Click to check again.")
                     .accessibilityLabel("Focus \(source.name) for \(project.name)")
+                    }
                 }
                 Spacer(minLength: 0)
                 if activityMatchesEdit, let activity = latestActivity {

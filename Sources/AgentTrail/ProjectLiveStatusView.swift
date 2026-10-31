@@ -16,6 +16,9 @@ struct ProjectLiveStatusView: View {
 
     private var profileGroups: [SourceLiveActivity] {
         activity.sources.sorted { first, second in
+            let firstWaiting = first.waitingCount > 0
+            let secondWaiting = second.waitingCount > 0
+            if firstWaiting != secondWaiting { return firstWaiting }
             let firstWorking = first.workingCount > 0
             let secondWorking = second.workingCount > 0
             if firstWorking != secondWorking { return firstWorking }
@@ -36,10 +39,9 @@ struct ProjectLiveStatusView: View {
     private func content(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 5) {
-                ProjectLivePulse(color: overviewColor,
-                                 shouldPulse: activity.workingCount > 0 && isActive && isFreshScan(now: now))
-                countSummary(working: activity.workingCount, idle: activity.idleCount,
-                             unknown: activity.unknownCount, prominent: true)
+                countSummary(waiting: activity.waitingCount, working: activity.workingCount,
+                             idle: activity.idleCount, unknown: activity.unknownCount, prominent: true,
+                             canPulseWorking: isActive && isFreshScan(now: now))
                 Spacer(minLength: 3)
                 Text("LIVE")
                     .font(.system(size: 8, weight: .semibold))
@@ -79,37 +81,32 @@ struct ProjectLiveStatusView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(activity.workingCount > 0 ? Color.green.opacity(0.045) : Color.primary.opacity(0.025),
+        .background(overviewTint.opacity(activity.waitingCount > 0 ? 0.055 : activity.workingCount > 0 ? 0.045 : 0.025),
                     in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8)
-            .stroke(activity.workingCount > 0 ? Color.green.opacity(0.12) : Color.primary.opacity(0.045),
+            .stroke(overviewTint.opacity(activity.waitingCount > 0 ? 0.16 : activity.workingCount > 0 ? 0.12 : 0.045),
                     lineWidth: 0.7))
     }
 
     private func profileRow(_ group: SourceLiveActivity, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Circle().fill(profileColor(group.sourceID)).frame(width: 4, height: 4)
-                Text(sourceName(group.sourceID))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 3)
-                countSummary(working: group.workingCount, idle: group.idleCount,
-                             unknown: group.unknownCount, prominent: false)
-                if showDetails, let source = sources.first(where: { $0.id == group.sourceID }) {
-                    Button { focus(source) } label: {
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 17, height: 17)
-                            .contentShape(Rectangle())
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    profileIdentity(group.sourceID).fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 3)
+                    countSummary(waiting: group.waitingCount, working: group.workingCount,
+                                 idle: group.idleCount, unknown: group.unknownCount, prominent: false)
+                    focusButton(group.sourceID)
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        profileIdentity(group.sourceID)
+                        Spacer(minLength: 3)
+                        focusButton(group.sourceID)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(demoMode)
-                    .help("Focus the running \(source.name) instance")
-                    .accessibilityLabel("Focus \(source.name)")
+                    countSummary(waiting: group.waitingCount, working: group.workingCount,
+                                 idle: group.idleCount, unknown: group.unknownCount, prominent: false)
+                        .padding(.leading, 10)
                 }
             }
 
@@ -125,23 +122,87 @@ struct ProjectLiveStatusView: View {
         }
     }
 
-    private func countSummary(working: Int, idle: Int, unknown: Int, prominent: Bool) -> some View {
+    private func profileIdentity(_ sourceID: String) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(profileColor(sourceID)).frame(width: 4, height: 4)
+            Text(sourceName(sourceID))
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    @ViewBuilder private func focusButton(_ sourceID: String) -> some View {
+        if showDetails, let source = sources.first(where: { $0.id == sourceID }) {
+            Button { focus(source) } label: {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 17, height: 17)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(demoMode)
+            .help("Focus the running \(source.name) instance")
+            .accessibilityLabel("Focus \(source.name)")
+        }
+    }
+
+    private func countSummary(waiting: Int, working: Int, idle: Int, unknown: Int,
+                              prominent: Bool, canPulseWorking: Bool = false) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 4) {
+                activeCounts(waiting: waiting, working: working, prominent: prominent,
+                             canPulseWorking: canPulseWorking)
+                if (waiting > 0 || working > 0) && (idle > 0 || unknown > 0) { countSeparator }
+                quietCounts(idle: idle, unknown: unknown, prominent: prominent)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 3) {
+                if waiting > 0 || working > 0 {
+                    activeCounts(waiting: waiting, working: working, prominent: prominent,
+                                 canPulseWorking: canPulseWorking)
+                }
+                if idle > 0 || unknown > 0 {
+                    quietCounts(idle: idle, unknown: unknown, prominent: prominent)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func activeCounts(waiting: Int, working: Int, prominent: Bool, canPulseWorking: Bool) -> some View {
         HStack(spacing: 4) {
+            if waiting > 0 {
+                if prominent {
+                    Image(systemName: "hand.raised.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                }
+                countText(waiting, status: "needs input", color: .orange, prominent: prominent)
+                    .help(waitingExplanation)
+            }
             if working > 0 {
+                if waiting > 0 { countSeparator }
+                if prominent { ProjectLivePulse(color: .green, shouldPulse: canPulseWorking) }
                 countText(working, status: "working", color: .green, prominent: prominent)
             }
+        }
+    }
+
+    private func quietCounts(idle: Int, unknown: Int, prominent: Bool) -> some View {
+        HStack(spacing: 4) {
             if idle > 0 {
-                if working > 0 { countSeparator }
-                countText(idle, status: "idle", color: prominent && working == 0 ? .orange : .secondary,
-                          prominent: prominent)
+                countText(idle, status: "idle", color: .secondary, prominent: prominent)
+                    .help("Claude reported idle: this session is ready, with no explicit request for input.")
             }
             if unknown > 0 {
-                if working > 0 || idle > 0 { countSeparator }
+                if idle > 0 { countSeparator }
                 countText(unknown, status: "unknown", color: .secondary, prominent: prominent)
             }
         }
-        .fixedSize(horizontal: true, vertical: false)
-        .accessibilityElement(children: .combine)
     }
 
     private func countText(_ count: Int, status: String, color: Color, prominent: Bool) -> some View {
@@ -162,6 +223,12 @@ struct ProjectLiveStatusView: View {
     private func sessionDetail(_ session: LiveAgentSession, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
+                if session.status == .waiting {
+                    Image(systemName: "hand.raised.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                }
                 Text(statusName(session.status))
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(statusColor(session.status))
@@ -186,10 +253,10 @@ struct ProjectLiveStatusView: View {
         .help(sessionHelp(session))
     }
 
-    private var overviewColor: Color {
+    private var overviewTint: Color {
+        if activity.waitingCount > 0 { return .orange }
         if activity.workingCount > 0 { return .green }
-        if activity.idleCount > 0 { return .orange }
-        return .secondary
+        return .primary
     }
 
     private func isFreshScan(now: Date) -> Bool {
@@ -218,14 +285,16 @@ struct ProjectLiveStatusView: View {
 
     private func statusOrder(_ status: LiveStatus) -> Int {
         switch status {
-        case .working: return 0
-        case .idle: return 1
-        case .unknown: return 2
+        case .waiting: return 0
+        case .working: return 1
+        case .idle: return 2
+        case .unknown: return 3
         }
     }
 
     private func statusName(_ status: LiveStatus) -> String {
         switch status {
+        case .waiting: return "Needs input"
         case .working: return "Working"
         case .idle: return "Idle"
         case .unknown: return "Unknown"
@@ -234,8 +303,9 @@ struct ProjectLiveStatusView: View {
 
     private func statusColor(_ status: LiveStatus) -> Color {
         switch status {
+        case .waiting: return .orange
         case .working: return .green
-        case .idle: return .orange
+        case .idle: return .secondary
         case .unknown: return .secondary
         }
     }
@@ -254,10 +324,18 @@ struct ProjectLiveStatusView: View {
 
     private func sessionHelp(_ session: LiveAgentSession) -> String {
         let date = session.updatedAt.formatted(date: .abbreviated, time: .standard)
-        let explanation = session.status == .unknown
-            ? "No recognized or verified status is available. Saved history is not used to infer this state."
-            : "Claude reported \(statusName(session.status).lowercased()). This does not claim a file is being written."
+        let explanation: String
+        switch session.status {
+        case .waiting: explanation = waitingExplanation
+        case .working: explanation = "Claude reported working. This does not claim a file is being written."
+        case .idle: explanation = "Claude reported idle: this session is ready, with no explicit request for input."
+        case .unknown: explanation = "No recognized or verified status is available. Saved history is not used to infer this state."
+        }
         return "\(explanation)\nLast report: \(date)\nSession process: PID \(String(session.pid))"
+    }
+
+    private var waitingExplanation: String {
+        "Claude reports an input request, approval request, or dialog waiting for attention. Idle alone does not imply that input is needed."
     }
 }
 

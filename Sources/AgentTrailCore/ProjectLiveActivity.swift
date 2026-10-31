@@ -4,6 +4,7 @@ public struct SourceLiveActivity: Identifiable, Sendable {
     public var id: String { sourceID }
     public let sourceID: String
     public let sessions: [LiveAgentSession]
+    public var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
     public var workingCount: Int { sessions.filter { $0.status == .working }.count }
     public var idleCount: Int { sessions.filter { $0.status == .idle }.count }
     public var unknownCount: Int { sessions.filter { $0.status == .unknown }.count }
@@ -17,6 +18,7 @@ public struct ProjectLiveActivity: Identifiable, Sendable {
     public var id: String { projectPath }
     public let projectPath: String
     public let sessions: [LiveAgentSession]
+    public var waitingCount: Int { sessions.filter { $0.status == .waiting }.count }
     public var workingCount: Int { sessions.filter { $0.status == .working }.count }
     public var idleCount: Int { sessions.filter { $0.status == .idle }.count }
     public var unknownCount: Int { sessions.filter { $0.status == .unknown }.count }
@@ -112,9 +114,8 @@ public struct ProjectOverview: Identifiable, Sendable {
             joined.append(ProjectOverview(path: path, history: history, live: live[path]))
         }
         return joined.sorted {
-            let leftWorking = ($0.live?.workingCount ?? 0) > 0
-            let rightWorking = ($1.live?.workingCount ?? 0) > 0
-            if leftWorking != rightWorking { return leftWorking }
+            let leftPriority = overviewAttentionRank($0), rightPriority = overviewAttentionRank($1)
+            if leftPriority != rightPriority { return leftPriority < rightPriority }
             let leftDate = overviewSortDate($0), rightDate = overviewSortDate($1)
             if leftDate != rightDate { return leftDate > rightDate }
             return $0.path < $1.path
@@ -137,9 +138,10 @@ private func liveCanonicalPath(_ path: String) -> String? {
 private func liveSessionOrder(_ left: LiveAgentSession, _ right: LiveAgentSession) -> Bool {
     func rank(_ value: LiveStatus) -> Int {
         switch value {
-        case .working: return 0
-        case .idle: return 1
-        case .unknown: return 2
+        case .waiting: return 0
+        case .working: return 1
+        case .idle: return 2
+        case .unknown: return 3
         }
     }
     if rank(left.status) != rank(right.status) { return rank(left.status) < rank(right.status) }
@@ -151,6 +153,12 @@ private func overviewSortDate(_ project: ProjectOverview) -> Date {
     // Avoid ProjectSummary.sortDate's nonempty-activity precondition for empty data.
     project.history?.activities.map(\.latestActivity).max()
         ?? project.live?.sessions.map(\.updatedAt).max() ?? .distantPast
+}
+
+private func overviewAttentionRank(_ project: ProjectOverview) -> Int {
+    if (project.live?.waitingCount ?? 0) > 0 { return 0 }
+    if (project.live?.workingCount ?? 0) > 0 { return 1 }
+    return 2
 }
 
 private func preferHistory(_ candidate: ProjectActivity, over current: ProjectActivity) -> Bool {

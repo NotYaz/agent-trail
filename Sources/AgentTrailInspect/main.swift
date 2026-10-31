@@ -21,7 +21,7 @@ if let index = cacheIndex, index + 1 >= arguments.count || arguments[index + 1].
     fputs("--cache requires a cache file path\n", stderr)
     exit(2)
 }
-let provider = ClaudeActivityProvider(cacheURL: cacheURL)
+let provider = CompositeActivityProvider(cacheURL: cacheURL)
 let sources = try ProfileConfiguration.load(from: profileURL).sources
 let started = Date()
 let result = arguments.contains("--metadata-only")

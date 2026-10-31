@@ -33,6 +33,9 @@ final class InstanceController {
     /// Call only in response to an explicit user action. A nil result means the
     /// system accepted an activation request; macOS may still decline to focus it.
     static func focus(source: AgentSource) -> String? {
+        guard !source.bundleIdentifier.isEmpty else {
+            return "\(source.name) keeps local history only. It has no desktop app for Agent Trail to focus."
+        }
         let scan = scan(source: source)
         guard scan.matches.count == 1 else {
             if scan.matches.count > 1 {
@@ -71,6 +74,7 @@ final class InstanceController {
     }
 
     private static func scan(source: AgentSource) -> Scan {
+        guard !source.bundleIdentifier.isEmpty else { return Scan() }
         var scan = Scan()
         for application in NSRunningApplication.runningApplications(withBundleIdentifier: source.bundleIdentifier)
             where !application.isTerminated {

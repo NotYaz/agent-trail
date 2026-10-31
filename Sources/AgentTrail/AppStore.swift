@@ -201,7 +201,7 @@ final class AppStore: ObservableObject {
             let now = Date()
             liveSessions = [
                 LiveAgentSession(sourceID: sources[0].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
-                                 sessionID: "sample-working", status: .working, updatedAt: now, pid: 4101),
+                                 sessionID: "sample-needs-input", status: .waiting, updatedAt: now, pid: 4101),
                 LiveAgentSession(sourceID: sources[1].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit/.claude/worktrees/navigation",
                                  sessionID: "sample-second-working", status: .working, updatedAt: now.addingTimeInterval(-20), pid: 4102),
                 LiveAgentSession(sourceID: sources[0].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
@@ -256,18 +256,18 @@ private final class LiveReader: @unchecked Sendable {
 /// Owns the index on one background queue. UI state stays on the main actor.
 private final class LocalIndexer: @unchecked Sendable {
     private let worker = DispatchQueue(label: "app.agenttrail.index", qos: .utility)
-    private var provider: ClaudeActivityProvider?
+    private var provider: CompositeActivityProvider?
 
     func scan(sources: [AgentSource], cacheURL: URL,
               metadata: @escaping (ScanResult) -> Void,
               progress: @escaping (ScanResult, Int, Int) -> Void,
               completion: @escaping (ScanResult) -> Void) {
         worker.async {
-            let provider: ClaudeActivityProvider
+            let provider: CompositeActivityProvider
             if let existing = self.provider {
                 provider = existing
             } else {
-                provider = ClaudeActivityProvider(cacheURL: cacheURL)
+                provider = CompositeActivityProvider(cacheURL: cacheURL)
                 self.provider = provider
             }
             metadata(provider.metadata(sources: sources))

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 public enum LiveStatus: String, Sendable {
+    case waiting
     case working
     case idle
     case unknown
@@ -42,7 +43,9 @@ public struct LiveSnapshot: Sendable {
 }
 
 /// Reads Claude's small process-registry records, never transcript/history files.
-/// Only an explicit `busy` flag becomes `working`; `idle` becomes `idle`. Claude
+/// Explicit `waiting` means a request/dialog needs attention; `busy` becomes
+/// `working` and `idle` remains `idle`. Idle alone never implies input is needed.
+/// Claude
 /// writes these flags on state transitions, not on a heartbeat. A record whose
 /// procStart matches that PID's current UTC/C-locale launch time retains its last
 /// reported state while that process exists. Otherwise the short freshness TTL
@@ -68,6 +71,9 @@ public final class LiveActivityProvider {
         var notices: [String] = []
         var candidates: [Candidate] = []
         for source in sources {
+            // Only Claude publishes an explicit waiting/busy/idle registry.
+            // Codex and Grok history must not be turned into a live status.
+            guard source.assistant == .claude else { continue }
             let desktop = desktopSessions(source: source, notices: &notices)
             guard !desktop.isEmpty else { continue }
             let root = URL(fileURLWithPath: (source.configDirectory as NSString).expandingTildeInPath)
@@ -132,6 +138,7 @@ public final class LiveActivityProvider {
             let status: LiveStatus
             if authoritative {
                 switch candidate.status {
+                case "waiting": status = .waiting
                 case "busy": status = .working
                 case "idle": status = .idle
                 default: status = .unknown
@@ -284,9 +291,10 @@ public final class LiveActivityProvider {
 
     private func rank(_ status: LiveStatus) -> Int {
         switch status {
-        case .working: return 0
-        case .idle: return 1
-        case .unknown: return 2
+        case .waiting: return 0
+        case .working: return 1
+        case .idle: return 2
+        case .unknown: return 3
         }
     }
 }

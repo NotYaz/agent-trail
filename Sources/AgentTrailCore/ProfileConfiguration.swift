@@ -28,7 +28,11 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
                 userDataDirectory: "\(home)/Library/Application Support/Claude"),
             AgentSource(id: "claude-second", name: "Claude · Second",
                 configDirectory: "\(home)/.claude-second",
-                userDataDirectory: "\(home)/Library/Application Support/Claude-Second")
+                userDataDirectory: "\(home)/Library/Application Support/Claude-Second"),
+            AgentSource(id: "codex", name: "Codex",
+                configDirectory: AssistantKind.codex.defaultHome(home: home), assistant: .codex),
+            AgentSource(id: "grok", name: "Grok",
+                configDirectory: AssistantKind.grok.defaultHome(home: home), assistant: .grok)
         ])
     }
 
@@ -61,7 +65,7 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
             configuration = try JSONDecoder().decode(ProfileConfiguration.self, from: data)
         } catch {
             throw ProfileConfigurationError.reading(path: url.path,
-                reason: "Invalid JSON or missing profile fields. Check sources, refreshInterval and each profile's id, name, configDirectory, userDataDirectory and bundleIdentifier.")
+                reason: "Invalid JSON or missing profile fields. Check sources, refreshInterval and each profile's id, name, assistant, configDirectory, userDataDirectory and bundleIdentifier.")
         }
         do {
             try configuration.validate()
@@ -94,12 +98,32 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
             guard Self.isLabel(source.name), source.name.count <= 80 else {
                 throw ProfileConfigurationError.invalid("\(label) (\(source.id)): set name to 1–80 characters without leading/trailing whitespace or control characters.")
             }
-            guard Self.isLabel(source.bundleIdentifier),
-                  source.bundleIdentifier.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
-                  source.bundleIdentifier.count <= 255 else {
-                throw ProfileConfigurationError.invalid("\(source.name): set a nonempty bundleIdentifier without spaces (Claude uses com.anthropic.claudefordesktop).")
+            if source.assistant == .claude {
+                guard Self.isLabel(source.bundleIdentifier),
+                      source.bundleIdentifier.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+                      source.bundleIdentifier.count <= 255 else {
+                    throw ProfileConfigurationError.invalid("\(source.name): set a nonempty bundleIdentifier without spaces (Claude uses com.anthropic.claudefordesktop).")
+                }
+            } else if source.bundleIdentifier == "com.anthropic.claudefordesktop" {
+                throw ProfileConfigurationError.invalid("\(source.name): leave bundleIdentifier empty or set that assistant's own app. Claude's bundle identifier would focus the wrong app.")
+            } else if !source.bundleIdentifier.isEmpty {
+                guard Self.isLabel(source.bundleIdentifier),
+                      source.bundleIdentifier.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+                      source.bundleIdentifier.count <= 255 else {
+                    throw ProfileConfigurationError.invalid("\(source.name): set bundleIdentifier without spaces, or leave it empty when the assistant has no desktop app to focus.")
+                }
             }
             let config = try Self.checkedPath(source.configDirectory, field: "configDirectory", source: source.name)
+            if let other = configPaths[config] {
+                throw ProfileConfigurationError.invalid("\(source.name) and \(other) share a configDirectory. Set distinct folders so their activity can be attributed correctly.")
+            }
+            configPaths[config] = source.name
+            if source.assistant != .claude {
+                guard source.userDataDirectory == nil else {
+                    throw ProfileConfigurationError.invalid("\(source.name): userDataDirectory applies to Claude profiles only. Remove it for \(source.assistant.displayName).")
+                }
+                continue
+            }
             let defaultConfig = canonicalPath("~/.claude")
             let desktopDirectory = source.userDataDirectory
                 ?? (config == defaultConfig ? "~/Library/Application Support/Claude" : nil)
@@ -107,13 +131,9 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
                 throw ProfileConfigurationError.invalid("\(source.name): set userDataDirectory to this Claude instance's desktop data folder. The main instance uses ~/Library/Application Support/Claude.")
             }
             let userData = try Self.checkedPath(desktopDirectory, field: "userDataDirectory", source: source.name)
-            if let other = configPaths[config] {
-                throw ProfileConfigurationError.invalid("\(source.name) and \(other) share a configDirectory. Set distinct folders so their activity can be attributed correctly.")
-            }
             if let other = userDataPaths[userData] {
                 throw ProfileConfigurationError.invalid("\(source.name) and \(other) share a userDataDirectory. Set distinct desktop data folders so their activity can be attributed correctly.")
             }
-            configPaths[config] = source.name
             userDataPaths[userData] = source.name
         }
     }

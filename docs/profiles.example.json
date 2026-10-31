@@ -4,6 +4,7 @@
     {
       "id": "claude-primary",
       "name": "Claude · Main",
+      "assistant": "claude",
       "configDirectory": "~/.claude",
       "userDataDirectory": "~/Library/Application Support/Claude",
       "bundleIdentifier": "com.anthropic.claudefordesktop"
@@ -11,9 +12,24 @@
     {
       "id": "claude-second",
       "name": "Claude · Second",
+      "assistant": "claude",
       "configDirectory": "~/.claude-second",
       "userDataDirectory": "~/Library/Application Support/Claude-Second",
       "bundleIdentifier": "com.anthropic.claudefordesktop"
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "assistant": "codex",
+      "configDirectory": "~/.codex",
+      "bundleIdentifier": ""
+    },
+    {
+      "id": "grok",
+      "name": "Grok",
+      "assistant": "grok",
+      "configDirectory": "~/.grok",
+      "bundleIdentifier": ""
     }
   ]
 }

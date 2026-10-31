@@ -350,7 +350,7 @@ struct ActivityGardenView: View {
                 }
             }
             if presentation.editCount == 0 {
-                Text("No successful Edit/Write operations recorded in this period")
+                Text("No confirmed file edits recorded in this period")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 86)
@@ -431,12 +431,12 @@ struct ActivityGardenView: View {
     private var footer: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 6) {
-                Label("Successful recorded Edit/Write operations · Dates in UTC", systemImage: "info.circle")
+                Label("Confirmed recorded file edits · Dates in UTC", systemImage: "info.circle")
                 Spacer()
                 Text(store.isScanning ? "History is still indexing…" : "Connections group activity, not commits")
             }
             VStack(alignment: .leading, spacing: 4) {
-                Label("Successful recorded Edit/Write operations · Dates in UTC", systemImage: "info.circle")
+                Label("Confirmed recorded file edits · Dates in UTC", systemImage: "info.circle")
                 Text(store.isScanning ? "History is still indexing…" : "Connections group activity, not commits")
             }
         }

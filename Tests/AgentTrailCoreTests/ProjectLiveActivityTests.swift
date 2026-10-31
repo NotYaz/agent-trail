@@ -21,6 +21,29 @@ final class ProjectLiveActivityTests: XCTestCase {
         XCTAssertEqual(project.sources[1].idleCount, 1)
     }
 
+    func testWaitingCountsStayDistinctPerSourceAndDeduplicateCopies() throws {
+        let waiting = session(source: "main", id: "attention", pid: 10, status: .waiting)
+        let records = [waiting, waiting,
+            session(source: "main", id: "work", pid: 11, status: .working),
+            session(source: "second", id: "idle", pid: 12, status: .idle),
+            session(source: "second", id: "unknown", pid: 13, status: .unknown)]
+        let project = try XCTUnwrap(ProjectLiveActivity.group(records)["/Demo/Project"])
+        XCTAssertEqual(project.sessions.map(\.status), [.waiting, .working, .idle, .unknown])
+        XCTAssertEqual(project.waitingCount, 1)
+        XCTAssertEqual(project.workingCount, 1)
+        XCTAssertEqual(project.idleCount, 1)
+        XCTAssertEqual(project.unknownCount, 1)
+        XCTAssertEqual(project.sources[0].waitingCount, 1)
+        XCTAssertEqual(project.sources[1].waitingCount, 0)
+    }
+
+    func testConflictingEqualTimeWaitingDoesNotManufactureAttention() throws {
+        let live = try XCTUnwrap(ProjectLiveActivity.group([session(status: .waiting), session(status: .working)])["/Demo/Project"])
+        XCTAssertEqual(live.waitingCount, 0)
+        XCTAssertEqual(live.workingCount, 0)
+        XCTAssertEqual(live.unknownCount, 1)
+    }
+
     func testCanonicalOriginJoinsAliasesWhilePreservingActualWorktreesAndIDs() throws {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("AgentTrailGrouping-" + UUID().uuidString)
         let project = root.appendingPathComponent("real")
@@ -141,6 +164,22 @@ final class ProjectLiveActivityTests: XCTestCase {
         XCTAssertEqual(result.map(\.path), ["/Demo/A", "/Demo/B", "/Demo/E", "/Demo/C", "/Demo/F", "/Demo/D"])
         XCTAssertEqual(ProjectOverview.merge(projects: histories.reversed(), sessions: records.reversed()).map(\.path), result.map(\.path))
         XCTAssertEqual(result.first { $0.path == "/Demo/D" }?.history?.activities.count, 0)
+    }
+
+    func testOverviewWaitingPriorityPrecedesWorkingWithoutUsingAttentionCounts() {
+        let histories = [history(path: "/Demo/A", activity: 100), history(path: "/Demo/B", activity: 200),
+                         history(path: "/Demo/C", activity: 999), history(path: "/Demo/D", activity: 2000)]
+        let records = [
+            session(project: "/Demo/A", id: "a-one", pid: 1, status: .waiting),
+            session(project: "/Demo/A", id: "a-two", pid: 2, status: .waiting),
+            session(project: "/Demo/A", id: "a-work", pid: 3, status: .working),
+            session(project: "/Demo/B", id: "b", pid: 4, status: .waiting),
+            session(project: "/Demo/C", id: "c", pid: 5, status: .working),
+            session(project: "/Demo/D", id: "d", pid: 6, status: .idle)]
+        let result = ProjectOverview.merge(projects: histories, sessions: records)
+        XCTAssertEqual(result.map(\.path), ["/Demo/B", "/Demo/A", "/Demo/C", "/Demo/D"])
+        XCTAssertEqual(result[0].live?.waitingCount, 1)
+        XCTAssertEqual(result[1].live?.waitingCount, 2)
     }
 
     func testCanonicalHistoricalCopiesDoNotMultiplyExistingStatistics() throws {

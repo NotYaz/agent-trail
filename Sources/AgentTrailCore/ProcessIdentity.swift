@@ -7,6 +7,8 @@ public struct ProcessIdentity: Sendable {
     public let arguments: [String]
     public let claudeConfigDirectory: String?
     public let userDataDirectory: String?
+    public let codexHome: String?
+    public let grokHome: String?
 
     /// Parses the native macOS layout: argc, executable, padding, argv, environment.
     /// Truncated records and conflicting or empty profile overrides fail closed.
@@ -37,15 +39,23 @@ public struct ProcessIdentity: Sendable {
             arguments.append(argument)
         }
 
-        let configPrefix = Array("CLAUDE_CONFIG_DIR=".utf8)
+        let claudePrefix = Array("CLAUDE_CONFIG_DIR=".utf8)
+        let codexPrefix = Array("CODEX_HOME=".utf8)
+        let grokPrefix = Array("GROK_HOME=".utf8)
         var configDirectory: String?
+        var codexHome: String?
+        var grokHome: String?
         while cursor < bytes.count, bytes[cursor] != 0 {
             guard let entry = readCString() else { return nil }
-            if entry.starts(with: configPrefix) {
-                guard configDirectory == nil,
-                      let value = String(bytes: entry.dropFirst(configPrefix.count), encoding: .utf8),
-                      !value.isEmpty else { return nil }
+            if entry.starts(with: claudePrefix) {
+                guard configDirectory == nil, let value = environmentValue(entry, prefix: claudePrefix) else { return nil }
                 configDirectory = value
+            } else if entry.starts(with: codexPrefix) {
+                guard codexHome == nil, let value = environmentValue(entry, prefix: codexPrefix) else { return nil }
+                codexHome = value
+            } else if entry.starts(with: grokPrefix) {
+                guard grokHome == nil, let value = environmentValue(entry, prefix: grokPrefix) else { return nil }
+                grokHome = value
             }
         }
 
@@ -69,12 +79,32 @@ public struct ProcessIdentity: Sendable {
         }
         return ProcessIdentity(executablePath: executable, arguments: arguments,
                                claudeConfigDirectory: configDirectory,
-                               userDataDirectory: userDataDirectory)
+                               userDataDirectory: userDataDirectory,
+                               codexHome: codexHome, grokHome: grokHome)
     }
 
-    /// Compare both effective directories, including Claude's defaults when a
-    /// launch override was omitted. Neither profile dimension is guessed.
+    private static func environmentValue(_ entry: [UInt8], prefix: [UInt8]) -> String? {
+        guard let value = String(bytes: entry.dropFirst(prefix.count), encoding: .utf8), !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// Compare the directories that identify this assistant. Claude still requires
+    /// both its config directory and desktop data folder. Codex and Grok match
+    /// only their own home variable, or the default home when that variable is absent.
     public func matches(source: AgentSource, homeDirectory: String = NSHomeDirectory()) -> Bool {
+        switch source.assistant {
+        case .claude:
+            return matchesClaude(source, homeDirectory: homeDirectory)
+        case .codex:
+            return matchesHome(recorded: codexHome, configured: source.configDirectory,
+                defaultHome: "\(homeDirectory)/.codex")
+        case .grok:
+            return matchesHome(recorded: grokHome, configured: source.configDirectory,
+                defaultHome: "\(homeDirectory)/.grok")
+        }
+    }
+
+    private func matchesClaude(_ source: AgentSource, homeDirectory: String) -> Bool {
         let expectedConfig = canonicalPath(source.configDirectory)
         let defaultConfig = canonicalPath("\(homeDirectory)/.claude")
         let defaultDesktop = canonicalPath("\(homeDirectory)/Library/Application Support/Claude")
@@ -84,5 +114,13 @@ public struct ProcessIdentity: Sendable {
         if let desktop = userDataDirectory, !desktop.hasPrefix("/") { return false }
         return (claudeConfigDirectory.map(canonicalPath) ?? defaultConfig) == expectedConfig
             && (userDataDirectory.map(canonicalPath) ?? defaultDesktop) == expectedDesktop
+    }
+
+    private func matchesHome(recorded: String?, configured: String, defaultHome: String) -> Bool {
+        if let recorded {
+            guard recorded.hasPrefix("/") else { return false }
+            return canonicalPath(recorded) == canonicalPath(configured)
+        }
+        return canonicalPath(configured) == canonicalPath(defaultHome)
     }
 }

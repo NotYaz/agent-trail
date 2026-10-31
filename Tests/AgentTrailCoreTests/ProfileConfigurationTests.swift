@@ -33,9 +33,15 @@ final class ProfileConfigurationTests: XCTestCase {
         let configuration = try ProfileConfiguration.load(from: file)
         XCTAssertEqual(configuration, .defaults())
         XCTAssertEqual(configuration.refreshInterval, 15)
-        XCTAssertEqual(configuration.sources.count, 2)
+        XCTAssertEqual(configuration.sources.count, 4)
         XCTAssertEqual(configuration.sources[0].configDirectory, "~/.claude")
         XCTAssertEqual(configuration.sources[0].userDataDirectory, "~/Library/Application Support/Claude")
+        XCTAssertEqual(configuration.sources[0].assistant, .claude)
+        XCTAssertEqual(configuration.sources[2].assistant, .codex)
+        XCTAssertEqual(configuration.sources[2].configDirectory, "~/.codex")
+        XCTAssertNil(configuration.sources[2].userDataDirectory)
+        XCTAssertEqual(configuration.sources[3].assistant, .grok)
+        XCTAssertEqual(configuration.sources[3].configDirectory, "~/.grok")
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
         try configuration.validate()
     }
@@ -157,6 +163,32 @@ final class ProfileConfigurationTests: XCTestCase {
         let sources = [profile(id: "first", config: target.path, desktop: "/tmp/desktop-a"),
                        profile(id: "second", config: alias.path, desktop: "/tmp/desktop-b")]
         assertInvalid(ProfileConfiguration(sources: sources), containing: "share a configDirectory")
+    }
+
+    func testLegacyProfileWithoutAssistantRemainsClaude() throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let json = """
+        {"refreshInterval":15,"sources":[{"bundleIdentifier":"com.anthropic.claudefordesktop","configDirectory":"~/custom-claude","id":"claude-work","name":"Claude Work","userDataDirectory":"~/Library/Application Support/Claude-Work"}]}
+        """
+        try Data(json.utf8).write(to: file)
+        let loaded = try ProfileConfiguration.load(from: file)
+        XCTAssertEqual(loaded.sources[0].assistant, .claude)
+        XCTAssertEqual(loaded.sources[0].bundleIdentifier, "com.anthropic.claudefordesktop")
+    }
+
+    func testCodexAndGrokProfilesDoNotUseClaudeDesktopFields() throws {
+        let codex = AgentSource(id: "codex", name: "Codex", configDirectory: "~/.codex", assistant: .codex)
+        let grok = AgentSource(id: "grok", name: "Grok", configDirectory: "~/.grok", assistant: .grok)
+        try ProfileConfiguration(sources: [codex, grok]).validate()
+        var desktop = codex
+        desktop.userDataDirectory = "~/Library/Application Support/Codex"
+        assertInvalid(ProfileConfiguration(sources: [desktop]), containing: "userDataDirectory")
+        var claudeBundle = grok
+        claudeBundle.bundleIdentifier = "com.anthropic.claudefordesktop"
+        assertInvalid(ProfileConfiguration(sources: [claudeBundle]), containing: "bundle identifier")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{\"sources\":[{\"id\":\"codex\",\"name\":\"Codex\",\"configDirectory\":\"~/.codex\",\"bundleIdentifier\":\"\",\"assistant\":\"gemini\"}]}".utf8).write(to: file)
+        XCTAssertThrowsError(try ProfileConfiguration.load(from: file))
     }
 
     func testOnlyKnownPrimaryCanOmitDesktopFolder() throws {

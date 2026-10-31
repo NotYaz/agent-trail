@@ -2,7 +2,8 @@ import Foundation
 
 /// Synthetic presentation data. Never opens a provider, process, or cache.
 public enum DemoData {
-    public static var sources: [AgentSource] { AgentSource.defaults(home: "/Demo") }
+    /// Demo projects belong to the two Claude profiles. Codex and Grok stay out of the sample.
+    public static var sources: [AgentSource] { Array(AgentSource.defaults(home: "/Demo").prefix(2)) }
 
     public static func result(now: Date = Date()) -> ScanResult {
         let main = "claude-primary", second = "claude-second"
