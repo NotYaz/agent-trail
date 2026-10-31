@@ -207,7 +207,11 @@ final class AppStore: ObservableObject {
                 LiveAgentSession(sourceID: sources[0].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
                                  sessionID: "sample-main-idle", status: .idle, updatedAt: now.addingTimeInterval(-60), pid: 4103),
                 LiveAgentSession(sourceID: sources[1].id, projectPath: "/Demo/Projects/atlas", workspacePath: "/Demo/Projects/atlas/.worktrees/design",
-                                 sessionID: "sample-idle", status: .idle, updatedAt: now.addingTimeInterval(-120), pid: 4104)
+                                 sessionID: "sample-idle", status: .idle, updatedAt: now.addingTimeInterval(-120), pid: 4104),
+                LiveAgentSession(sourceID: sources[2].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
+                                 sessionID: "sample-codex-working", status: .working, updatedAt: now.addingTimeInterval(-8), pid: 4105),
+                LiveAgentSession(sourceID: sources[3].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
+                                 sessionID: "sample-grok-idle", status: .idle, updatedAt: now.addingTimeInterval(-70), pid: 4106)
             ]
             lastLiveScan = now
             return
@@ -246,7 +250,7 @@ final class AppStore: ObservableObject {
 /// Live metadata has its own queue so a first history index cannot delay it.
 private final class LiveReader: @unchecked Sendable {
     private let worker = DispatchQueue(label: "app.agenttrail.live", qos: .utility)
-    private let provider = LiveActivityProvider()
+    private let provider = CompositeLiveActivityProvider()
 
     func scan(sources: [AgentSource], completion: @escaping (LiveSnapshot) -> Void) {
         worker.async { completion(self.provider.scan(sources: sources)) }

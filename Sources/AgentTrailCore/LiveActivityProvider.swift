@@ -71,8 +71,8 @@ public final class LiveActivityProvider {
         var notices: [String] = []
         var candidates: [Candidate] = []
         for source in sources {
-            // Only Claude publishes an explicit waiting/busy/idle registry.
-            // Codex and Grok history must not be turned into a live status.
+            // This process-registry schema belongs to Claude. Other assistants
+            // have separate runtime readers in CompositeLiveActivityProvider.
             guard source.assistant == .claude else { continue }
             let desktop = desktopSessions(source: source, notices: &notices)
             guard !desktop.isEmpty else { continue }

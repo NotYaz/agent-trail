@@ -34,7 +34,7 @@ final class InstanceController {
     /// system accepted an activation request; macOS may still decline to focus it.
     static func focus(source: AgentSource) -> String? {
         guard !source.bundleIdentifier.isEmpty else {
-            return "\(source.name) keeps local history only. It has no desktop app for Agent Trail to focus."
+            return "\(source.name) has no desktop app configured for Agent Trail to focus."
         }
         let scan = scan(source: source)
         guard scan.matches.count == 1 else {

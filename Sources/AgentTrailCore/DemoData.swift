@@ -2,8 +2,7 @@ import Foundation
 
 /// Synthetic presentation data. Never opens a provider, process, or cache.
 public enum DemoData {
-    /// Demo projects belong to the two Claude profiles. Codex and Grok stay out of the sample.
-    public static var sources: [AgentSource] { Array(AgentSource.defaults(home: "/Demo").prefix(2)) }
+    public static var sources: [AgentSource] { AgentSource.defaults(home: "/Demo") }
 
     public static func result(now: Date = Date()) -> ScanResult {
         let main = "claude-primary", second = "claude-second"
@@ -13,7 +12,9 @@ public enum DemoData {
             ProjectActivity(sourceID: main, projectPath: orbit, latestActivity: now.addingTimeInterval(-420), latestEdit: now.addingTimeInterval(-540), workspacePath: orbit),
             ProjectActivity(sourceID: main, projectPath: atlas, latestActivity: now.addingTimeInterval(-240), latestEdit: now.addingTimeInterval(-900), workspacePath: atlas),
             ProjectActivity(sourceID: second, projectPath: atlas, latestActivity: now.addingTimeInterval(-600), latestEdit: now.addingTimeInterval(-1_800), workspacePath: atlas),
-            ProjectActivity(sourceID: main, projectPath: notes, latestActivity: now.addingTimeInterval(-3_600), latestEdit: now.addingTimeInterval(-4_800), workspacePath: notes)
+            ProjectActivity(sourceID: main, projectPath: notes, latestActivity: now.addingTimeInterval(-3_600), latestEdit: now.addingTimeInterval(-4_800), workspacePath: notes),
+            ProjectActivity(sourceID: "codex", projectPath: orbit, latestActivity: now.addingTimeInterval(-15), latestEdit: now.addingTimeInterval(-80), workspacePath: orbit),
+            ProjectActivity(sourceID: "grok", projectPath: orbit, latestActivity: now.addingTimeInterval(-70), latestEdit: now.addingTimeInterval(-150), workspacePath: orbit)
         ]
         for index in records.indices {
             let history = (0..<28).map { ago -> ActivityDay in

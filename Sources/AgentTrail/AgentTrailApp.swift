@@ -350,7 +350,7 @@ private struct AgentTrailPanel: View {
                         }
                         .foregroundStyle(.orange)
                         .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: waitingCount)
-                        .help("Claude explicitly reported waiting for user attention. Open the corresponding profile to respond.")
+                        .help("An assistant reported a request needing attention. Check the corresponding assistant to respond.")
                         Text("·").foregroundStyle(.tertiary)
                     }
                     HStack(spacing: 5) {
@@ -362,7 +362,7 @@ private struct AgentTrailPanel: View {
                     }
                     .foregroundStyle(workingCount > 0 ? Color.green : Color.secondary)
                     .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: workingCount)
-                    .help("Claude's reported busy sessions, checked every 3 seconds. Expand a project's live details for workspace and report age.")
+                    .help("Active turns and reported busy sessions, checked every 3 seconds. Expand a project's live details for workspace and report age.")
                 }
             }
             .font(.system(size: 11))
@@ -473,7 +473,7 @@ private struct AgentTrailPanel: View {
             Text(emptyTitle)
                 .font(.system(size: 14, weight: .semibold))
             Text(search.isEmpty
-                 ? (waitingOnly || workingOnly ? "Projects appear here when Claude reports a matching live state. Idle sessions do not establish an outstanding request for input."
+                 ? (waitingOnly || workingOnly ? "Projects appear here when an assistant reports a matching live state. Idle sessions do not establish an outstanding request for input."
                     : sharedOnly ? "A project appears here when more than one profile works in the same folder."
                     : "Projects appear when Claude, Codex, or Grok saves a local coding session. Check the profile notices below for details.")
                  : "Try a different folder name or assistant profile.")
@@ -697,12 +697,11 @@ private struct ProjectCard: View {
                         HStack(spacing: 5) {
                             Circle().fill(sourceColor(source.id)).frame(width: 5, height: 5)
                             Text(source.name)
-                            Text("History").foregroundStyle(.secondary)
                         }
                         .font(.system(size: 10, weight: .medium))
                         .padding(.horizontal, 8).padding(.vertical, 6)
                         .background(sourceColor(source.id).opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
-                        .help("\(source.name) provides recorded history. No desktop app is configured for focus.")
+                        .help("\(source.name) provides local activity. No desktop app is configured for focus.")
                     } else {
                     Button { open(source) } label: {
                         HStack(spacing: 5) {
@@ -771,8 +770,7 @@ private struct ProjectCard: View {
     }
 
     private func sourceColor(_ sourceID: String) -> Color {
-        let palette: [Color] = [.blue, .orange, .purple, .teal, .pink]
-        return palette[(sources.firstIndex { $0.id == sourceID } ?? 0) % palette.count]
+        ProfileColor.color(sourceID, sources: sources)
     }
 
     private func abbreviatedPath(_ path: String) -> String {

@@ -115,12 +115,12 @@ struct ActivityGardenView: View {
         let presentation = GardenPresentation(context: context, rootName: rootName, records: records,
                                               series: series, axisStride: axisStride)
         return ScrollView {
-            VStack(alignment: .leading, spacing: compact ? 14 : 19) {
+            VStack(alignment: .leading, spacing: compact ? 12 : 19) {
                 header
                 metrics
                 ZStack(alignment: .top) {
                     GardenRevealSurface(reduceMotion: reduceMotion) { progress in
-                        VStack(spacing: compact ? 14 : 19) {
+                        VStack(spacing: compact ? 12 : 19) {
                             if presentation.records.isEmpty {
                                 emptyGarden
                             } else {
@@ -135,7 +135,7 @@ struct ActivityGardenView: View {
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: context)
                 footer
             }
-            .padding(compact ? 18 : 26)
+            .padding(compact ? 16 : 26)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(
@@ -153,7 +153,7 @@ struct ActivityGardenView: View {
     @ViewBuilder
     private var header: some View {
         if compact {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     heading
                     Spacer(minLength: 8)
@@ -244,7 +244,7 @@ struct ActivityGardenView: View {
             Rectangle().fill(.white.opacity(0.07)).frame(width: 1, height: 35)
             GardenMetric(value: series.count, title: "ACTIVE PROFILES", note: "With recorded activity in this period", color: .white, compact: compact)
         }
-        .padding(.vertical, compact ? 12 : 16)
+        .padding(.vertical, compact ? 10 : 16)
         .animation(contextAnimation, value: editCount)
         .animation(contextAnimation, value: sessionCount)
         .animation(contextAnimation, value: series.count)
@@ -284,7 +284,7 @@ struct ActivityGardenView: View {
                 }
             }
             .padding(.horizontal, compact ? 15 : 20)
-            .padding(.top, compact ? 14 : 17)
+            .padding(.top, compact ? 12 : 17)
 
             GardenMap(rootName: presentation.rootName, series: presentation.series,
                       start: renderedContext.start, end: renderedContext.end,
@@ -293,7 +293,7 @@ struct ActivityGardenView: View {
                           guard renderedContext == context, records.contains(where: { $0.id == record.id }) else { return }
                           inspection = GardenInspection(context: renderedContext, recordID: record.id)
                       })
-                .frame(height: max(compact ? 150 : 174, CGFloat(presentation.series.count) * (compact ? 58 : 65)))
+                .frame(height: max(compact ? 150 : 174, CGFloat(presentation.series.count) * (compact ? 46 : 65)))
                 .padding(.horizontal, compact ? 8 : 14)
                 .animation(contextAnimation, value: progress)
 
@@ -312,7 +312,7 @@ struct ActivityGardenView: View {
             .font(.system(size: 9))
             .foregroundStyle(.tertiary)
             .padding(.horizontal, compact ? 15 : 20)
-            .padding(.bottom, compact ? 12 : 15)
+            .padding(.bottom, compact ? 10 : 15)
         }
         .background(GardenPalette.card, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.055), lineWidth: 1))
@@ -323,30 +323,23 @@ struct ActivityGardenView: View {
     private func dailyChart(_ presentation: GardenPresentation, progress: Double) -> some View {
         let renderedContext = presentation.context
         let selectedChartDate = chartInspection.flatMap { $0.context == renderedContext ? $0.date : nil }
-        return VStack(alignment: .leading, spacing: compact ? 10 : 12) {
-            HStack {
+        let selectedDay = selectedChartDate.map { ActivityDay.start(of: $0) }
+        return VStack(alignment: .leading, spacing: compact ? 12 : 16) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("Daily edits").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 if let date = selectedChartDate {
                     let day = ActivityDay.start(of: date)
                     let total = presentation.records.filter { $0.day == day }.reduce(0) { $0 + $1.edits }
-                    Text("\(GardenFormat.day(day)) · \(total) recorded \(total == 1 ? "edit" : "edits")")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("\(GardenFormat.shortDay(day)) · \(total.formatted()) \(total == 1 ? "edit" : "edits")")
+                        .font(.system(size: 10, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.82))
+                        .contentTransition(.numericText())
                 } else {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 12) {
-                            ForEach(presentation.series) { item in
-                                HStack(spacing: 5) {
-                                    Circle().fill(item.color).frame(width: 5, height: 5)
-                                    Text(item.name).fixedSize()
-                                }
-                            }
-                        }
-                    }
-                    .scrollIndicators(.hidden)
-                    .frame(maxWidth: compact ? 280 : 510)
-                    .frame(height: 13)
-                    .font(.system(size: compact ? 9 : 10)).foregroundStyle(.secondary)
+                    Text("\(presentation.editDayCount) active \(presentation.editDayCount == 1 ? "day" : "days") · UTC")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                 }
             }
             if presentation.editCount == 0 {
@@ -358,16 +351,17 @@ struct ActivityGardenView: View {
                 Chart {
                     ForEach(presentation.records.filter { $0.edits > 0 }) { record in
                         BarMark(x: .value("UTC day", record.day, unit: .day),
-                                y: .value("Recorded edits", Double(record.edits) * progress), width: .ratio(0.65))
+                                y: .value("Recorded edits", Double(record.edits) * progress), width: .ratio(0.72))
                             .foregroundStyle(by: .value("Profile", record.sourceID))
-                            .cornerRadius(2)
+                            .cornerRadius(2.5)
+                            .opacity(selectedDay == nil || selectedDay == record.day ? 1 : 0.35)
                             .accessibilityLabel("\(presentation.sourceName(record.sourceID)), \(GardenFormat.day(record.day))")
                             .accessibilityValue("\(record.edits) recorded edits")
                     }
                     if let date = selectedChartDate {
-                        RuleMark(x: .value("Selected day", date))
-                            .foregroundStyle(.white.opacity(0.35))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        RuleMark(x: .value("Selected day", ActivityDay.start(of: date).addingTimeInterval(43_200)))
+                            .foregroundStyle(.white.opacity(0.45))
+                            .lineStyle(StrokeStyle(lineWidth: 0.75, dash: [3, 3]))
                     }
                 }
                 .chartForegroundStyleScale(domain: presentation.series.map(\.id), range: presentation.series.map(\.color))
@@ -378,18 +372,24 @@ struct ActivityGardenView: View {
                     AxisMarks(values: .stride(by: .day, count: presentation.axisStride)) { value in
                         AxisValueLabel {
                             if let date = value.as(Date.self) {
-                                Text(GardenFormat.shortDay(date)).foregroundStyle(Color.white.opacity(0.45))
+                                Text(GardenFormat.shortDay(date))
+                                    .font(.system(size: compact ? 9 : 10))
+                                    .foregroundStyle(Color.white.opacity(0.45))
                             }
                         }
                     }
                 }
                 .chartYAxis {
                     AxisMarks(position: .leading, values: presentation.chartAxisValues) { value in
-                        AxisGridLine().foregroundStyle(.white.opacity(0.045))
+                        let isBaseline = value.as(Double.self) == 0
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: isBaseline ? [] : [3, 3]))
+                            .foregroundStyle(.white.opacity(isBaseline ? 0.13 : 0.07))
                         AxisValueLabel {
                             if let count = value.as(Double.self) {
-                                Text(count.formatted(.number.precision(.fractionLength(0))))
-                                    .foregroundStyle(Color.white.opacity(0.35))
+                                Text(GardenFormat.axisCount(count))
+                                    .font(.system(size: compact ? 9 : 10))
+                                    .monospacedDigit()
+                                    .foregroundStyle(Color.white.opacity(0.40))
                             }
                         }
                     }
@@ -397,14 +397,27 @@ struct ActivityGardenView: View {
                 .chartXSelection(value: chartSelection(for: renderedContext))
                 .environment(\.calendar, GardenFormat.utcCalendar)
                 .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
-                .frame(height: compact ? 80 : 90)
+                .frame(height: compact ? 100 : 140)
                 .id(renderedContext)
                 .animation(contextAnimation, value: progress)
             }
+
+            GardenLegendFlow(horizontalSpacing: compact ? 15 : 20, verticalSpacing: 8) {
+                ForEach(presentation.series) { item in
+                    HStack(spacing: 6) {
+                        Circle().fill(item.color).frame(width: 6, height: 6)
+                        Text(item.name).lineLimit(1).truncationMode(.middle)
+                    }
+                    .font(.system(size: compact ? 10 : 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.60))
+                    .help(item.name)
+                }
+            }
+            .padding(.top, 1)
         }
         .padding(compact ? 14 : 18)
-        .background(GardenPalette.card, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.055), lineWidth: 1))
+        .background(GardenPalette.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.065), lineWidth: 1))
     }
 
     private var emptyGarden: some View {
@@ -467,6 +480,47 @@ struct ActivityGardenView: View {
             }
             chartInspection = GardenChartInspection(context: renderedContext, date: value)
         })
+    }
+}
+
+/// Profile names wrap as whole items, keeping the plot readable even with
+/// several profiles or a narrow window. Long custom names keep their tooltip.
+private struct GardenLegendFlow: Layout {
+    let horizontalSpacing: CGFloat
+    let verticalSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrangement(width: proposal.width, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let frames = arrangement(width: bounds.width, subviews: subviews).frames
+        for (index, frame) in frames.enumerated() {
+            subviews[index].place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                                 anchor: .topLeading, proposal: ProposedViewSize(frame.size))
+        }
+    }
+
+    private func arrangement(width: CGFloat?, subviews: Subviews) -> (size: CGSize, frames: [CGRect]) {
+        let available = width.flatMap { $0.isFinite ? max(0, $0) : nil }
+        var frames: [CGRect] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(ProposedViewSize(width: available, height: nil))
+            if x > 0, let available, x + size.width > available {
+                x = 0
+                y += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            usedWidth = max(usedWidth, x + size.width)
+            x += size.width + horizontalSpacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return (CGSize(width: available ?? usedWidth, height: y + rowHeight), frames)
     }
 }
 
@@ -612,8 +666,8 @@ private struct GardenMap: View, Animatable {
         let plotStart = compact ? size.width * 0.45 : 316
         let plotWidth = max(1, size.width - plotStart - (compact ? 14 : 24))
         let x = plotStart + plotWidth * fraction
-        let activityHeight = CGFloat(record.edits) / CGFloat(maxEdits) * 32
-        return CGPoint(x: x, y: branchY(index, height: size.height) + 14 - activityHeight)
+        let activityHeight = CGFloat(record.edits) / CGFloat(maxEdits) * (compact ? 16 : 32)
+        return CGPoint(x: x, y: branchY(index, height: size.height) + (compact ? 7 : 14) - activityHeight)
     }
     private func nodeRadius(_ record: GardenRecord) -> CGFloat {
         let radius = record.edits == 0 ? 3 : min(8, 2.9 + CGFloat(sqrt(Double(record.edits))) * 0.48)
@@ -672,16 +726,24 @@ private struct GardenPresentation {
     let series: [GardenSeries]
     let axisStride: Int
     var editCount: Int { records.reduce(0) { $0 + $1.edits } }
-    var chartMaximum: Double {
+    var editDayCount: Int { Set(records.filter { $0.edits > 0 }.map(\.day)).count }
+    private var largestDay: Double {
         let dailyTotals = Dictionary(grouping: records, by: \.day).values.map { $0.reduce(0) { $0 + $1.edits } }
-        return Double(max(1, dailyTotals.max() ?? 1)) * 1.12
+        return Double(max(1, dailyTotals.max() ?? 1))
     }
-    var chartAxisValues: [Double] {
-        let roughStep = max(1, chartMaximum / 3)
+    private var chartStep: Double {
+        let roughStep = max(1, largestDay * 1.10 / 3)
         let power = pow(10, floor(log10(roughStep)))
         let normalized = roughStep / power
-        let step = (normalized >= 5 ? 5.0 : normalized >= 2 ? 2.0 : 1.0) * power
-        return Array(stride(from: 0.0, through: chartMaximum, by: step))
+        // Round upward: rounding 470 down to 200 creates eight cramped ticks.
+        let factor = [1.0, 2.0, 2.5, 5.0, 10.0].first { $0 >= normalized } ?? 10
+        return max(1, factor * power)
+    }
+    var chartMaximum: Double {
+        ceil(largestDay * 1.10 / chartStep) * chartStep
+    }
+    var chartAxisValues: [Double] {
+        Array(stride(from: 0.0, through: chartMaximum, by: chartStep))
     }
     func sourceName(_ id: String) -> String { series.first { $0.id == id }?.name ?? id }
 }
@@ -720,10 +782,7 @@ private enum GardenPeriod: String, CaseIterable, Identifiable {
 private enum GardenPalette {
     static let card = Color(red: 0.073, green: 0.091, blue: 0.120)
     static func color(_ id: String, sources: [AgentSource]) -> Color {
-        if id == "claude-primary" { return Color(red: 0.36, green: 0.65, blue: 1.0) }
-        if id == "claude-second" { return Color(red: 1.0, green: 0.67, blue: 0.36) }
-        let palette: [Color] = [.purple, .mint, .pink, .cyan]
-        return palette[(sources.firstIndex { $0.id == id } ?? 0) % palette.count]
+        ProfileColor.color(id, sources: sources)
     }
 }
 private enum GardenFormat {
@@ -734,6 +793,9 @@ private enum GardenFormat {
     }
     static func day(_ date: Date) -> String { format(date, template: "MMM d, yyyy") }
     static func shortDay(_ date: Date) -> String { format(date, template: "MMM d") }
+    static func axisCount(_ count: Double) -> String {
+        count.formatted(.number.notation(.compactName).precision(.fractionLength(0...1)))
+    }
     private static func format(_ date: Date, template: String) -> String {
         let formatter = DateFormatter()
         formatter.locale = .current

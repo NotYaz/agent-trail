@@ -134,7 +134,7 @@ struct ProjectLiveStatusView: View {
     }
 
     @ViewBuilder private func focusButton(_ sourceID: String) -> some View {
-        if showDetails, let source = sources.first(where: { $0.id == sourceID }) {
+        if showDetails, let source = sources.first(where: { $0.id == sourceID }), !source.bundleIdentifier.isEmpty {
             Button { focus(source) } label: {
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: 8, weight: .semibold))
@@ -196,7 +196,7 @@ struct ProjectLiveStatusView: View {
         HStack(spacing: 4) {
             if idle > 0 {
                 countText(idle, status: "idle", color: .secondary, prominent: prominent)
-                    .help("Claude reported idle: this session is ready, with no explicit request for input.")
+                    .help("The assistant reported a finished turn or idle state, with no explicit request for input.")
             }
             if unknown > 0 {
                 if idle > 0 { countSeparator }
@@ -248,7 +248,7 @@ struct ProjectLiveStatusView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help("Actual workspace: \(session.workspacePath)")
+                .help("Recorded workspace: \(session.workspacePath)")
         }
         .help(sessionHelp(session))
     }
@@ -270,8 +270,7 @@ struct ProjectLiveStatusView: View {
     }
 
     private func profileColor(_ id: String) -> Color {
-        let colors: [Color] = [.blue, .orange, .purple, .teal, .pink]
-        return colors[(sources.firstIndex { $0.id == id } ?? 2) % colors.count]
+        ProfileColor.color(id, sources: sources)
     }
 
     private func orderedSessions(_ sessions: [LiveAgentSession]) -> [LiveAgentSession] {
@@ -327,15 +326,15 @@ struct ProjectLiveStatusView: View {
         let explanation: String
         switch session.status {
         case .waiting: explanation = waitingExplanation
-        case .working: explanation = "Claude reported working. This does not claim a file is being written."
-        case .idle: explanation = "Claude reported idle: this session is ready, with no explicit request for input."
-        case .unknown: explanation = "No recognized or verified status is available. Saved history is not used to infer this state."
+        case .working: explanation = "\(sourceName(session.sourceID)) has an active turn or reports working. This does not claim a file is being written."
+        case .idle: explanation = "\(sourceName(session.sourceID)) reported a finished turn or idle state, with no explicit request for input."
+        case .unknown: explanation = "No recognized or verified runtime status is available. Recent edits alone do not establish a live state."
         }
         return "\(explanation)\nLast report: \(date)\nSession process: PID \(String(session.pid))"
     }
 
     private var waitingExplanation: String {
-        "Claude reports an input request, approval request, or dialog waiting for attention. Idle alone does not imply that input is needed."
+        "The assistant reports an input request, approval request, or dialog waiting for attention. Idle alone does not imply that input is needed."
     }
 }
 

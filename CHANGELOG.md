@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-alpha.6 — 2026-10-31
+
+- Live Codex status joins verified app-server thread-writer handles to explicit turn metadata, opened read-only. Loaded in-progress turns show Working; ended turns show Idle. Leftover lock files and unloaded historical turns do not create live sessions. Codex approval/input dialogs cannot yet be distinguished from an in-progress turn.
+- Live Grok status joins registered sessions to explicit lifecycle events and verifies the exact PID birth time. Active turns show Working, ended/cancelled turns show Idle, and unresolved permission requests show Needs input. Registry presence without recognized lifecycle evidence remains Unknown.
+- All three assistants share the Projects view, per-profile live counts, attention filters, and workspace/report-age details. Claude focus remains available; Codex/Grok do not gain a misleading focus button by default.
+- Daily edits gets a taller plot, at most four compact Y-axis labels, lighter guides, a wrapping profile legend, and selected-day focus. Existing chart/number transitions and Reduce Motion remain supported.
+- Profile colors stay consistent across Projects, Growth, and exported portraits. Synthetic previews now include four profiles across Claude, Codex, and Grok.
+- Published optional GitHub Sponsors and Buy Me a Coffee funding links. No crypto addresses are configured.
+- Added read-only `AgentTrailInspect --live` diagnostics, without scanning edit history.
+
+These runtime formats are private and version-dependent. No assistant is launched, stopped, or modified. Builds remain ad-hoc signed and unnotarized.
+
 ## 0.1.0-alpha.5 — 2026-10-31
 
 - Recorded local history from Codex and Grok, merged with Claude when the canonical project folder is the same.

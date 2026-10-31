@@ -21,9 +21,26 @@ if let index = cacheIndex, index + 1 >= arguments.count || arguments[index + 1].
     fputs("--cache requires a cache file path\n", stderr)
     exit(2)
 }
-let provider = CompositeActivityProvider(cacheURL: cacheURL)
 let sources = try ProfileConfiguration.load(from: profileURL).sources
 let started = Date()
+if arguments.contains("--live") {
+    let snapshot = CompositeLiveActivityProvider().scan(sources: sources)
+    let report: [String: Any] = [
+        "elapsedSeconds": Date().timeIntervalSince(started),
+        "notices": snapshot.notices,
+        "sessions": snapshot.sessions.map { session -> [String: Any] in
+            ["sourceID": session.sourceID, "project": session.projectPath,
+             "workspace": session.workspacePath, "sessionID": session.sessionID,
+             "status": session.status.rawValue, "pid": session.pid,
+             "updatedAt": ISO8601DateFormatter().string(from: session.updatedAt)]
+        }
+    ]
+    let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data([10]))
+    exit(0)
+}
+let provider = CompositeActivityProvider(cacheURL: cacheURL)
 let result = arguments.contains("--metadata-only")
     ? provider.metadata(sources: sources)
     : provider.scan(sources: sources)

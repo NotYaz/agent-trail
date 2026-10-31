@@ -4,9 +4,9 @@
 
 A small native macOS menu-bar app that brings your coding projects into one place. See recorded edits and reported live status together on each project, then jump back to the right running app. Projects and Growth share one compact floating panel.
 
-**0.1.0-alpha.5 · Public alpha · macOS 14+ · Claude, Codex, and Grok · MIT license**
+**0.1.0-alpha.6 · Public alpha · macOS 14+ · Claude, Codex, and Grok · MIT license**
 
-Agent Trail records local history from Claude Desktop, Codex, and Grok. Live status and one-click focus stay with Claude Desktop. Gemini CLI, OpenCode, and Cursor are not supported.
+Agent Trail reads local history and live status from Claude Desktop, Codex, and Grok. One-click focus is available for identified Claude Desktop instances. Gemini CLI, OpenCode, and Cursor are not supported.
 
 <img src="docs/assets/demo.png" width="600" alt="Agent Trail Projects tab showing synthetic projects with live session counts, recorded edits, and quick-focus buttons">
 
@@ -21,7 +21,7 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 - Search by project path or profile name.
 - Filter to projects shared across profiles.
 - See worktree context alongside recorded edits.
-- Focus an identified running Claude instance with one click. Codex and Grok profiles record history and do not focus an app.
+- Focus an identified running Claude instance with one click. Codex and Grok profiles show local activity without an app-focus button by default.
 - See live Needs input, Working, Idle, and Unknown counts inside each project card.
 - Projects needing input sort first, followed by working projects; filter with **Needs input** or **Working now**.
 - Explore an activity tree and daily edit/session counts by project and agent profile.
@@ -46,7 +46,7 @@ Routine refreshes keep the last complete history visible while the next scan fin
 
 To install, copy `dist/Agent Trail.app` to your Applications folder. The script also creates an architecture-labeled ZIP and SHA-256 checksum in `dist/`. These alpha builds use an **ad-hoc signature** and are **not Apple-notarized**. A downloaded build may be blocked by Gatekeeper. Building locally is the supported starting point for this alpha; see Apple's [guidance for opening apps safely](https://support.apple.com/en-us/102445).
 
-Claude profile buttons focus an existing Claude Desktop instance. They do not open a particular project or conversation. Codex and Grok profiles keep local history only; an empty bundle identifier means there is no desktop app to focus. Agent Trail does not launch, quit, kill, or restart an assistant.
+Claude profile buttons focus an existing Claude Desktop instance. They do not open a particular project or conversation. Codex and Grok profiles show local history and runtime status; an empty bundle identifier means there is no desktop app configured for focus. Agent Trail does not launch, quit, kill, or restart an assistant.
 
 ## Configure profiles
 
@@ -116,34 +116,38 @@ Claude instance matching uses the bundle identity, process arguments, and `CLAUD
 
 **This is a record of supported agent activity, not a complete audit of file changes.** Shell commands, external editors, unsupported assistants, and unrecorded changes are not attributed. Failed tools and user-modified results are excluded. A project with no recorded edits may still have changed. File modification times, directory names, and process lists do not establish which assistant made a change.
 
-Codex history is read from rollout JSONL files under `~/.codex/sessions` and `archived_sessions` (or the custom home set in `configDirectory`). The project is the session `cwd`. A later turn counts only when its workspace stays inside that session's known roots; the workspace is stored separately and is not promoted to the project folder. One completed `FileChange` is one edit even when it lists several files. Compressed `.jsonl.zst` archives are left unread. Older rollouts that record only `apply_patch`, without a completed `FileChange`, are not counted. There is no Codex live-status registry.
+Codex history is read from rollout JSONL files under `~/.codex/sessions` and `archived_sessions` (or the custom home set in `configDirectory`). The project is the session `cwd`. A later turn counts only when its workspace stays inside that session's known roots; the workspace is stored separately and is not promoted to the project folder. One completed `FileChange` is one edit even when it lists several files. Compressed `.jsonl.zst` archives are left unread. Older rollouts that record only `apply_patch`, without a completed `FileChange`, are not counted.
 
-Grok history uses `summary.json` under `~/.grok/sessions` (or the custom home set in `configDirectory`). The project path is `info.cwd`. The encoded session-directory name is not decoded into a path. Completed `write` and `search_replace` calls in the sibling `updates.jsonl` count as one edit each, and a positive `SearchReplace.EditsApplied` result must identify files inside the recorded project folder. The edit time is the update timestamp: an ISO-8601 string, Unix seconds, or Unix milliseconds. A session with no `updates.jsonl` still appears, with a notice that its edit history is unavailable. `active_sessions.json` is not a live status.
+Grok history uses `summary.json` under `~/.grok/sessions` (or the custom home set in `configDirectory`). The project path is `info.cwd`. The encoded session-directory name is not decoded into a path. Completed `write` and `search_replace` calls in the sibling `updates.jsonl` count as one edit each, and a positive `SearchReplace.EditsApplied` result must identify files inside the recorded project folder. The edit time is the update timestamp: an ISO-8601 string, Unix seconds, or Unix milliseconds. A session with no `updates.jsonl` still appears, with a notice that its edit history is unavailable. The active-session registry alone does not establish a live state.
 
 These on-disk formats are private implementation details and can change without notice. Missing or unreadable data appears as a profile notice. This alpha has not been tested against every assistant version or installation layout.
 
 ## Check live status on a project
 
-Live status is Claude Desktop only. Codex and Grok projects show saved history without Needs input, Working, or Idle. Agent Trail does not invent those states from history, file times, process lists, or Grok's `active_sessions.json`.
+Live status is available for Claude Desktop, loaded Codex threads, and registered Grok sessions. Each adapter requires runtime presence and explicit status or turn events; recent edits and file timestamps do not establish a live state.
 
 The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with a reported input request sort first, followed by projects with working sessions. The header shows needs-input counts in amber and working counts in green. Use **Needs input** or **Working now** to filter those projects. Selecting both includes projects with either state; search and **Shared only** still apply.
 
-Expand a card's live details with the chevron to see each session's actual workspace, worktree context, and last-report age. The sessions are matched to your configured Claude Desktop profiles; terminal-only and unmatched sessions are omitted.
+Expand a card's live details with the chevron to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. Claude requires a matching desktop session; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
 
 A project can have a session needing input while another is working or idle, so the card keeps separate counts instead of hiding them behind one state. **No live sessions reported** does not mean idle. Projects found only through live reports still appear, without inventing saved sessions or edit history for them.
 
 | Status | Meaning |
 | --- | --- |
-| **Needs input** | Claude explicitly reported `waiting` for a matched local session: an input request, approval, or dialog needs attention. |
-| **Working** | Claude explicitly reported `busy` for a matched local session whose process is still valid. |
-| **Idle** | Claude explicitly reported `idle`: ready for the next prompt, without an explicit waiting signal. It does not establish that you need to reply. |
+| **Needs input** | Claude reported `waiting`, or Grok reported an unresolved permission request. Codex input dialogs are not distinguished by the currently available state. |
+| **Working** | Claude reported `busy`, Codex has an `inProgress` turn on a loaded thread, or Grok has an active turn/working phase. |
+| **Idle** | Claude reported `idle`, or a loaded Codex/Grok session explicitly ended its turn. It does not establish that you need to reply. |
 | **Unknown** | The status is unrecognized or cannot be verified under the applicable freshness checks. |
 
 Claude writes these registry reports when status changes, rather than sending a regular heartbeat. A waiting, busy, or idle report can remain valid while the same verified process is alive, even when the report is old. Agent Trail shows that report's age. If the process start cannot be verified, the fallback accepts only reports from the last 90 seconds; older reports become Unknown. Unrecognized or implausibly future-dated reports are also Unknown. Dead processes and reused process IDs are omitted.
 
-**Needs input requires Claude's explicit waiting signal.** The inspected Claude build uses it for input requests, approvals, and other dialogs or requests needing attention; it does not always mean a typed answer is required. Inactivity and old activity dates do not turn Idle into Needs input. Live status does not inspect the question or request text. Use the profile's focus button to check what Claude needs.
+**Needs input requires an explicit request.** Claude uses its waiting signal for input requests, approvals, and other dialogs needing attention; Grok records permission requests. Inactivity and old activity dates do not turn Idle into Needs input. Request text is not retained. Check the corresponding assistant to respond.
 
-**Working means “Claude reported busy.”** It does not claim that a file is being written or that work has succeeded. Recent history, file modification times, and CPU usage do not determine live status. Missing live reports do not establish that every assistant has stopped.
+Codex live status combines open thread-writer handles under `thread-writer-locks/` with the newest turn status in `thread_history_1.sqlite`, opened read-only. A leftover lock file or an old `inProgress` row without a verified app-server holding its writer handle is insufficient. Codex does not persist a distinct approval/input state in the inspected schema, so an in-progress turn can include time spent waiting for you. Its workspace is the recorded thread workspace; individual tool working directories are not separately tracked.
+
+Grok live status joins `active_sessions.json` to the matching session summary, verifies the registered PID and microsecond process-start time, and reads explicit lifecycle events from `events.jsonl`. A registered session without a recognized event is Unknown. Completed and cancelled turns become Idle; permission requests become Needs input until resolved.
+
+**Working describes a reported active turn.** It does not claim that a file is being written or that work has succeeded. Recent edits, file modification times, and CPU usage do not determine live status. Missing live reports do not establish that every assistant has stopped.
 
 ## Explore project activity
 
@@ -169,7 +173,7 @@ Review a card before sharing it. Hiding names does not hide dates, counts, or pa
 
 ## Privacy
 
-Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs, Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status comes from Claude's small local process-registry records and process identity checks; it does not use transcript history to guess status. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
+Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs, Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records, Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
 
 Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 2), and `activity-cache-grok.json` (version 2). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
 
@@ -205,6 +209,9 @@ There are no third-party package dependencies. The Swift package includes the na
 
 # Preview local metadata without storing a scan cache.
 swift run AgentTrailInspect --metadata-only
+
+# Read current runtime status without scanning edit history.
+swift run AgentTrailInspect --live
 ```
 
 Each build creates `Agent Trail.app`, `Agent-Trail-macOS-<architecture>.zip`, and a matching `.sha256` file in the selected output folder. Architecture-specific ZIPs run on that architecture; `universal2` contains both arm64 and x86_64. Cross-architecture compilation does not validate execution on the other architecture.
@@ -217,7 +224,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance. New adapters s
 
 ## What's next
 
-- Live status for Codex and Grok, once each assistant publishes an explicit registry. History and process lists are not a substitute.
+- Codex input/approval state when a reliable local signal becomes available.
 - Gemini CLI, OpenCode, and Cursor, once their local tool results can be confirmed. They are unsupported in this release.
 - More coverage of changes made through agent shell commands.
 - A global hotkey and optional launch at login.

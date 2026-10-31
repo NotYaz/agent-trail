@@ -28,7 +28,7 @@ struct ActivityShareCard: View {
             let name = anonymize ? "Agent \(index + 1)"
                 : (sources.first { $0.id == id }?.name ?? "Unknown profile")
             return SharePortraitSource(id: id, name: name, days: days,
-                                       color: SharePortraitSource.palette[index % SharePortraitSource.palette.count])
+                                       color: ProfileColor.color(id, sources: sources))
         }
     }
 
@@ -190,10 +190,6 @@ private struct SharePortraitSource: Identifiable {
     let days: [ActivityDay]
     let color: Color
 
-    static let palette: [Color] = [Color(red: 0.40, green: 0.66, blue: 1),
-                                   Color(red: 1, green: 0.65, blue: 0.38),
-                                   Color(red: 0.48, green: 0.82, blue: 0.71),
-                                   Color(red: 0.74, green: 0.59, blue: 1)]
 }
 
 private struct ActivityPortraitTree: View {
