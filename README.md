@@ -225,6 +225,15 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance. New adapters s
 
 ## Support the project
 
-[Bug reports](https://github.com/NotYaz/agent-trail/issues), compatibility reports, and thoughtful contributions help the alpha mature. Optional crypto support is described in [Support](docs/SUPPORT.md). Donation details are published only after the maintainer provides verified wallet addresses and their networks.
+[Bug reports](https://github.com/NotYaz/agent-trail/issues), compatibility reports, and thoughtful contributions help the alpha mature.
+
+## Donations
+
+Agent Trail is free. A donation is optional, and every feature stays available either way.
+
+- **GitHub Sponsors:** [NotYaz](https://github.com/sponsors/NotYaz), when sponsorship is available on the account.
+- **Buy Me a Coffee:** [buymeacoffee.com/lltod](https://buymeacoffee.com/lltod)
+
+The same links are listed in [Support](docs/SUPPORT.md). Agent Trail does not take payment inside the app.
 
 Agent Trail is an independent project, not affiliated with Anthropic, OpenAI, xAI, or other assistant vendors. Licensed under [MIT](LICENSE).
