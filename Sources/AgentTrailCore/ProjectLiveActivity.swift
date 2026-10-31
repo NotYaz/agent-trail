@@ -73,8 +73,36 @@ public struct ProjectOverview: Identifiable, Sendable {
     }
     public var isShared: Bool { sourceIDs.count > 1 }
 
-    public static func merge(projects: [ProjectSummary], sessions: [LiveAgentSession]) -> [ProjectOverview] {
-        let live = ProjectLiveActivity.group(sessions)
+    /// `sessionProjects` re-homes a live session whose history showed where its
+    /// edits landed. `relocate` maps a live project path through learned earlier
+    /// locations, for sessions still reporting a folder that has since moved.
+    public static func merge(projects: [ProjectSummary], sessions: [LiveAgentSession],
+                             sessionProjects: [SessionProjectAssociation] = [],
+                             relocate: ((String) -> String)? = nil) -> [ProjectOverview] {
+        // Association changes only identity. Status, PID, report time, and
+        // recorded workspace still come from the independent live reader.
+        let associated = sessions.map { session -> LiveAgentSession in
+            let reported = [liveCanonicalPath(session.workspacePath), liveCanonicalPath(session.projectPath)]
+            let candidates = sessionProjects.filter {
+                $0.sourceID == session.sourceID && $0.sessionID == session.sessionID
+                    && reported.contains(liveCanonicalPath($0.recordedWorkspace))
+            }
+            let paths = Set(candidates.compactMap { liveCanonicalPath($0.projectPath) })
+            guard paths.count == 1, let path = paths.first,
+                  projects.contains(where: { liveCanonicalPath($0.path) == path
+                      && $0.activities.contains(where: { $0.sourceID == session.sourceID }) }) else {
+                guard let relocate, candidates.isEmpty else { return session }
+                let moved = relocate(session.projectPath)
+                guard moved != session.projectPath else { return session }
+                return LiveAgentSession(sourceID: session.sourceID, projectPath: moved,
+                    workspacePath: relocate(session.workspacePath), sessionID: session.sessionID,
+                    status: session.status, updatedAt: session.updatedAt, pid: session.pid)
+            }
+            return LiveAgentSession(sourceID: session.sourceID, projectPath: path,
+                workspacePath: session.workspacePath, sessionID: session.sessionID,
+                status: session.status, updatedAt: session.updatedAt, pid: session.pid)
+        }
+        let live = ProjectLiveActivity.group(associated)
         var historical: [String: [ProjectSummary]] = [:]
         for project in projects {
             guard let path = liveCanonicalPath(project.path) else { continue }

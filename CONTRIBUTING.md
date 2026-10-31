@@ -32,6 +32,8 @@ For panel changes, check that project switching clears old graph inspection and 
 
 Tests should cover behavior and regressions using synthetic fixtures. Never commit real session logs, conversation content, project paths, profile settings, caches, tokens, or signing material. Diagnostic output can contain sensitive paths even when it contains no conversation text.
 
+For project identity changes, use synthetic `.git` folders, links, and moves in temporary directories. Cover parent-folder launches, edits spanning two checkouts, scratch files outside any checkout, a link left after a move and then removed, a plain move followed by bookmark, a new folder at an earlier path, a same-name clone elsewhere, and a repository at the home folder. Never match repositories by name or remote.
+
 For history changes, cover UTC day boundaries, sessions assigned to creation day, replayed results, cross-file duplicates, incremental scans, and rebuilding older caches. Keep counts grounded in confirmed tool operations. One successful operation is one edit, not an estimate of changed lines: Claude `Edit`/`Write`, Codex completed `FileChange`, or Grok completed `write`/`search_replace`. Shell commands, failed tools, and user-modified results do not count. Activity trees and charts must not imply Git ancestry, code quality, or productivity.
 
 For live-status changes, use synthetic registry records, lifecycle events, read-only database fixtures, and injected process/lock checks. Cover Codex loaded versus stale locks, newest-turn selection, Grok permission resolution/cancellation, and profile isolation. Cover explicit `waiting` → Needs input, `busy` → Working, `idle` → Idle, desktop/profile matching, process start verification, PID reuse, dead processes, unknown statuses, and the fallback freshness limit. Claude's registry records reflect status transitions, not a guaranteed heartbeat. Do not infer any status from recent history, CPU usage, or file timestamps, or describe Working as proof of file writes. Idle must not become Needs input because a session has been inactive. Needs input may represent an approval or other dialog/request; do not label every waiting session as a natural-language question.
@@ -52,7 +54,7 @@ Do not add telemetry or network requests to the indexing path. Do not quit, rest
 
 An adapter should:
 
-- Use supported local evidence and identify the canonical project folder separately from its actual workspace or worktree. Do not lift a worktree to a parent repository.
+- Record evidence exactly as logged: where the session was started, its declared roots, and each confirmed edit's working folder and target parent folders, with symbolic links unresolved. Pass these to `HistoryFold`, which decides at fold time which checkout each edit landed in, where the session belongs, and which earlier locations apply. Never apply containment or location policy while parsing, so caches stay valid when locations are learned. Do not lift a worktree to a parent repository.
 - Keep general activity separate from confirmed file-edit evidence. Do not invent Working, Needs input, or Idle from history, CPU, or file timestamps.
 - Supply day-level edit evidence where available. Sessions count on their UTC creation day. Edits count on the result's UTC day. Deduplicate replayed and cross-file tool IDs.
 - Keep the incremental cache free of prompts, commands, patches, diffs, and conversation text. Preserve partial trailing lines, skip oversized lines, and rebuild an unknown cache version.

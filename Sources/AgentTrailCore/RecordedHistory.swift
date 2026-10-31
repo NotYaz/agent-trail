@@ -91,11 +91,20 @@ enum CheckoutPath {
 
 struct StoredEdit: Codable, Equatable {
     var date: Date
+    /// The assistant's working directory when the edit completed, as recorded.
+    /// After folding, the workspace shown for the edit.
     var workspace: String
+    /// Parent folders of the confirmed targets, as recorded (symbolic links
+    /// unresolved). They identify the checkout an edit landed in at fold time.
+    /// Never contains tool input or diffs.
+    var targetDirectories: [String] = []
 
     func earlier(than other: StoredEdit) -> StoredEdit {
-        if date != other.date { return date < other.date ? self : other }
-        return workspace <= other.workspace ? self : other
+        var selected: StoredEdit
+        if date != other.date { selected = date < other.date ? self : other }
+        else { selected = workspace <= other.workspace ? self : other }
+        selected.targetDirectories = Array(Set(targetDirectories + other.targetDirectories)).sorted()
+        return selected
     }
 }
 

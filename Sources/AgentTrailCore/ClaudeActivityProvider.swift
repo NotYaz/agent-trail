@@ -10,9 +10,25 @@ public final class ClaudeActivityProvider: ActivityProvider {
     private let files = FileManager.default
     private let isoDate = ISO8601DateFormatter()
     private let plainISODate = ISO8601DateFormatter()
+    private let resolver: GitProjectResolver
+    private let ownsResolver: Bool
 
-    public init(cacheURL: URL? = nil) {
+    /// Earlier locations of moved checkouts. Applied when folding, so the
+    /// transcript cache never depends on them.
+    public var projectLocations: ProjectLocationRegistry {
+        get { resolver.locations }
+        set { resolver.reset(locations: newValue) }
+    }
+
+    public convenience init(cacheURL: URL? = nil, projectLocations: ProjectLocationRegistry = .init()) {
+        self.init(cacheURL: cacheURL, resolver: GitProjectResolver(locations: projectLocations), ownsResolver: true)
+    }
+
+    /// A shared resolver is reset by its owner once per scan.
+    init(cacheURL: URL?, resolver: GitProjectResolver, ownsResolver: Bool = false) {
         self.cacheURL = cacheURL
+        self.resolver = resolver
+        self.ownsResolver = ownsResolver
         isoDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         plainISODate.formatOptions = [.withInternetDateTime]
         if let cacheURL, FileManager.default.fileExists(atPath: cacheURL.path) {
@@ -32,6 +48,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
 
     /// Fast project/activity listing without reading conversation transcripts.
     public func metadata(sources: [AgentSource]) -> ScanResult {
+        if ownsResolver { resolver.reset() }
         let metadata = readMetadata(sources: sources)
         return result(metadata: metadata, edits: [:], extraNotices: [])
     }
@@ -41,6 +58,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
     }
 
     public func scan(sources: [AgentSource], progress: ((ScanResult, Int, Int) -> Void)?) -> ScanResult {
+        if ownsResolver { resolver.reset() }
         let metadata = readMetadata(sources: sources)
         var notices: [String] = cacheLoadNotice.map { [$0] } ?? []
         cacheLoadNotice = nil
@@ -179,11 +197,25 @@ public final class ClaudeActivityProvider: ActivityProvider {
     }
 
     private func result(metadata: Metadata, edits: [String: ProjectEdits], extraNotices: [String]) -> ScanResult {
+        // Claude records the checkout itself. A checkout that has since moved
+        // is found at its current path through learned earlier locations.
+        func located(_ path: String, _ date: Date) -> String { resolver.physical(path, at: date) ?? path }
+        var relocated: [String: ProjectEdits] = [:]
+        for project in edits.values {
+            for (id, edit) in project.byToolID {
+                let path = located(project.projectPath, edit.date)
+                let key = project.sourceID + "\u{0}" + path
+                let moved = ConfirmedEdit(date: edit.date, workspace: located(edit.workspace, edit.date))
+                var group = relocated[key] ?? ProjectEdits(sourceID: project.sourceID, projectPath: path)
+                group.byToolID[id] = group.byToolID[id].map { firstOccurrence($0, moved) } ?? moved
+                relocated[key] = group
+            }
+        }
         let activity = metadata.sessions.map {
-            ProjectActivity(sourceID: $0.source.id, projectPath: $0.projectPath,
-                latestActivity: $0.latestActivity, workspacePath: $0.workspacePath,
+            ProjectActivity(sourceID: $0.source.id, projectPath: located($0.projectPath, $0.createdAt),
+                latestActivity: $0.latestActivity, workspacePath: located($0.workspacePath, $0.createdAt),
                 history: [ActivityDay(day: $0.createdAt, sessionCount: 1)])
-        } + edits.values.compactMap { project -> ProjectActivity? in
+        } + relocated.values.compactMap { project -> ProjectActivity? in
             guard let latest = project.byToolID.values.max(by: { $0.date < $1.date }) else { return nil }
             let days = Dictionary(grouping: project.byToolID.values, by: { ActivityDay.start(of: $0.date) })
                 .map { ActivityDay(day: $0.key, editCount: $0.value.count) }

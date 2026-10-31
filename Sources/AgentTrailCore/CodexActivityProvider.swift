@@ -4,19 +4,36 @@ import Foundation
 /// (`~/.codex` unless the profile sets another home). A completed `FileChange`
 /// item is one confirmed edit. Shell commands, `apply_patch` calls without a
 /// completed FileChange, and file modification times are not evidence.
+/// The cache keeps recorded evidence only; which project an edit belongs to is
+/// decided when folding, so learned project locations never force a reparse.
 public final class CodexActivityProvider: ActivityProvider {
+    static let cacheVersion = 4
     private let cacheURL: URL?
     private var cache: [String: CodexFile] = [:]
     private var cacheLoadNotice: String?
     private let files = FileManager.default
+    private let resolver: GitProjectResolver
+    private let ownsResolver: Bool
 
-    public init(cacheURL: URL? = nil) {
+    public var projectLocations: ProjectLocationRegistry {
+        get { resolver.locations }
+        set { resolver.reset(locations: newValue) }
+    }
+
+    public convenience init(cacheURL: URL? = nil, projectLocations: ProjectLocationRegistry = .init()) {
+        self.init(cacheURL: cacheURL, resolver: GitProjectResolver(locations: projectLocations), ownsResolver: true)
+    }
+
+    /// A shared resolver is reset by its owner once per scan.
+    init(cacheURL: URL?, resolver: GitProjectResolver, ownsResolver: Bool = false) {
         self.cacheURL = cacheURL
+        self.resolver = resolver
+        self.ownsResolver = ownsResolver
         guard let cacheURL, files.fileExists(atPath: cacheURL.path) else { return }
         do {
             let data = try Data(contentsOf: cacheURL)
             let header = try JSONDecoder().decode(CacheHeader.self, from: data)
-            if header.version == 2 {
+            if header.version == Self.cacheVersion {
                 cache = try JSONDecoder().decode(SavedCache.self, from: data).files
             } else {
                 cacheLoadNotice = "Codex edit history is being rebuilt once for the current indexer."
@@ -26,8 +43,19 @@ public final class CodexActivityProvider: ActivityProvider {
         }
     }
 
+    /// A quick listing that reads session headers and reuses edit evidence
+    /// already in the cache, so sessions appear on the same project the last
+    /// full scan chose instead of briefly on the folder they were started in.
     public func metadata(sources: [AgentSource]) -> ScanResult {
-        fold(files: discover(sources: sources), parsed: nil, notices: [])
+        if ownsResolver { resolver.reset() }
+        let discovered = discover(sources: sources)
+        var known: [String: CodexFile] = [:]
+        var unreadable = 0
+        for task in discovered.files {
+            if let file = cache[task.url.path] ?? readHeader(task.url) { known[task.url.path] = file } else { unreadable += 1 }
+        }
+        let notices = unreadable > 0 ? ["Codex: \(unreadable) session history file(s) had no project path and were omitted."] : []
+        return fold(files: discovered, parsed: known, notices: notices)
     }
 
     public func scan(sources: [AgentSource]) -> ScanResult {
@@ -35,6 +63,7 @@ public final class CodexActivityProvider: ActivityProvider {
     }
 
     public func scan(sources: [AgentSource], progress: ((ScanResult, Int, Int) -> Void)?) -> ScanResult {
+        if ownsResolver { resolver.reset() }
         let discovered = discover(sources: sources)
         var notices = cacheLoadNotice.map { [$0] } ?? []
         cacheLoadNotice = nil
@@ -69,7 +98,7 @@ public final class CodexActivityProvider: ActivityProvider {
         if let cacheURL {
             do {
                 try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(SavedCache(version: 2, files: cache))
+                let data = try JSONEncoder().encode(SavedCache(version: Self.cacheVersion, files: cache))
                 try data.write(to: cacheURL, options: .atomic)
                 try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
             } catch {
@@ -127,8 +156,8 @@ public final class CodexActivityProvider: ActivityProvider {
 
     /// `parsed == nil` reads only session headers and does not report edits.
     private func fold(files discovered: Discovered, parsed: [String: CodexFile]?, notices extra: [String]) -> ScanResult {
-        var sessions: [String: SessionFold] = [:]
-        var edits: [String: EditFold] = [:]
+        var sessions: [String: HistorySession] = [:]
+        var order: [String] = []
         var missingProject = 0
         for task in discovered.files {
             let file: CodexFile
@@ -147,62 +176,36 @@ public final class CodexActivityProvider: ActivityProvider {
             }
             let key = task.source.id + "\u{0}" + sessionID
             let latest = file.latestActivity ?? created
-            if var existing = sessions[key] {
-                if existing.projectPath == project {
-                    if created < existing.createdAt { existing.createdAt = created }
-                    if latest > existing.latestActivity { existing.latestActivity = latest }
-                    sessions[key] = existing
-                }
-            } else {
-                sessions[key] = SessionFold(sourceID: task.source.id, sessionID: sessionID, projectPath: project,
-                    createdAt: created, latestActivity: latest, workspace: project)
+            guard var session = sessions[key] else {
+                order.append(key)
+                sessions[key] = HistorySession(sourceID: task.source.id, sessionID: sessionID, recordedWorkspace: project,
+                    roots: file.roots.isEmpty ? [project] : file.roots, createdAt: created, latestActivity: latest,
+                    edits: parsed == nil ? [:] : file.edits, parentSessionID: file.parentSessionID)
+                continue
             }
-            guard parsed != nil, sessions[key]?.projectPath == project else { continue }
-            let editKeyPrefix = task.source.id + "\u{0}" + project + "\u{0}"
-            for (id, edit) in file.edits {
-                let key = editKeyPrefix + id
-                if let existing = edits[key] {
-                    edits[key] = EditFold(sourceID: task.source.id, projectPath: project, id: id, edit: existing.edit.earlier(than: edit))
-                } else {
-                    edits[key] = EditFold(sourceID: task.source.id, projectPath: project, id: id, edit: edit)
-                }
+            guard session.recordedWorkspace == project else {
+                // Contradictory copies cannot prove where the session worked.
+                session.canMove = false
+                sessions[key] = session
+                continue
             }
+            // Combine every copy's evidence before attributing the session.
+            var merged = HistorySession(sourceID: session.sourceID, sessionID: sessionID, recordedWorkspace: project,
+                roots: Array(Set(session.roots + file.roots)).sorted(), createdAt: min(session.createdAt, created),
+                latestActivity: max(session.latestActivity, latest), edits: session.edits,
+                parentSessionID: session.parentSessionID ?? file.parentSessionID, canMove: session.canMove)
+            if parsed != nil {
+                for (id, edit) in file.edits { merged.edits[id] = merged.edits[id]?.earlier(than: edit) ?? edit }
+            }
+            sessions[key] = merged
         }
         var notices = discovered.notices + extra
         if missingProject > 0 {
             notices.append("Codex: \(missingProject) session history file(s) had no project path and were omitted.")
         }
-        var activity: [ProjectActivity] = sessions.values.map { session in
-            ProjectActivity(sourceID: session.sourceID, projectPath: session.projectPath,
-                latestActivity: session.latestActivity, sessionCount: 1, workspacePath: session.workspace,
-                history: [ActivityDay(day: session.createdAt, sessionCount: 1)])
-        }
-        let grouped = Dictionary(grouping: edits.values, by: { $0.sourceID + "\u{0}" + $0.projectPath })
-        for records in grouped.values {
-            guard let latest = records.max(by: { $0.edit.date < $1.edit.date }) else { continue }
-            let days = Dictionary(grouping: records, by: { ActivityDay.start(of: $0.edit.date) })
-                .map { ActivityDay(day: $0.key, editCount: $0.value.count) }
-            activity.append(ProjectActivity(sourceID: latest.sourceID, projectPath: latest.projectPath,
-                latestActivity: latest.edit.date, latestEdit: latest.edit.date, sessionCount: 0,
-                workspacePath: latest.edit.workspace, latestEditWorkspacePath: latest.edit.workspace, history: days))
-        }
-        return ScanResult(projects: ProjectSummary.merge(activity), notices: Array(Set(notices)).sorted())
-    }
-
-    private struct SessionFold {
-        var sourceID: String
-        var sessionID: String
-        var projectPath: String
-        var createdAt: Date
-        var latestActivity: Date
-        var workspace: String
-    }
-
-    private struct EditFold {
-        var sourceID: String
-        var projectPath: String
-        var id: String
-        var edit: StoredEdit
+        let folded = HistoryFold.fold(order.compactMap { sessions[$0] }, resolver: resolver)
+        return ScanResult(projects: ProjectSummary.merge(folded.activity), notices: Array(Set(notices)).sorted(),
+                          sessionProjects: folded.associations, missingFolders: folded.missingFolders)
     }
 
     private func readHeader(_ url: URL) -> CodexFile? {
@@ -236,19 +239,23 @@ public final class CodexActivityProvider: ActivityProvider {
         guard let type = object["type"] as? String, let payload = object["payload"] as? [String: Any] else { return true }
         switch type {
         case "session_meta":
-            guard file.sessionID == nil, let project = CheckoutPath.absolute(payload["cwd"] as? String) else { return true }
+            guard file.sessionID == nil, let cwd = payload["cwd"] as? String,
+                  let project = ProjectLocationRegistry.lexicalPath(cwd) else { return true }
             let identifier = payload["id"] as? String
             file.sessionID = (identifier?.isEmpty == false ? identifier : nil) ?? fallbackID
             file.projectPath = project
+            if let parent = payload["parent_thread_id"] as? String, !parent.isEmpty, parent != file.sessionID {
+                file.parentSessionID = parent
+            }
             file.createdAt = (payload["timestamp"] as? String).flatMap(RecordedDate.parse) ?? file.latestActivity
             var roots = [project]
             if let extra = payload["runtime_workspace_roots"] as? [String] {
-                roots.append(contentsOf: extra.compactMap(CheckoutPath.absolute))
+                roots.append(contentsOf: extra.compactMap(ProjectLocationRegistry.lexicalPath))
             }
             file.roots = Array(Set(roots)).sorted { $0.count > $1.count }
             if file.turnCwd == nil { file.turnCwd = project }
         case "turn_context":
-            if let cwd = CheckoutPath.absolute(payload["cwd"] as? String) { file.turnCwd = cwd }
+            if let raw = payload["cwd"] as? String, let cwd = ProjectLocationRegistry.lexicalPath(raw) { file.turnCwd = cwd }
         case "event_msg":
             recordFileChange(object: object, payload: payload, file: file)
         default:
@@ -265,29 +272,29 @@ public final class CodexActivityProvider: ActivityProvider {
               let id = item["id"] as? String, !id.isEmpty,
               let changes = item["changes"] as? [String: Any], !changes.isEmpty,
               let project = file.projectPath else { return }
-        let roots = file.roots.isEmpty ? [project] : file.roots
+        // Record evidence only. Whether the working directory was declared and
+        // where each target physically is are decided when folding.
         let eventCwd = file.turnCwd ?? project
-        guard roots.contains(where: { CheckoutPath.contains(root: $0, path: eventCwd) }) else { return }
-        var paths = changes.keys.compactMap { CheckoutPath.resolve($0, base: eventCwd) }
+        var paths = changes.keys.compactMap { lexicalTarget($0, base: eventCwd) }
         guard paths.count == changes.count else { return }
         for change in changes.values {
             guard let update = change as? [String: Any], update["type"] as? String == "update",
                   let destination = update["move_path"], !(destination is NSNull) else { continue }
             guard let destination = destination as? String,
-                  let path = CheckoutPath.resolve(destination, base: eventCwd) else { return }
+                  let path = lexicalTarget(destination, base: eventCwd) else { return }
             paths.append(path)
         }
-        guard paths.allSatisfy({ CheckoutPath.contains(root: eventCwd, path: $0) }) else { return }
-        let workspaces = Set(paths.map { path in
-            roots.first(where: {
-                CheckoutPath.contains(root: eventCwd, path: $0) && CheckoutPath.contains(root: $0, path: path)
-            }) ?? eventCwd
-        })
-        guard workspaces.count == 1, let workspace = workspaces.first else { return }
         guard let date = RecordedDate.milliseconds(payload["completed_at_ms"])
             ?? (object["timestamp"] as? String).flatMap(RecordedDate.parse) else { return }
-        let edit = StoredEdit(date: date, workspace: workspace)
+        let directories = Array(Set(paths.map { ($0 as NSString).deletingLastPathComponent })).sorted()
+        let edit = StoredEdit(date: date, workspace: eventCwd, targetDirectories: directories)
         file.edits[id] = file.edits[id]?.earlier(than: edit) ?? edit
+    }
+
+    private func lexicalTarget(_ path: String, base: String) -> String? {
+        guard !path.isEmpty, !path.contains("\0"), !path.hasPrefix("-") else { return nil }
+        if path.hasPrefix("/") || path.hasPrefix("~/") { return ProjectLocationRegistry.lexicalPath(path) }
+        return ProjectLocationRegistry.lexicalPath((base as NSString).appendingPathComponent(path))
     }
 }
 
@@ -300,11 +307,13 @@ private final class CodexFile: Codable {
     var turnCwd: String?
     var roots: [String] = []
     var edits: [String: StoredEdit] = [:]
+    var parentSessionID: String?
 
     init() {}
 
     func resetDerived() {
         sessionID = nil
+        parentSessionID = nil
         projectPath = nil
         createdAt = nil
         latestActivity = nil

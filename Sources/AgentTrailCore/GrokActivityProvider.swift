@@ -1,24 +1,41 @@
 import Foundation
 
 /// Read-only adapter for Grok sessions under `$GROK_HOME` (`~/.grok` by default).
-/// The project path comes from `summary.json` `info.cwd`, never from the encoded
-/// directory name. A completed `write` or `search_replace` tool call with an
-/// `EditsApplied` result is one edit.
+/// The folder a session was started in comes from `summary.json` `info.cwd`,
+/// never from the encoded directory name. A completed `write` or
+/// `search_replace` tool call with an `EditsApplied` result is one edit, and it
+/// counts for the Git checkout its files physically landed in.
 /// Shell commands and file modification times are not evidence. Live status is
-/// not inferred from `active_sessions.json`.
+/// not inferred from `active_sessions.json`. The cache keeps recorded evidence
+/// only, so learned project locations never force a reparse.
 public final class GrokActivityProvider: ActivityProvider {
+    static let cacheVersion = 4
     private let cacheURL: URL?
     private var cache: [String: GrokFile] = [:]
     private var cacheLoadNotice: String?
     private let files = FileManager.default
+    private let resolver: GitProjectResolver
+    private let ownsResolver: Bool
 
-    public init(cacheURL: URL? = nil) {
+    public var projectLocations: ProjectLocationRegistry {
+        get { resolver.locations }
+        set { resolver.reset(locations: newValue) }
+    }
+
+    public convenience init(cacheURL: URL? = nil, projectLocations: ProjectLocationRegistry = .init()) {
+        self.init(cacheURL: cacheURL, resolver: GitProjectResolver(locations: projectLocations), ownsResolver: true)
+    }
+
+    /// A shared resolver is reset by its owner once per scan.
+    init(cacheURL: URL?, resolver: GitProjectResolver, ownsResolver: Bool = false) {
         self.cacheURL = cacheURL
+        self.resolver = resolver
+        self.ownsResolver = ownsResolver
         guard let cacheURL, files.fileExists(atPath: cacheURL.path) else { return }
         do {
             let data = try Data(contentsOf: cacheURL)
             let header = try JSONDecoder().decode(GrokCacheHeader.self, from: data)
-            if header.version == 2 {
+            if header.version == Self.cacheVersion {
                 cache = try JSONDecoder().decode(GrokSavedCache.self, from: data).files
             } else {
                 cacheLoadNotice = "Grok edit history is being rebuilt once for the current indexer."
@@ -29,8 +46,10 @@ public final class GrokActivityProvider: ActivityProvider {
     }
 
     public func metadata(sources: [AgentSource]) -> ScanResult {
+        if ownsResolver { resolver.reset() }
         let discovered = discover(sources: sources)
-        return result(sessions: discovered.sessions, parsed: [:], includeEdits: false, extraNotices: discovered.notices)
+        // Reuse cached edit evidence so sessions land where the last scan put them.
+        return result(sessions: discovered.sessions, parsed: cache, includeEdits: true, extraNotices: discovered.notices)
     }
 
     public func scan(sources: [AgentSource]) -> ScanResult {
@@ -38,12 +57,13 @@ public final class GrokActivityProvider: ActivityProvider {
     }
 
     public func scan(sources: [AgentSource], progress: ((ScanResult, Int, Int) -> Void)?) -> ScanResult {
+        if ownsResolver { resolver.reset() }
         let discovered = discover(sources: sources)
         let sessions = discovered.sessions
         var notices = discovered.notices + (cacheLoadNotice.map { [$0] } ?? [])
         cacheLoadNotice = nil
         var parsed: [String: GrokFile] = [:]
-        let tasks = sessions.compactMap { session in session.updates.map { (session, $0) } }
+        let tasks = sessions.flatMap { session in session.updates.map { (session, $0) } }
         var lastProgress = Date.distantPast
         for (index, task) in tasks.enumerated() {
             let file = cache[task.1.path] ?? GrokFile()
@@ -78,7 +98,7 @@ public final class GrokActivityProvider: ActivityProvider {
         if let cacheURL {
             do {
                 try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(GrokSavedCache(version: 2, files: cache))
+                let data = try JSONEncoder().encode(GrokSavedCache(version: Self.cacheVersion, files: cache))
                 try data.write(to: cacheURL, options: .atomic)
                 try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
             } catch {
@@ -94,7 +114,7 @@ public final class GrokActivityProvider: ActivityProvider {
         var projectPath: String
         var createdAt: Date
         var latestActivity: Date
-        var updates: URL?
+        var updates: [URL]
     }
 
     private func discover(sources: [AgentSource]) -> (sessions: [GrokSession], notices: [String]) {
@@ -129,7 +149,7 @@ public final class GrokActivityProvider: ActivityProvider {
                     if sessions[index].projectPath == session.projectPath {
                         if session.createdAt < sessions[index].createdAt { sessions[index].createdAt = session.createdAt }
                         if session.latestActivity > sessions[index].latestActivity { sessions[index].latestActivity = session.latestActivity }
-                        if sessions[index].updates == nil { sessions[index].updates = session.updates }
+                        sessions[index].updates = Array(Set(sessions[index].updates + session.updates)).sorted { $0.path < $1.path }
                     }
                     continue
                 }
@@ -147,51 +167,40 @@ public final class GrokActivityProvider: ActivityProvider {
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let info = object["info"] as? [String: Any],
               let id = info["id"] as? String, !id.isEmpty,
-              let project = CheckoutPath.absolute(info["cwd"] as? String),
+              let cwd = info["cwd"] as? String,
+              let project = ProjectLocationRegistry.lexicalPath(cwd),
               let created = (object["created_at"] as? String).flatMap(RecordedDate.parse) else { return nil }
         let updated = (object["last_active_at"] as? String).flatMap(RecordedDate.parse)
             ?? (object["updated_at"] as? String).flatMap(RecordedDate.parse)
             ?? created
         let updates = url.deletingLastPathComponent().appendingPathComponent("updates.jsonl")
         return GrokSession(source: source, id: id, projectPath: project, createdAt: created,
-            latestActivity: max(created, updated), updates: files.fileExists(atPath: updates.path) ? updates : nil)
+            latestActivity: max(created, updated), updates: files.fileExists(atPath: updates.path) ? [updates] : [])
     }
 
     private func result(sessions: [GrokSession], parsed: [String: GrokFile], includeEdits: Bool, extraNotices: [String]) -> ScanResult {
-        var activity: [ProjectActivity] = sessions.map { session in
-            ProjectActivity(sourceID: session.source.id, projectPath: session.projectPath,
-                latestActivity: session.latestActivity, sessionCount: 1, workspacePath: session.projectPath,
-                history: [ActivityDay(day: session.createdAt, sessionCount: 1)])
-        }
-        var edits: [String: (source: String, project: String, edit: StoredEdit)] = [:]
-        if includeEdits {
-            for session in sessions {
-                guard let path = session.updates?.path, let file = parsed[path], file.projectPath == session.projectPath else { continue }
-                for (id, edit) in file.edits where CheckoutPath.contains(root: session.projectPath, path: edit.workspace) {
-                    let key = session.source.id + "\u{0}" + session.projectPath + "\u{0}" + id
-                    if let existing = edits[key] {
-                        edits[key] = (session.source.id, session.projectPath, existing.edit.earlier(than: edit))
-                    } else {
-                        edits[key] = (session.source.id, session.projectPath, edit)
-                    }
+        let history = sessions.map { session -> HistorySession in
+            var edits: [String: StoredEdit] = [:]
+            if includeEdits {
+                // Copies of the same session may contain different portions of
+                // history. Combine all of their evidence before attributing it.
+                for path in session.updates.map(\.path) {
+                    guard let file = parsed[path], file.projectPath == session.projectPath else { continue }
+                    for (id, edit) in file.edits { edits[id] = edits[id]?.earlier(than: edit) ?? edit }
                 }
             }
+            return HistorySession(sourceID: session.source.id, sessionID: session.id,
+                recordedWorkspace: session.projectPath, roots: [session.projectPath], createdAt: session.createdAt,
+                latestActivity: session.latestActivity, edits: edits)
         }
-        let grouped = Dictionary(grouping: Array(edits.values), by: { $0.source + "\u{0}" + $0.project })
-        for records in grouped.values {
-            guard let latest = records.max(by: { $0.edit.date < $1.edit.date }) else { continue }
-            let days = Dictionary(grouping: records, by: { ActivityDay.start(of: $0.edit.date) })
-                .map { ActivityDay(day: $0.key, editCount: $0.value.count) }
-            activity.append(ProjectActivity(sourceID: latest.source, projectPath: latest.project,
-                latestActivity: latest.edit.date, latestEdit: latest.edit.date, sessionCount: 0,
-                workspacePath: latest.edit.workspace, latestEditWorkspacePath: latest.edit.workspace, history: days))
-        }
+        let folded = HistoryFold.fold(history, resolver: resolver)
         var notices = extraNotices
-        let missingHistory = sessions.filter { $0.updates == nil }.count
+        let missingHistory = sessions.filter { $0.updates.isEmpty }.count
         if missingHistory > 0 {
             notices.append("Grok: edit history is unavailable for \(missingHistory) session(s).")
         }
-        return ScanResult(projects: ProjectSummary.merge(activity), notices: Array(Set(notices)).sorted())
+        return ScanResult(projects: ProjectSummary.merge(folded.activity), notices: Array(Set(notices)).sorted(),
+            sessionProjects: folded.associations, missingFolders: folded.missingFolders)
     }
 
     @discardableResult
@@ -212,12 +221,13 @@ public final class GrokActivityProvider: ActivityProvider {
             return true
         }
         guard file.pending.removeValue(forKey: id) != nil else { return true }
+        // Record evidence only; where the files physically are is decided when folding.
         guard let output = update["rawOutput"] as? [String: Any],
               output["type"] as? String == "SearchReplace", output["is_error"] as? Bool != true,
-              let paths = editedPaths(output),
-              paths.allSatisfy({ CheckoutPath.contains(root: file.projectPath, path: $0) }) else { return true }
+              let paths = editedPaths(output) else { return true }
         guard let date = RecordedDate.any(object["timestamp"]) else { return true }
-        let edit = StoredEdit(date: date, workspace: file.projectPath)
+        let directories = Array(Set(paths.map { ($0 as NSString).deletingLastPathComponent })).sorted()
+        let edit = StoredEdit(date: date, workspace: file.projectPath, targetDirectories: directories)
         file.edits[id] = file.edits[id]?.earlier(than: edit) ?? edit
         return true
     }
@@ -232,12 +242,13 @@ public final class GrokActivityProvider: ActivityProvider {
         // Native write and search_replace successes both use SearchReplace /
         // EditsApplied. A completed status alone does not prove a file changed.
         if let one = output["EditsApplied"] as? [String: Any] {
-            return CheckoutPath.absolute(one["absolute_path"] as? String).map { [$0] }
+            return (one["absolute_path"] as? String).flatMap(ProjectLocationRegistry.lexicalPath).map { [$0] }
         }
         guard let many = output["EditsApplied"] as? [[String: Any]], !many.isEmpty else { return nil }
         var paths: [String] = []
         for edit in many {
-            guard let path = CheckoutPath.absolute(edit["absolute_path"] as? String) else { return nil }
+            guard let raw = edit["absolute_path"] as? String,
+                  let path = ProjectLocationRegistry.lexicalPath(raw) else { return nil }
             paths.append(path)
         }
         return paths

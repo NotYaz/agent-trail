@@ -159,15 +159,94 @@ public func canonicalPath(_ path: String) -> String {
         .standardizedFileURL.resolvingSymlinksInPath().path
 }
 
+/// Evidence-backed project identity for one assistant session. The recorded
+/// launch directory stays separate from the repository's present location.
+public struct SessionProjectAssociation: Hashable, Sendable {
+    public let sourceID: String
+    public let sessionID: String
+    public let recordedWorkspace: String
+    public let projectPath: String
+
+    public init(sourceID: String, sessionID: String, recordedWorkspace: String, projectPath: String) {
+        self.sourceID = sourceID
+        self.sessionID = sessionID
+        self.recordedWorkspace = recordedWorkspace
+        self.projectPath = projectPath
+    }
+}
+
+/// Confirmed edits recorded under a folder that no longer exists, below the
+/// folder a session was started in. They may belong to a project that was
+/// moved without leaving a link behind; the user can locate it.
+public struct MissingFolder: Hashable, Sendable {
+    public let sourceID: String
+    /// The project card these edits are counted on (the launch folder).
+    public let projectPath: String
+    /// The topmost folder that no longer exists.
+    public let path: String
+    public let editCount: Int
+    /// Recorded target folders, used to check a folder the user chooses.
+    public let sampleDirectories: [String]
+
+    public init(sourceID: String, projectPath: String, path: String, editCount: Int, sampleDirectories: [String] = []) {
+        self.sourceID = sourceID
+        self.projectPath = projectPath
+        self.path = path
+        self.editCount = editCount
+        self.sampleDirectories = sampleDirectories
+    }
+
+    /// The earlier path of `chosen`: the folder at or below `path` whose
+    /// recorded subfolders exist inside the chosen folder. Nil when none of the
+    /// recorded folders can be found there, so an unrelated folder is refused.
+    public func previousRoot(forChosenFolder chosen: String) -> String? {
+        let files = FileManager.default
+        var best: (root: String, matches: Int)?
+        for depth in 0...8 {
+            var matches = 0
+            var root: String?
+            for directory in sampleDirectories where CheckoutPath.contains(root: path, path: directory) {
+                let relative = directory == path ? [] : directory.dropFirst(path.count + 1).split(separator: "/").map(String.init)
+                // A recorded folder equal to the candidate root would map onto
+                // the chosen folder itself and prove nothing.
+                guard relative.count > depth else { continue }
+                let candidate = ([path] + relative.prefix(depth)).joined(separator: "/")
+                guard root == nil || root == candidate else { continue }
+                let rebased = ([chosen] + relative.dropFirst(depth)).joined(separator: "/")
+                if files.fileExists(atPath: rebased) {
+                    root = candidate
+                    matches += 1
+                }
+            }
+            if let root, matches > (best?.matches ?? 0) { best = (root, matches) }
+        }
+        if let best { return best.root }
+        // Edits made directly in the missing folder leave nothing deeper to
+        // check; the user's explicit choice of a checkout decides.
+        return !sampleDirectories.isEmpty && sampleDirectories.allSatisfy({ $0 == path }) ? path : nil
+    }
+}
+
 public struct ScanResult: Sendable {
     public var projects: [ProjectSummary]
     public var notices: [String]
     public var scannedAt: Date
+    public var sessionProjects: [SessionProjectAssociation]
+    public var projectLocations: ProjectLocationRegistry
+    public var missingFolders: [MissingFolder]
+    /// Projects whose own folder could not be found during the scan.
+    public var unavailableProjects: Set<String>
 
-    public init(projects: [ProjectSummary], notices: [String] = [], scannedAt: Date = Date()) {
+    public init(projects: [ProjectSummary], notices: [String] = [], scannedAt: Date = Date(),
+                sessionProjects: [SessionProjectAssociation] = [], projectLocations: ProjectLocationRegistry = .init(),
+                missingFolders: [MissingFolder] = [], unavailableProjects: Set<String> = []) {
         self.projects = projects
         self.notices = notices
         self.scannedAt = scannedAt
+        self.sessionProjects = sessionProjects
+        self.projectLocations = projectLocations
+        self.missingFolders = missingFolders
+        self.unavailableProjects = unavailableProjects
     }
 }
 

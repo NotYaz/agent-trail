@@ -232,10 +232,11 @@ struct ProjectLiveStatusView: View {
                 Text(statusName(session.status))
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(statusColor(session.status))
-                if session.workspacePath != session.projectPath {
-                    Label("Worktree", systemImage: "arrow.triangle.branch")
+                if let label = WorkspaceLabel.make(workspace: session.workspacePath, project: session.projectPath) {
+                    Label(label.shortTitle, systemImage: label.symbol)
                         .font(.system(size: 8))
                         .foregroundStyle(.tertiary)
+                        .help(label.help(workspace: session.workspacePath, project: session.projectPath))
                 }
                 Spacer(minLength: 3)
                 Text(reportAge(session.updatedAt, now: now))
@@ -248,7 +249,7 @@ struct ProjectLiveStatusView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help("Recorded workspace: \(session.workspacePath)")
+                .help("Started in: \(session.workspacePath)")
         }
         .help(sessionHelp(session))
     }
