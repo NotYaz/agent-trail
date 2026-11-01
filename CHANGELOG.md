@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.7 — 2026-11-01
 
 - Redesigned panel. A Pulse strip shows live sessions, edits in the last 7 days, active projects, and your day streak. Project cards gain a 30-day sparkline, the change from the previous 30 days, a profile mix bar, New and Dormant chips, a profile stack with live status rings, and an attention edge. A pinned toolbar adds filter chips and sorting by edits, trend, or name. Keyboard shortcuts: ⌘1, ⌘2, ⌘F, ⌘R.
 - Growth is rebuilt and follows the system appearance: KPI tiles, a recorded-edits chart with a 7-day average, peak, per-profile breakdown, sessions and running-total views, a 26-week Trail calendar with weekday totals, a **When edits land** punch card with peak hour and chronotype, a profile mix with delegated edits, and **Where edits landed**. The in-app growth tree moved to the exported portrait.
