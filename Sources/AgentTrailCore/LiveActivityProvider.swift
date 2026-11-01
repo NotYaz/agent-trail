@@ -8,6 +8,58 @@ public enum LiveStatus: String, Sendable {
     case unknown
 }
 
+/// A pull request an assistant recorded for a session. Readers keep only https
+/// links, so opening one never hands a custom scheme to another app.
+public struct LivePullRequest: Hashable, Sendable {
+    public let number: Int
+    public let url: URL
+
+    public init(number: Int, url: URL) {
+        self.number = number
+        self.url = url
+    }
+}
+
+/// Extra, best-effort facts about a live session. Every field is optional:
+/// assistants record different things, and formats are private.
+/// Deliberately not Codable: titles and needs-action text stay in memory.
+public struct LiveSessionDetails: Hashable, Sendable {
+    /// Conversation title. In memory only.
+    public var title: String?
+    /// Claude Desktop `local_…` session id: the registry record's hostSessionId,
+    /// equal to the Desktop record's sessionId, matching ^local_[A-Za-z0-9-]{1,64}$,
+    /// and not archived. Nil when any check fails.
+    public var desktopSessionID: String?
+    /// Claude's postTurnSummary.needs_action sentence. In memory only.
+    public var needsAction: String?
+    /// When the current status began, when the assistant records it.
+    public var stateSince: Date?
+    /// Git branch the assistant recorded for the session.
+    public var branch: String?
+    /// Recorded pull requests, https links only, in the assistant's order.
+    public var pullRequests: [LivePullRequest]
+    /// Bundle id of the app that owns the session: com.openai.codex for a Codex
+    /// thread owned by the desktop app, or a terminal for Grok. Nil when unknown.
+    public var hostBundleID: String?
+    /// Codex subagent thread's parent thread id.
+    public var parentThreadID: String?
+
+    public init(title: String? = nil, desktopSessionID: String? = nil, needsAction: String? = nil,
+                stateSince: Date? = nil, branch: String? = nil, pullRequests: [LivePullRequest] = [],
+                hostBundleID: String? = nil, parentThreadID: String? = nil) {
+        self.title = title
+        self.desktopSessionID = desktopSessionID
+        self.needsAction = needsAction
+        self.stateSince = stateSince
+        self.branch = branch
+        self.pullRequests = pullRequests
+        self.hostBundleID = hostBundleID
+        self.parentThreadID = parentThreadID
+    }
+
+    public static let none = LiveSessionDetails()
+}
+
 public struct LiveAgentSession: Identifiable, Sendable {
     public var id: String { "\(sourceID):\(sessionID):\(pid)" }
     public let sourceID: String
@@ -17,9 +69,12 @@ public struct LiveAgentSession: Identifiable, Sendable {
     public let status: LiveStatus
     public let updatedAt: Date
     public let pid: Int32
+    /// Never part of identity or status: two reports of one process are the
+    /// same session whatever their details say.
+    public let details: LiveSessionDetails
 
     public init(sourceID: String, projectPath: String, workspacePath: String, sessionID: String,
-                status: LiveStatus, updatedAt: Date, pid: Int32) {
+                status: LiveStatus, updatedAt: Date, pid: Int32, details: LiveSessionDetails = .none) {
         self.sourceID = sourceID
         self.projectPath = projectPath
         self.workspacePath = workspacePath
@@ -27,6 +82,14 @@ public struct LiveAgentSession: Identifiable, Sendable {
         self.status = status
         self.updatedAt = updatedAt
         self.pid = pid
+        self.details = details
+    }
+
+    /// The same report under another project identity. Status, report time,
+    /// PID and details still come from the live reader.
+    public func relocated(projectPath: String, workspacePath: String) -> LiveAgentSession {
+        LiveAgentSession(sourceID: sourceID, projectPath: projectPath, workspacePath: workspacePath,
+            sessionID: sessionID, status: status, updatedAt: updatedAt, pid: pid, details: details)
     }
 }
 
@@ -107,9 +170,19 @@ public final class LiveActivityProvider {
                             unreadable += 1
                             return
                         }
+                        var details = project.details
+                        // The registry names its Desktop host; a link is offered only
+                        // when that host is the very record this session matched.
+                        if let host = record.hostSessionId?.value, host == project.linkableSessionID {
+                            details.desktopSessionID = host
+                        }
+                        let stateSince = record.statusUpdatedAt.flatMap { value in
+                            value.isFinite && value > 0 ? Date(timeIntervalSince1970: value / 1000) : nil
+                        }
                         candidates.append(Candidate(source: source, projectPath: project.projectPath, workspacePath: cwd,
                             sessionID: cliID, pid: pid, status: record.status, procStart: record.procStart,
-                            updatedAt: Date(timeIntervalSince1970: milliseconds / 1000)))
+                            updatedAt: Date(timeIntervalSince1970: milliseconds / 1000),
+                            stateSince: stateSince, details: details))
                     } catch { unreadable += 1 }
                 }
             }
@@ -147,9 +220,13 @@ public final class LiveActivityProvider {
                 status = .unknown
                 staleBySource[candidate.source.id, default: 0] += 1
             }
+            var details = candidate.details
+            // Only a recognized, trusted flag has a known start. An unknown state
+            // did not begin at the old report's time.
+            details.stateSince = status == .unknown ? nil : candidate.stateSince
             let item = LiveAgentSession(sourceID: candidate.source.id, projectPath: candidate.projectPath,
                 workspacePath: candidate.workspacePath, sessionID: candidate.sessionID, status: status,
-                updatedAt: candidate.updatedAt, pid: candidate.pid)
+                updatedAt: candidate.updatedAt, pid: candidate.pid, details: details)
             sessions[item.id] = item
         }
         for source in sources {
@@ -179,6 +256,7 @@ public final class LiveActivityProvider {
         let entrypoint: String?
         let pidDomain: String?
         let procStart: String?
+        let hostSessionId: Lenient<String>?
     }
 
     private struct Candidate {
@@ -190,6 +268,48 @@ public final class LiveActivityProvider {
         let status: String?
         let procStart: String?
         let updatedAt: Date
+        let stateSince: Date?
+        let details: LiveSessionDetails
+    }
+
+    /// A best-effort field: a missing, null or malformed value becomes nil instead
+    /// of failing the record, so a private format change never drops a session.
+    fileprivate struct Lenient<Value: Decodable>: Decodable {
+        let value: Value?
+
+        init(from decoder: Decoder) throws {
+            value = try? decoder.singleValueContainer().decode(Value.self)
+        }
+    }
+
+    /// Claude Desktop's own link handler accepts only this shape
+    /// (^local_[A-Za-z0-9-]{1,64}$), so nothing else is offered as a link target.
+    static func isDesktopSessionID(_ value: String) -> Bool {
+        let prefix = "local_".utf8
+        let bytes = value.utf8
+        guard bytes.starts(with: prefix) else { return false }
+        let suffix = bytes.dropFirst(prefix.count)
+        return (1...64).contains(suffix.count) && suffix.allSatisfy { byte in
+            switch byte {
+            case UInt8(ascii: "0")...UInt8(ascii: "9"), UInt8(ascii: "A")...UInt8(ascii: "Z"),
+                 UInt8(ascii: "a")...UInt8(ascii: "z"), UInt8(ascii: "-"): return true
+            default: return false
+            }
+        }
+    }
+
+    /// Recorded PR links are opened by the app, so only plain https links to a
+    /// host, without credentials, are kept.
+    static func pullRequestURL(_ text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), url.scheme?.lowercased() == "https",
+              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return nil }
+        return url
+    }
+
+    private static func displayText(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     private static func readProcessStartTimes(_ pids: Set<Int32>) -> [Int32: String] {
@@ -229,14 +349,65 @@ public final class LiveActivityProvider {
         let originCwd: String?
         let worktreePath: String?
         let gitAnchors: [Anchor]?
-        let lastActivityAt: Double?
+        /// Only ranks records that claim one CLI id; a malformed value ranks oldest
+        /// instead of dropping the session.
+        let lastActivityAt: Lenient<Double>?
+        // Details for the Jump button. Each one is lenient: none may drop the session.
+        let title: Lenient<String>?
+        let isArchived: Lenient<Bool>?
+        let branch: Lenient<String>?
+        let lastAssistantUuid: Lenient<String>?
+        let postTurnSummary: Lenient<Summary>?
+        let prs: Lenient<[Lenient<PullRequest>]>?
         struct Anchor: Decodable { let gitRoot: String? }
+
+        struct Summary: Decodable {
+            let needsAction: Lenient<String>?
+            let summarizesUuid: Lenient<String>?
+            private enum CodingKeys: String, CodingKey {
+                case needsAction = "needs_action"
+                case summarizesUuid = "summarizes_uuid"
+            }
+        }
+
+        struct PullRequest: Decodable {
+            let prNumber: Lenient<Int>?
+            let url: Lenient<String>?
+        }
     }
 
     private struct DesktopProject {
         let projectPath: String
         let checkoutRoots: [String]
         let activity: Double
+        /// The record's own `local_…` id, only when it has the link shape and the
+        /// session is not archived (Claude opens its Code home for archived ids).
+        let linkableSessionID: String?
+        /// Title, needs-action, branch and PRs; the scan adds the link and timing.
+        let details: LiveSessionDetails
+    }
+
+    private static func desktopDetails(_ record: DesktopRecord) -> (linkableSessionID: String?, details: LiveSessionDetails) {
+        // Missing means not archived; a malformed flag cannot prove it.
+        let archived = record.isArchived.map { $0.value != false } ?? false
+        let linkable = record.sessionId.flatMap { !archived && isDesktopSessionID($0) ? $0 : nil }
+        let summary = record.postTurnSummary?.value
+        // A summary describes one finished turn. Once a newer assistant message
+        // exists, its request is stale and is not shown.
+        let summarized = summary?.summarizesUuid?.value
+        let latest = record.lastAssistantUuid?.value
+        let isCurrent = summarized == nil || latest == nil || summarized == latest
+        var pullRequests: [LivePullRequest] = []
+        for entry in record.prs?.value ?? [] {
+            guard let number = entry.value?.prNumber?.value, number > 0,
+                  let link = entry.value?.url?.value, let url = pullRequestURL(link) else { continue }
+            let pullRequest = LivePullRequest(number: number, url: url)
+            if !pullRequests.contains(pullRequest) { pullRequests.append(pullRequest) }
+        }
+        let details = LiveSessionDetails(title: displayText(record.title?.value),
+            needsAction: isCurrent ? displayText(summary?.needsAction?.value) : nil,
+            branch: displayText(record.branch?.value), pullRequests: pullRequests)
+        return (linkable, details)
     }
 
     private func desktopSessions(source: AgentSource, notices: inout [String]) -> [String: DesktopProject] {
@@ -267,8 +438,10 @@ public final class LiveActivityProvider {
                     var roots = [projectPath, workspace]
                     roots += (record.gitAnchors ?? []).compactMap { absolutePath($0.gitRoot) }
                     if let worktree = absolutePath(record.worktreePath) { roots.append(worktree) }
+                    let extra = Self.desktopDetails(record)
                     let project = DesktopProject(projectPath: projectPath, checkoutRoots: Array(Set(roots)),
-                        activity: record.lastActivityAt ?? 0)
+                        activity: record.lastActivityAt?.value ?? 0, linkableSessionID: extra.linkableSessionID,
+                        details: extra.details)
                     for id in [record.cliSessionId].compactMap({ $0 }) + (record.priorCliSessionIds ?? []) where !id.isEmpty {
                         if result[id]?.activity ?? -.infinity <= project.activity { result[id] = project }
                     }

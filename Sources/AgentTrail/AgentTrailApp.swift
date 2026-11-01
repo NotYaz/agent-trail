@@ -5,9 +5,10 @@ import AgentTrailCore
 
 @main
 enum AgentTrailApp {
-    private static let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo"]
+    private static let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo",
+                                      "--render-status-demo"]
     private static let usage = """
-        Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo OUTPUT.png [--light] [--height N]
+        Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo|--render-status-demo OUTPUT.png [--light] [--height N]
           --light     render the light appearance (panels only; the share card is always dark)
           --height N  panel render height in points, 200-4000 (default 680; the width stays 600)
 
@@ -59,6 +60,13 @@ enum AgentTrailApp {
     /// Renders are deterministic: the clock is pinned, continuous effects stop
     /// and reveals jump to their final state.
     @MainActor private static func renderDemo(to output: URL, kind: String) throws {
+        if kind == "--render-status-demo" {
+            let preview = StatusIconPreview.image()
+            guard let tiff = preview.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+                  let png = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+            try write(png, to: output)
+            return
+        }
         let store = AppStore(demoMode: true, now: DemoData.referenceDate())
         if kind == "--render-share-demo" {
             let summary = store.portrait(projectPath: nil, period: .month, showNames: false)
@@ -112,11 +120,10 @@ enum AgentTrailApp {
 
 @MainActor
 private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
-    private var statusItem: NSStatusItem?
+    private var statusController: StatusItemController?
     private var popover: NSPopover?
     private var store: AppStore?
     private var settingsWindow: NSWindow?
-    private var attentionObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -132,27 +139,11 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         popover.delegate = self
         self.popover = popover
 
-        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem.button {
-            button.image = Self.statusImage(needsInput: false)
-            button.toolTip = "Agent Trail"
-            button.setAccessibilityLabel("Agent Trail")
-            button.target = self
-            button.action = #selector(togglePanel(_:))
-        }
-        self.statusItem = statusItem
-
-        // Created after the status item, because the first value arrives at once.
-        attentionObserver = store.$liveSummary
-            .map(\.waiting)
-            .removeDuplicates()
-            .sink { [weak self] waiting in
-                // AppStore is main-actor isolated, so every value arrives on the main thread.
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.updateStatusButton(waiting: waiting)
-                }
-            }
+        // The menu-bar item: live-state glyph, right-click session menu and the hint anchor.
+        statusController = StatusItemController(store: store,
+            togglePanel: { [weak self] in self?.togglePanel() },
+            showPanel: { [weak self] in self?.showPanel() },
+            closePanel: { [weak self] in self?.closePanel() })
 
         DispatchQueue.main.async { [weak self] in self?.showPanel() }
     }
@@ -173,51 +164,31 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         store?.isPanelVisible = false
     }
 
-    @objc private func togglePanel(_ sender: Any?) {
+    /// A plain left click on the menu-bar item.
+    private func togglePanel() {
         guard let popover else { return }
         if popover.isShown {
-            popover.performClose(sender)
+            popover.performClose(nil)
         } else {
             showPanel()
         }
     }
 
+    /// Before the right-click session menu opens.
+    private func closePanel() {
+        guard let popover, popover.isShown else { return }
+        popover.performClose(nil)
+    }
+
     private func showPanel() {
-        guard let button = statusItem?.button, let popover else { return }
+        guard let button = statusController?.button, let popover else { return }
+        // A hint under the icon would float over the popover's arrow.
+        HintHUD.dismiss()
         NSApp.activate()
         if !popover.isShown {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
         popover.contentViewController?.view.window?.makeKey()
-    }
-
-    /// While any session needs input the glyph switches to its filled variant
-    /// and turns amber, so the state never rests on color alone; the
-    /// accessibility label and tooltip say it in words.
-    private func updateStatusButton(waiting: Int) {
-        guard let button = statusItem?.button else { return }
-        button.image = Self.statusImage(needsInput: waiting > 0)
-        if waiting > 0 {
-            let label = waiting == 1 ? "Agent Trail, 1 session needs input" : "Agent Trail, \(waiting) sessions need input"
-            button.contentTintColor = Theme.Palette.needsInputNSColor
-            button.setAccessibilityLabel(label)
-            button.toolTip = label
-        } else {
-            button.contentTintColor = nil
-            button.setAccessibilityLabel("Agent Trail")
-            button.toolTip = "Agent Trail"
-        }
-    }
-
-    /// Template images, so the menu bar adapts them to light and dark bars.
-    /// The plain glyph backs up the filled one should a system lack it.
-    private static func statusImage(needsInput: Bool) -> NSImage? {
-        let plain = "point.3.connected.trianglepath.dotted"
-        let name = needsInput ? "point.3.filled.connected.trianglepath.dotted" : plain
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Agent Trail")
-            ?? NSImage(systemSymbolName: plain, accessibilityDescription: "Agent Trail")
-        image?.isTemplate = true
-        return image
     }
 
     private func showProfileSettings() {
@@ -257,6 +228,10 @@ struct AgentTrailShell: View {
     @Namespace private var navigation
     /// Bumped by ⌘F; the Projects panel focuses its search field when it changes.
     @State private var focusSearch = 0
+    /// The ⋯ menu's display switches. StatusItemController and the cards read the same keys.
+    @AppStorage(AppSettings.Key.showSessionTitles) private var showSessionTitles = true
+    @AppStorage(AppSettings.Key.statusAnimates) private var statusAnimates = true
+    @AppStorage(AppSettings.Key.statusShowsCount) private var statusShowsCount = true
 
     /// `height` exists for `--height` renders; the live popover is always 680pt.
     init(store: AppStore, animatesCharts: Bool = true, height: CGFloat = AgentTrailShell.panelHeight) {
@@ -459,6 +434,8 @@ struct AgentTrailShell: View {
         Button("Reload profiles") { store.reloadProfiles() }
             .disabled(store.demoMode)
         Divider()
+        displayMenuItems
+        Divider()
         Link("Project on GitHub", destination: ShellLinks.repository)
         Link("Support development", destination: ShellLinks.support)
         Divider()
@@ -468,6 +445,20 @@ struct AgentTrailShell: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    /// Titles affect cards, menus and hints, so that switch sits at the top
+    /// level; the two icon switches live under "Menu bar".
+    @ViewBuilder private var displayMenuItems: some View {
+        Toggle("Show session titles", isOn: $showSessionTitles)
+        Menu("Menu bar") {
+            Toggle("Animate while agents work", isOn: $statusAnimates)
+            Toggle("Show needs-input count", isOn: $statusShowsCount)
+            if reduceMotion {
+                Divider()
+                Text("Reduce Motion keeps the icon still")
+            }
+        }
     }
 
     // MARK: Toasts

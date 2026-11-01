@@ -37,9 +37,7 @@ public struct ProjectLiveActivity: Identifiable, Sendable {
         for session in sessions {
             guard let project = liveCanonicalPath(session.projectPath),
                   let workspace = liveCanonicalPath(session.workspacePath) else { continue }
-            let normalized = LiveAgentSession(sourceID: session.sourceID, projectPath: project,
-                workspacePath: workspace, sessionID: session.sessionID, status: session.status,
-                updatedAt: session.updatedAt, pid: session.pid)
+            let normalized = session.relocated(projectPath: project, workspacePath: workspace)
             let key = LiveIdentity(sourceID: session.sourceID, sessionID: session.sessionID, pid: session.pid)
             candidates[key, default: []].append(normalized)
         }
@@ -50,9 +48,12 @@ public struct ProjectLiveActivity: Identifiable, Sendable {
                   Set(newest.map(\.projectPath)).count == 1,
                   Set(newest.map(\.workspacePath)).count == 1 else { return nil }
             let status = Set(newest.map { $0.status.rawValue }).count == 1 ? record.status : .unknown
+            // Like status: equally recent copies that disagree keep no details,
+            // so the result never depends on input order.
+            let details = Set(newest.map(\.details)).count == 1 ? record.details : LiveSessionDetails.none
             return LiveAgentSession(sourceID: record.sourceID, projectPath: record.projectPath,
                 workspacePath: record.workspacePath, sessionID: record.sessionID,
-                status: status, updatedAt: newestDate, pid: record.pid)
+                status: status, updatedAt: newestDate, pid: record.pid, details: details)
         }
         return Dictionary(grouping: deduplicated, by: \.projectPath).mapValues { records in
             ProjectLiveActivity(projectPath: records[0].projectPath, sessions: records.sorted(by: liveSessionOrder))
@@ -79,8 +80,8 @@ public struct ProjectOverview: Identifiable, Sendable {
     public static func merge(projects: [ProjectSummary], sessions: [LiveAgentSession],
                              sessionProjects: [SessionProjectAssociation] = [],
                              relocate: ((String) -> String)? = nil) -> [ProjectOverview] {
-        // Association changes only identity. Status, PID, report time, and
-        // recorded workspace still come from the independent live reader.
+        // Association changes only identity. Status, PID, report time, details
+        // and recorded workspace still come from the independent live reader.
         let associated = sessions.map { session -> LiveAgentSession in
             let reported = [liveCanonicalPath(session.workspacePath), liveCanonicalPath(session.projectPath)]
             let candidates = sessionProjects.filter {
@@ -94,13 +95,9 @@ public struct ProjectOverview: Identifiable, Sendable {
                 guard let relocate, candidates.isEmpty else { return session }
                 let moved = relocate(session.projectPath)
                 guard moved != session.projectPath else { return session }
-                return LiveAgentSession(sourceID: session.sourceID, projectPath: moved,
-                    workspacePath: relocate(session.workspacePath), sessionID: session.sessionID,
-                    status: session.status, updatedAt: session.updatedAt, pid: session.pid)
+                return session.relocated(projectPath: moved, workspacePath: relocate(session.workspacePath))
             }
-            return LiveAgentSession(sourceID: session.sourceID, projectPath: path,
-                workspacePath: session.workspacePath, sessionID: session.sessionID,
-                status: session.status, updatedAt: session.updatedAt, pid: session.pid)
+            return session.relocated(projectPath: path, workspacePath: session.workspacePath)
         }
         let live = ProjectLiveActivity.group(associated)
         var historical: [String: [ProjectSummary]] = [:]

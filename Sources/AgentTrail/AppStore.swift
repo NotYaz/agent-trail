@@ -130,6 +130,7 @@ final class AppStore: ObservableObject {
     init(demoMode: Bool = CommandLine.arguments.contains("--demo"), now: Date? = nil) {
         self.demoMode = demoMode
         pinnedNow = now
+        AppSettings.registerDefaults()
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AgentTrail", isDirectory: true)
         cacheURL = support.appendingPathComponent("activity-cache.json")
@@ -255,6 +256,90 @@ final class AppStore: ObservableObject {
         runningSourceIDs = Set(InstanceController.runningInstances(sources: sources).keys)
     }
 
+    // MARK: Jump
+
+    /// Title, else branch, else folder, honoring "Show session titles".
+    /// Conversation-derived: show it, never log or store it.
+    func sessionLabel(_ session: LiveAgentSession) -> String {
+        SessionLabel.make(session, showTitles: AppSettings.showSessionTitles)
+    }
+
+    /// Compact time in the current state ("4m"), when the assistant records when it began.
+    func sessionAge(_ session: LiveAgentSession, now: Date? = nil) -> String? {
+        ElapsedFormat.compact(since: session.details.stateSince, now: now ?? self.now)
+    }
+
+    /// Opens the work behind one live session, in SessionLauncher's order.
+    /// Called only from an explicit click or menu choice. It opens a link or
+    /// activates an app only when that app is already running.
+    func jump(_ session: LiveAgentSession) {
+        let showTitles = AppSettings.showSessionTitles
+        let source = sources.first { $0.id == session.sourceID }
+        guard let source else {
+            // Also reaches the status-item menu, where the panel toast is not visible.
+            reportLaunchFailure("The profile for this session is no longer configured.")
+            return
+        }
+        let context = JumpContext(profileName: source.name,
+                                  title: SessionLabel.title(session, showTitles: showTitles, limit: 60),
+                                  folder: SessionLabel.folder(session), verifiedAt: lastLiveScan)
+        if demoMode {
+            let label = SessionLabel.make(session, showTitles: showTitles, limit: 60)
+            showDemoNotice("Sample data · \(SessionLabel.verb(session.status)) “\(label)” in \(source.name)")
+            return
+        }
+        SessionLauncher.jump(session, source: source, context: context) { [weak self] outcome in
+            self?.applyJump(outcome)
+        }
+    }
+
+    /// Open in an editor or terminal, reveal, copy the path or open a PR.
+    func perform(_ action: WorkspaceAction) {
+        if demoMode {
+            if case .copyPath(let path) = action {
+                copyPath(path)
+            } else {
+                showDemoNotice("Not available with sample data")
+            }
+            return
+        }
+        SessionLauncher.perform(action) { [weak self] message in
+            self?.reportLaunchFailure(message)
+        }
+    }
+
+    private func applyJump(_ outcome: JumpOutcome) {
+        runningSourceIDs = Set(InstanceController.runningInstances(sources: sources).keys)
+        switch outcome {
+        case .done:
+            errorMessage = nil
+        case .hint(let text, let symbol):
+            errorMessage = nil
+            HintHUD.show(text, symbol: symbol)
+        case .failed(let message):
+            reportLaunchFailure(message)
+        }
+    }
+
+    /// Demo jumps switch to no app, so the panel stays open: a hint under the
+    /// icon would sit on the popover's arrow, and the info toast says it instead.
+    private func showDemoNotice(_ text: String) {
+        if isPanelVisible {
+            errorMessage = nil
+            infoMessage = text
+        } else {
+            HintHUD.show(text, symbol: "sparkles")
+        }
+    }
+
+    /// The panel toast when the panel is open; the menu-bar hint otherwise,
+    /// for jumps started from the status item's menu.
+    private func reportLaunchFailure(_ message: String) {
+        infoMessage = nil
+        errorMessage = message
+        if !isPanelVisible { HintHUD.show(message, symbol: "exclamationmark.triangle", duration: 5) }
+    }
+
     private func applyProgress(_ partial: ScanResult) {
         // Routine refreshes must keep the last complete history intact. Publishing
         // partial daily bins here made graphs briefly shrink and lose selection.
@@ -288,20 +373,7 @@ final class AppStore: ObservableObject {
         checkDayRollover()
         if demoMode {
             let now = self.now
-            liveSessions = [
-                LiveAgentSession(sourceID: sources[0].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
-                                 sessionID: "sample-needs-input", status: .waiting, updatedAt: now, pid: 4101),
-                LiveAgentSession(sourceID: sources[1].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit/.claude/worktrees/navigation",
-                                 sessionID: "sample-second-working", status: .working, updatedAt: now.addingTimeInterval(-20), pid: 4102),
-                LiveAgentSession(sourceID: sources[0].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
-                                 sessionID: "sample-main-idle", status: .idle, updatedAt: now.addingTimeInterval(-60), pid: 4103),
-                LiveAgentSession(sourceID: sources[1].id, projectPath: "/Demo/Projects/atlas", workspacePath: "/Demo/Projects/atlas/.worktrees/design",
-                                 sessionID: "sample-idle", status: .idle, updatedAt: now.addingTimeInterval(-120), pid: 4104),
-                LiveAgentSession(sourceID: sources[2].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
-                                 sessionID: "sample-codex-working", status: .working, updatedAt: now.addingTimeInterval(-8), pid: 4105),
-                LiveAgentSession(sourceID: sources[3].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
-                                 sessionID: "sample-grok-idle", status: .idle, updatedAt: now.addingTimeInterval(-70), pid: 4106)
-            ]
+            liveSessions = Self.demoLiveSessions(sources: sources, now: now)
             lastLiveScan = now
             return
         }
@@ -385,6 +457,58 @@ final class AppStore: ObservableObject {
 
     func abbreviate(_ path: String) -> String {
         PathFormat.abbreviate(path)
+    }
+
+    /// Sample live sessions with synthetic details: one waiting with a
+    /// needs-action sentence, a Codex thread owned by the desktop app, and a
+    /// Grok session in a terminal without a title. Nothing here is real.
+    private static func demoLiveSessions(sources: [AgentSource], now: Date) -> [LiveAgentSession] {
+        guard sources.count >= 4 else { return [] }
+        let main = sources[0].id, second = sources[1].id, codex = sources[2].id, grok = sources[3].id
+        let orbit = "/Demo/Projects/orbit", atlas = "/Demo/Projects/atlas"
+        let minute: TimeInterval = 60
+        var pulls: [LivePullRequest] = []
+        if let url = URL(string: "https://git.example.com/orbit/pull/42") {
+            pulls.append(LivePullRequest(number: 42, url: url))
+        }
+        let waiting = LiveSessionDetails(title: "Run the sync migration",
+                                         desktopSessionID: "local_00000000-0000-4000-8000-000000004101",
+                                         needsAction: "Approve running the migration",
+                                         stateSince: now.addingTimeInterval(-4 * minute), branch: "sync-migration",
+                                         pullRequests: pulls)
+        let working = LiveSessionDetails(title: "Tighten sync retries",
+                                         desktopSessionID: "local_00000000-0000-4000-8000-000000004102",
+                                         stateSince: now.addingTimeInterval(-12 * minute), branch: "navigation")
+        let idle = LiveSessionDetails(title: "Landing copy pass",
+                                      desktopSessionID: "local_00000000-0000-4000-8000-000000004103",
+                                      stateSince: now.addingTimeInterval(-25 * minute), branch: "main")
+        let atlasIdle = LiveSessionDetails(title: "Design token cleanup",
+                                           desktopSessionID: "local_00000000-0000-4000-8000-000000004104",
+                                           stateSince: now.addingTimeInterval(-120 * minute), branch: "design")
+        let codexWorking = LiveSessionDetails(title: "Refactor onboarding flow", branch: "onboarding",
+                                              hostBundleID: SessionLauncher.codexBundleID)
+        let grokIdle = LiveSessionDetails(hostBundleID: "com.mitchellh.ghostty")
+        var sessions: [LiveAgentSession] = []
+        sessions.append(LiveAgentSession(sourceID: main, projectPath: orbit, workspacePath: orbit,
+                                         sessionID: "sample-needs-input", status: .waiting, updatedAt: now,
+                                         pid: 4101, details: waiting))
+        sessions.append(LiveAgentSession(sourceID: second, projectPath: orbit,
+                                         workspacePath: orbit + "/.claude/worktrees/navigation",
+                                         sessionID: "sample-second-working", status: .working,
+                                         updatedAt: now.addingTimeInterval(-20), pid: 4102, details: working))
+        sessions.append(LiveAgentSession(sourceID: main, projectPath: orbit, workspacePath: orbit,
+                                         sessionID: "sample-main-idle", status: .idle,
+                                         updatedAt: now.addingTimeInterval(-60), pid: 4103, details: idle))
+        sessions.append(LiveAgentSession(sourceID: second, projectPath: atlas, workspacePath: atlas + "/.worktrees/design",
+                                         sessionID: "sample-idle", status: .idle,
+                                         updatedAt: now.addingTimeInterval(-120), pid: 4104, details: atlasIdle))
+        sessions.append(LiveAgentSession(sourceID: codex, projectPath: orbit, workspacePath: orbit,
+                                         sessionID: "sample-codex-working", status: .working,
+                                         updatedAt: now.addingTimeInterval(-8), pid: 4105, details: codexWorking))
+        sessions.append(LiveAgentSession(sourceID: grok, projectPath: orbit, workspacePath: orbit,
+                                         sessionID: "sample-grok-idle", status: .idle,
+                                         updatedAt: now.addingTimeInterval(-70), pid: 4106, details: grokIdle))
+        return sessions
     }
 
     func reveal(path: String) {

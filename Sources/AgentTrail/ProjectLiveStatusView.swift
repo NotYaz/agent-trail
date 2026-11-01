@@ -12,23 +12,28 @@ struct ProjectLiveStatusView: View {
     private let isActive: Bool
     private let demoMode: Bool
     private let focus: (AgentSource) -> Void
+    /// Opens one session; nil hides the per-session ↗.
+    private let jump: ((LiveAgentSession) -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.rendersStill) private var rendersStill
     @Environment(\.referenceNow) private var referenceNow
+    @AppStorage(AppSettings.Key.showSessionTitles) private var showSessionTitles = true
     @State private var showDetails = false
     /// Rises only when the waiting count rises, so the hand bounces once per new request.
     @State private var waitingBounce = 0
 
     /// `isActive` is true only while the tab is in front and the panel is visible; it gates the pulse.
     init(activity: ProjectLiveActivity, sources: [AgentSource], lastScan: Date?, isActive: Bool = true,
-         demoMode: Bool = false, focus: @escaping (AgentSource) -> Void) {
+         demoMode: Bool = false, focus: @escaping (AgentSource) -> Void,
+         jump: ((LiveAgentSession) -> Void)? = nil) {
         self.activity = activity
         self.sources = sources
         self.lastScan = lastScan
         self.isActive = isActive
         self.demoMode = demoMode
         self.focus = focus
+        self.jump = jump
     }
 
     var body: some View {
@@ -242,17 +247,45 @@ struct ProjectLiveStatusView: View {
         }
     }
 
+    /// The ↗ sits beside both lines, centred on the row.
     private func sessionRow(_ session: LiveAgentSession, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            sessionHeader(session, now: now)
-            Text(PathFormat.abbreviate(session.workspacePath))
-                .font(Theme.Typeface.mono)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help("Started in: \(session.workspacePath)")
+        HStack(alignment: .center, spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
+                sessionHeader(session, now: now)
+                Text(PathFormat.abbreviate(session.workspacePath))
+                    .font(Theme.Typeface.mono)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help("Started in: \(session.workspacePath)")
+            }
+            // Pushes the ↗ to the trailing edge, in line with the profile's focus ↗.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(sessionHelp(session))
+            if let jump { sessionJumpButton(session, jump: jump) }
         }
-        .help(sessionHelp(session))
+    }
+
+    /// Rows sit about 37 pt apart, so the hit area gets 11 pt of slop sideways but only 4 pt
+    /// vertically; taller slop would overlap the next row's ↗ or the Jump control below.
+    private func sessionJumpButton(_ session: LiveAgentSession, jump: @escaping (LiveAgentSession) -> Void) -> some View {
+        let verb = SessionLabel.verb(session.status)
+        let label = SessionLabel.make(session, showTitles: showSessionTitles)
+        return Button { jump(session) } label: {
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .background(Theme.Palette.sunken, in: Circle())
+                .padding(.horizontal, 11)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, -11)
+        .padding(.vertical, -4)
+        .help("\(verb) this session\n\(label)")
+        .accessibilityLabel("\(verb) \(label) in \(sourceName(session.sourceID))")
     }
 
     private func sessionHeader(_ session: LiveAgentSession, now: Date) -> some View {
@@ -262,6 +295,10 @@ struct ProjectLiveStatusView: View {
             Text(kind.title)
                 .font(Theme.Typeface.micro)
                 .foregroundStyle(kind.textColor)
+                .fixedSize()
+            if let title = SessionLabel.title(session, showTitles: showSessionTitles, limit: 80) {
+                sessionTitle(title)
+            }
             if let label = WorkspaceLabel.make(workspace: session.workspacePath, project: session.projectPath) {
                 Label(label.shortTitle, systemImage: label.symbol)
                     .font(Theme.Typeface.note)
@@ -269,12 +306,30 @@ struct ProjectLiveStatusView: View {
                     .lineLimit(1)
                     .help(label.help(workspace: session.workspacePath, project: session.projectPath))
             }
+            // Below the title's -1, so the title takes the free width before the Spacer does.
             Spacer(minLength: Theme.Space.xxs)
+                .layoutPriority(-2)
             Text("Reported \(RelativeTime.string(for: session.updatedAt, now: now))")
                 .font(Theme.Typeface.note)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
+    }
+
+    /// The conversation title, first to truncate when the row is tight.
+    private func sessionTitle(_ title: String) -> some View {
+        HStack(spacing: 5) {
+            Text("·")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(title)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .font(Theme.Typeface.micro)
+        .layoutPriority(-1)
+        .help(title)
     }
 
     // MARK: Ordering and wording

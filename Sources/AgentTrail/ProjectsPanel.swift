@@ -163,6 +163,8 @@ struct AgentTrailPanel: View {
                     isUnavailable: store.unavailableProjects.contains(project.path),
                     isLinking: store.pendingLocationLink == project.path,
                     open: { (source: AgentSource) in store.focus(source) },
+                    jump: { (session: LiveAgentSession) in store.jump(session) },
+                    perform: { (action: WorkspaceAction) in store.perform(action) },
                     reveal: { store.reveal(path: project.path) },
                     copyPath: { (path: String) in store.copyPath(path) },
                     locate: { (missing: MissingFolder?) in store.locateMovedFolder(projectPath: project.path, missing: missing) },

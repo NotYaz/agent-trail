@@ -8,15 +8,23 @@ import SQLite3
 /// projection does not expose pending approvals or input requests, so an active
 /// turn can include those waits; this adapter never invents a Needs input state.
 /// All databases are opened read-only and queries retain no messages or tools.
+/// A thread's name, branch and parent are read as display details only; the
+/// app that started the verified server is its host, and nothing else is guessed.
 public final class CodexLiveActivityProvider {
     private let openSessionOwners: (URL) -> [String: Int32]?
     private let serverStartedAt: (Int32) -> Date?
+    private let hostBundleIdentifier: (Int32) -> String?
     private let files = FileManager.default
 
+    /// `hostBundleIdentifier` receives only a verified app-server PID and returns
+    /// the bundle id of the app that started it, or nil when that is not certain.
     public init(openSessionOwners: ((URL) -> [String: Int32]?)? = nil,
-                serverStartedAt: ((Int32) -> Date?)? = nil) {
+                serverStartedAt: ((Int32) -> Date?)? = nil,
+                hostBundleIdentifier: ((Int32) -> String?)? = nil) {
         self.openSessionOwners = openSessionOwners ?? Self.readOpenSessionOwners
         self.serverStartedAt = serverStartedAt ?? Self.readServerStartedAt
+        let resolver = HostResolver()
+        self.hostBundleIdentifier = hostBundleIdentifier ?? { resolver.bundleIdentifier(owning: $0) }
     }
 
     public func scan(sources: [AgentSource], now: Date = Date()) -> LiveSnapshot {
@@ -24,6 +32,7 @@ public final class CodexLiveActivityProvider {
         var notices: [String] = []
         var starts: [Int32: Date] = [:]
         var rejected = Set<Int32>()
+        var hosts: [Int32: String?] = [:]
         for source in sources where source.assistant == .codex {
             let home = URL(fileURLWithPath: canonicalPath(source.configDirectory), isDirectory: true)
             let lockDirectory = home.appendingPathComponent("thread-writer-locks", isDirectory: true)
@@ -92,8 +101,14 @@ public final class CodexLiveActivityProvider {
                     }
                 }
                 if status == .unknown { unknown += 1 }
+                let host: String?
+                if let known = hosts[pid] { host = known } else {
+                    host = hostBundleIdentifier(pid)
+                    hosts.updateValue(host, forKey: pid)
+                }
                 sessions.append(LiveAgentSession(sourceID: source.id, projectPath: project,
-                    workspacePath: project, sessionID: id, status: status, updatedAt: report, pid: pid))
+                    workspacePath: project, sessionID: id, status: status, updatedAt: report, pid: pid,
+                    details: details(state: state, id: id, host: host)))
             }
             if owners.count > 256 { notices.append("\(source.name): only the first 256 loaded Codex sessions are shown.") }
             if unreadable > 0 { notices.append("\(source.name): some loaded Codex sessions had no readable local project projection.") }
@@ -106,6 +121,17 @@ public final class CodexLiveActivityProvider {
             return $0.id < $1.id
         }
         return LiveSnapshot(sessions: sessions, notices: Array(Set(notices)).sorted(), scannedAt: now)
+    }
+
+    /// Each column is its own query: an older projection without one keeps the
+    /// session and loses only that detail. Column names are fixed literals.
+    private func details(state: CodexLiveDatabase, id: String, host: String?) -> LiveSessionDetails {
+        func column(_ name: String) -> String? {
+            state.row("SELECT \(name) FROM threads WHERE id = ? LIMIT 1", id: id)?.first ?? nil
+        }
+        return LiveSessionDetails(title: Self.displayTitle(column("name")) ?? Self.displayTitle(column("title")),
+            branch: Self.branchName(column("git_branch")), hostBundleID: host,
+            parentThreadID: Self.parentThreadID(source: column("source"), threadID: id))
     }
 
     private func database(prefix: String, home: URL) -> URL? {
@@ -160,15 +186,7 @@ public final class CodexLiveActivityProvider {
     }
 
     private static func readServerStartedAt(pid: Int32) -> Date? {
-        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0,
-              size > MemoryLayout<Int32>.size, size <= 16 * 1_024 * 1_024 else { return nil }
-        var data = Data(count: size)
-        let result = data.withUnsafeMutableBytes { sysctl(&mib, u_int(mib.count), $0.baseAddress, &size, nil, 0) }
-        guard result == 0, size <= data.count else { return nil }
-        data.count = size
-        guard let identity = ProcessIdentity.parseKernelArguments(data),
+        guard let identity = ProcessIdentity.read(pid: pid),
               URL(fileURLWithPath: identity.executablePath).lastPathComponent == "codex",
               isAppServerArguments(identity.arguments),
               let output = run("/bin/ps", arguments: ["-p", String(pid), "-o", "lstart="],
@@ -213,6 +231,143 @@ public final class CodexLiveActivityProvider {
             return false
         }
         return false
+    }
+
+    /// Codex names a thread briefly; until it does, the `title` column holds the
+    /// opening prompt. Either way the result is one short line, kept in memory only.
+    static func displayTitle(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let words = value.split(whereSeparator: \.isWhitespace).map { word -> String in
+            var kept = ""
+            kept.unicodeScalars.append(contentsOf: word.unicodeScalars.filter { $0.properties.generalCategory != .control })
+            return kept
+        }.filter { !$0.isEmpty }
+        let line = words.joined(separator: " ")
+        guard !line.isEmpty else { return nil }
+        return line.count > 120 ? String(line.prefix(119)) + "…" : line
+    }
+
+    /// Git refuses whitespace and control characters in branch names, so a value
+    /// holding them is not a branch. A detached checkout reports HEAD, also not one.
+    static func branchName(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty,
+              trimmed.utf8.count <= 255, trimmed != "HEAD",
+              !trimmed.unicodeScalars.contains(where: {
+                  $0.properties.isWhitespace || $0.properties.generalCategory == .control
+              }) else { return nil }
+        return trimmed
+    }
+
+    /// A subagent thread records its parent in the `source` JSON, at
+    /// subagent.thread_spawn.parent_thread_id today. Any parent_thread_id key in
+    /// the first few object levels is read, and all of them must spell the same
+    /// thread UUID, other than this thread. Plain-text sources such as `vscode`
+    /// and malformed JSON have no parent.
+    static func parentThreadID(source: String?, threadID: String) -> String? {
+        guard let source, source.utf8.count <= 8192, let data = source.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        var found: [String] = []
+        var malformed = false
+        var visited = 0
+        func visit(_ dictionary: [String: Any], depth: Int) {
+            for (key, value) in dictionary {
+                visited += 1
+                guard visited <= 256 else { return }
+                if key == "parent_thread_id" {
+                    if let text = value as? String { found.append(text) } else if !(value is NSNull) { malformed = true }
+                } else if depth < 4, let child = value as? [String: Any] {
+                    visit(child, depth: depth + 1)
+                }
+            }
+        }
+        guard let root = object as? [String: Any] else { return nil }
+        visit(root, depth: 0)
+        guard !malformed, visited <= 256, let parent = found.first, Set(found).count == 1,
+              UUID(uuidString: parent) != nil,
+              parent.lowercased() != threadID.lowercased() else { return nil }
+        return parent
+    }
+
+    /// The app that owns an executable: the `X.app` whose Contents/MacOS holds it
+    /// and whose Info.plist names it as the bundle executable, widened to the
+    /// outermost enclosing app so an editor's nested helper (VS Code runs
+    /// extensions in Code Helper (Plugin).app) maps to the editor itself. Only
+    /// application folders are considered: reading a plist under Documents or
+    /// Downloads from a background poll could raise a privacy prompt.
+    static func applicationBundleIdentifier(executablePath: String, homeDirectory: String = NSHomeDirectory(),
+                                            infoPlist: (URL) -> [String: Any]?) -> String? {
+        let roots = ["/Applications/", "/System/Applications/", homeDirectory + "/Applications/"]
+        let components = (executablePath as NSString).pathComponents
+        let count = components.count
+        guard executablePath.hasPrefix("/"), roots.contains(where: { executablePath.hasPrefix($0) }),
+              !components.contains(".."), !components.contains("."),
+              count >= 5, components[count - 2] == "MacOS", components[count - 3] == "Contents",
+              isApplicationName(components[count - 4]) else { return nil }
+        guard let inner = bundleInfo(components, through: count - 4, infoPlist),
+              inner["CFBundleExecutable"] as? String == components[count - 1],
+              let innerID = inner["CFBundleIdentifier"] as? String, isBundleIdentifier(innerID) else { return nil }
+        guard let outer = (1..<(count - 4)).first(where: {
+            isApplicationName(components[$0]) && components[$0 + 1] == "Contents"
+        }) else { return innerID }
+        // The enclosing app is the owner; if it cannot be read, the owner is unknown.
+        guard let outerInfo = bundleInfo(components, through: outer, infoPlist),
+              let outerID = outerInfo["CFBundleIdentifier"] as? String, isBundleIdentifier(outerID) else { return nil }
+        return outerID
+    }
+
+    /// The Info.plist of the bundle whose last path component is `components[index]`.
+    private static func bundleInfo(_ components: [String], through index: Int,
+                                   _ infoPlist: (URL) -> [String: Any]?) -> [String: Any]? {
+        let bundle = NSString.path(withComponents: Array(components[...index]))
+        return infoPlist(URL(fileURLWithPath: bundle, isDirectory: true)
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Info.plist"))
+    }
+
+    private static func isApplicationName(_ component: String) -> Bool {
+        component.count > 4 && component.hasSuffix(".app")
+    }
+
+    /// Reverse-DNS characters only, as LaunchServices bundle ids use.
+    static func isBundleIdentifier(_ value: String) -> Bool {
+        (3...255).contains(value.utf8.count) && value.contains(".")
+            && !value.hasPrefix(".") && !value.hasSuffix(".") && value.utf8.allSatisfy { byte in
+                switch byte {
+                case UInt8(ascii: "0")...UInt8(ascii: "9"), UInt8(ascii: "A")...UInt8(ascii: "Z"),
+                     UInt8(ascii: "a")...UInt8(ascii: "z"), UInt8(ascii: "-"), UInt8(ascii: "."), UInt8(ascii: "_"):
+                    return true
+                default:
+                    return false
+                }
+            }
+    }
+
+    private static func readInfoPlist(_ url: URL) -> [String: Any]? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 1_048_577), data.count <= 1_048_576 else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+    }
+
+    /// Finds the app that started a verified app-server: its parent process, then
+    /// the app bundle of that parent's executable. The parent PID is read again
+    /// after the executable path, because an exited parent's orphans move to
+    /// launchd; an unchanged parent PID proves the path belongs to the same parent.
+    private final class HostResolver {
+        private var bundles: [String: String] = [:]
+
+        func bundleIdentifier(owning pid: Int32) -> String? {
+            guard let parent = ProcessIdentity.parentProcessID(of: pid),
+                  let executable = ProcessIdentity.executablePath(of: parent),
+                  ProcessIdentity.parentProcessID(of: pid) == parent else { return nil }
+            if let known = bundles[executable] { return known }
+            guard let identifier = CodexLiveActivityProvider.applicationBundleIdentifier(
+                executablePath: executable, infoPlist: CodexLiveActivityProvider.readInfoPlist) else { return nil }
+            // Only answers are kept, so an app caught mid-update is read again next poll.
+            if bundles.count >= 32 { bundles.removeAll() }
+            bundles[executable] = identifier
+            return identifier
+        }
     }
 
     private static func run(_ path: String, arguments: [String], acceptedExitCodes: Set<Int32>, maximumBytes: Int) -> String? {

@@ -267,6 +267,137 @@ final class LiveActivityProviderTests: XCTestCase {
         try FileManager.default.removeItem(at: root)
     }
 
+    func testDesktopLinkNeedsMatchingHostValidShapeAndUnarchivedSession() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.desktop("linked", extra: ["title": "  Tighten sync retries\n", "branch": "feature/retries", "isArchived": false])
+        try fixture.desktop("archived", extra: ["isArchived": true])
+        try fixture.desktop("unclear-archive", extra: ["isArchived": "no"])
+        try fixture.desktop("mismatch")
+        try fixture.desktop("bad-shape", extra: ["sessionId": "local_bad shape"])
+        try fixture.desktop("no-host")
+        try fixture.live("linked", pid: 101, status: "busy", secondsAgo: 1, extra: ["hostSessionId": "local_linked"])
+        try fixture.live("archived", pid: 102, status: "busy", secondsAgo: 1, extra: ["hostSessionId": "local_archived"])
+        try fixture.live("unclear-archive", pid: 103, status: "busy", secondsAgo: 1,
+            extra: ["hostSessionId": "local_unclear-archive"])
+        try fixture.live("mismatch", pid: 104, status: "busy", secondsAgo: 1, extra: ["hostSessionId": "local_someone-else"])
+        try fixture.live("bad-shape", pid: 105, status: "busy", secondsAgo: 1, extra: ["hostSessionId": "local_bad shape"])
+        try fixture.live("no-host", pid: 106, status: "busy", secondsAgo: 1)
+        let result = LiveActivityProvider(isProcessAlive: { _ in true }).scan(sources: [fixture.source], now: fixture.now)
+        let byID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.sessionID, $0) })
+        XCTAssertEqual(Set(byID.keys), ["linked", "archived", "unclear-archive", "mismatch", "bad-shape", "no-host"])
+        XCTAssertEqual(byID["linked"]?.details.desktopSessionID, "local_linked")
+        for id in ["archived", "unclear-archive", "mismatch", "bad-shape", "no-host"] {
+            XCTAssertNil(byID[id]?.details.desktopSessionID, id)
+        }
+        XCTAssertEqual(byID["linked"]?.details.title, "Tighten sync retries")
+        XCTAssertEqual(byID["linked"]?.details.branch, "feature/retries")
+        // A session that cannot be linked still carries its other details.
+        XCTAssertEqual(byID["archived"]?.details.title, "PRIVATE_PROMPT_MARKER")
+        XCTAssertFalse(result.notices.joined().contains("PRIVATE_PROMPT_MARKER"))
+        XCTAssertFalse(result.notices.joined().contains("Tighten"))
+    }
+
+    func testMalformedOptionalDetailsNeverDropTheSession() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.desktop("odd-shapes", extra: ["title": 42, "branch": ["main"], "isArchived": "yes",
+            "postTurnSummary": "blocked", "prs": "none", "lastAssistantUuid": 7, "lastActivityAt": "soon"])
+        let oddSummary: [String: Any] = ["needs_action": 7, "summarizes_uuid": ["x"]]
+        let oddPullRequests: [Any] = [1, "pull", NSNull(),
+            ["prNumber": "3", "url": "https://example.com/demo/pull/3"],
+            ["prNumber": 4, "url": 5],
+            ["prNumber": 6, "url": "https://example.com/demo/pull/6", "state": 1] as [String: Any]]
+        try fixture.desktop("odd-items", extra: ["isArchived": NSNull(), "postTurnSummary": oddSummary,
+            "prs": oddPullRequests])
+        try fixture.live("odd-shapes", pid: 101, status: "idle", secondsAgo: 1, extra: ["hostSessionId": 99])
+        try fixture.live("odd-items", pid: 102, status: "idle", secondsAgo: 1, extra: ["hostSessionId": "local_odd-items"])
+        let result = LiveActivityProvider(isProcessAlive: { _ in true }).scan(sources: [fixture.source], now: fixture.now)
+        let byID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.sessionID, $0) })
+        XCTAssertEqual(Set(byID.keys), ["odd-shapes", "odd-items"])
+        XCTAssertTrue(result.notices.isEmpty)
+        let shapes = try XCTUnwrap(byID["odd-shapes"]?.details)
+        XCTAssertNil(shapes.title)
+        XCTAssertNil(shapes.branch)
+        XCTAssertNil(shapes.needsAction)
+        XCTAssertNil(shapes.desktopSessionID)
+        XCTAssertTrue(shapes.pullRequests.isEmpty)
+        let items = try XCTUnwrap(byID["odd-items"]?.details)
+        // A null archive flag means not archived, so the id still links.
+        XCTAssertEqual(items.desktopSessionID, "local_odd-items")
+        XCTAssertNil(items.needsAction)
+        XCTAssertEqual(items.pullRequests.map(\.number), [6])
+        XCTAssertEqual(byID["odd-items"]?.status, .idle)
+    }
+
+    func testNeedsActionPullRequestsAndStateSinceComeFromTheirRecords() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let summary: [String: Any] = ["status_category": "blocked",
+            "needs_action": " Approve running the migration ", "summarizes_uuid": "turn-2"]
+        // Kept: the first https link (once) and an upper-case scheme. Dropped: plain
+        // http, other schemes, embedded credentials, number 0 and a missing host.
+        let pullRequests: [[String: Any]] = [
+            ["prNumber": 12, "url": "https://example.com/demo/pull/12", "state": "open"],
+            ["prNumber": 12, "url": "https://example.com/demo/pull/12"],
+            ["prNumber": 13, "url": "http://example.com/demo/pull/13"],
+            ["prNumber": 14, "url": "javascript:alert(14)"],
+            ["prNumber": 15, "url": "https://user:secret@example.com/demo/pull/15"],
+            ["prNumber": 0, "url": "https://example.com/demo/pull/0"],
+            ["prNumber": 16, "url": "https:///demo/pull/16"],
+            ["prNumber": 17, "url": "HTTPS://example.com/demo/pull/17"]]
+        try fixture.desktop("blocked", extra: ["postTurnSummary": summary, "lastAssistantUuid": "turn-2",
+            "prs": pullRequests])
+        try fixture.desktop("completed", extra: ["postTurnSummary": ["status_category": "completed", "needs_action": ""]])
+        // The summary describes an earlier turn than the latest assistant message.
+        try fixture.desktop("stale-summary", extra: [
+            "postTurnSummary": ["needs_action": "Pick a layout", "summarizes_uuid": "turn-1"],
+            "lastAssistantUuid": "turn-3"])
+        try fixture.live("blocked", pid: 101, status: "waiting", secondsAgo: 2, statusSecondsAgo: 40)
+        try fixture.live("completed", pid: 102, status: "idle", secondsAgo: 10)
+        try fixture.live("stale-summary", pid: 103, status: "busy", secondsAgo: 10)
+        let result = LiveActivityProvider(isProcessAlive: { _ in true }).scan(sources: [fixture.source], now: fixture.now)
+        let byID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.sessionID, $0) })
+        let blocked = try XCTUnwrap(byID["blocked"])
+        XCTAssertEqual(blocked.status, .waiting)
+        XCTAssertEqual(blocked.details.needsAction, "Approve running the migration")
+        XCTAssertEqual(blocked.details.stateSince, fixture.now.addingTimeInterval(-40))
+        XCTAssertEqual(blocked.details.pullRequests.map(\.number), [12, 17])
+        XCTAssertEqual(blocked.details.pullRequests.first?.url.absoluteString, "https://example.com/demo/pull/12")
+        XCTAssertNil(byID["completed"]?.details.needsAction)
+        XCTAssertEqual(byID["completed"]?.details.stateSince, fixture.now.addingTimeInterval(-10))
+        XCTAssertEqual(byID["stale-summary"]?.status, .working)
+        XCTAssertNil(byID["stale-summary"]?.details.needsAction)
+    }
+
+    func testStateSinceNeedsAStatusTimestampAndATrustedState() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        for id in ["no-status-time", "unrecognized", "stale"] { try fixture.desktop(id) }
+        try fixture.live("no-status-time", pid: 101, status: "busy", secondsAgo: 5, extra: ["statusUpdatedAt": NSNull()])
+        try fixture.live("unrecognized", pid: 102, status: "running", secondsAgo: 5)
+        try fixture.live("stale", pid: 103, status: "busy", secondsAgo: 120)
+        let result = LiveActivityProvider(isProcessAlive: { _ in true }).scan(sources: [fixture.source], now: fixture.now)
+        let byID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.sessionID, $0) })
+        XCTAssertEqual(byID["no-status-time"]?.status, .working)
+        XCTAssertEqual(byID["no-status-time"]?.updatedAt, fixture.now.addingTimeInterval(-5))
+        XCTAssertNil(byID["no-status-time"]?.details.stateSince)
+        XCTAssertEqual(byID["unrecognized"]?.status, .unknown)
+        XCTAssertNil(byID["unrecognized"]?.details.stateSince)
+        XCTAssertEqual(byID["stale"]?.status, .unknown)
+        XCTAssertNil(byID["stale"]?.details.stateSince)
+    }
+
+    func testDesktopSessionIDShapeMatchesClaudesLinkHandler() {
+        XCTAssertTrue(LiveActivityProvider.isDesktopSessionID("local_0f8a-B2c"))
+        XCTAssertTrue(LiveActivityProvider.isDesktopSessionID("local_" + String(repeating: "a", count: 64)))
+        let rejected = ["", "local_", "local_" + String(repeating: "a", count: 65), "LOCAL_abc", "xlocal_abc",
+                        "local_abc\n", "local_a b", "local_a/b", "local_a_b", "local_\u{e9}", "session_abc"]
+        for value in rejected {
+            XCTAssertFalse(LiveActivityProvider.isDesktopSessionID(value), value)
+        }
+    }
+
     private final class Fixture {
         let root: URL
         let project: URL
@@ -289,20 +420,22 @@ final class LiveActivityProviderTests: XCTestCase {
 
         func remove() { try? FileManager.default.removeItem(at: root) }
 
-        func desktop(_ cliID: String, workspace: URL? = nil, priorIDs: [String] = []) throws {
+        /// `extra` adds or replaces top-level fields of the Desktop record.
+        func desktop(_ cliID: String, workspace: URL? = nil, priorIDs: [String] = [], extra: [String: Any] = [:]) throws {
             let cwd = workspace ?? project
-            let record: [String: Any] = ["sessionId": "local_" + cliID, "cliSessionId": cliID,
+            var record: [String: Any] = ["sessionId": "local_" + cliID, "cliSessionId": cliID,
                 "priorCliSessionIds": priorIDs, "originCwd": project.path, "cwd": cwd.path,
                 "lastActivityAt": now.timeIntervalSince1970 * 1000,
                 "gitAnchors": [["gitRoot": project.path], ["gitRoot": cwd.path]],
                 "title": "PRIVATE_PROMPT_MARKER"]
+            record.merge(extra) { _, replacement in replacement }
             try JSONSerialization.data(withJSONObject: record).write(to: desktopRoot.appendingPathComponent("local_" + cliID + ".json"))
         }
 
         func live(_ cliID: String, pid: Int32, status: String?, secondsAgo: TimeInterval,
                   statusSecondsAgo: TimeInterval? = nil, cwd: URL? = nil,
                   entrypoint: String = "claude-desktop", domain: String = "darwin", filename: String? = nil,
-                  procStart: String? = nil, waitingFor: String? = nil) throws {
+                  procStart: String? = nil, waitingFor: String? = nil, extra: [String: Any] = [:]) throws {
             var record: [String: Any] = ["pid": Int(pid), "sessionId": cliID, "cwd": (cwd ?? project).path,
                 "entrypoint": entrypoint, "pidDomain": domain,
                 "updatedAt": now.addingTimeInterval(-secondsAgo).timeIntervalSince1970 * 1000,
@@ -311,6 +444,7 @@ final class LiveActivityProviderTests: XCTestCase {
             if let status { record["status"] = status }
             if let procStart { record["procStart"] = procStart }
             if let waitingFor { record["waitingFor"] = waitingFor }
+            record.merge(extra) { _, replacement in replacement }
             try JSONSerialization.data(withJSONObject: record).write(to: registry.appendingPathComponent(filename ?? "\(pid).json"))
         }
     }
