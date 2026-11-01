@@ -4,7 +4,7 @@
 
 A small native macOS menu-bar app that brings your coding projects into one place. See recorded edits, trends, and reported live status together on each project, then jump back to the right running app. Projects and Growth share one compact floating panel.
 
-**0.1.0-alpha.7 · Public alpha · macOS 14+ · Claude, Codex, and Grok · MIT license**
+**0.1.0-alpha.8 · Public alpha · macOS 14+ · Claude, Codex, and Grok · MIT license**
 
 Agent Trail reads local history and live status from Claude Desktop, Codex, and Grok. One-click focus is available for identified Claude Desktop instances. Gemini CLI, OpenCode, and Cursor are not supported.
 
