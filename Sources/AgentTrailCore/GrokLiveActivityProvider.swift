@@ -195,10 +195,10 @@ private final class GrokLiveTail {
     }
 
     func read(_ url: URL, sessionID: String, now: Date) throws {
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        let date = attributes[.modificationDate] as? Date
-        let currentIdentity = "\(attributes[.systemNumber] ?? ""):\(attributes[.systemFileNumber] ?? ""):\((attributes[.creationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        let metadata = try FileStat.required(url)
+        let size = metadata.size
+        let date: Date? = metadata.modified
+        let currentIdentity = metadata.identity
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var reusable = identity == currentIdentity && !identity.isEmpty && size >= offset

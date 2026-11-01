@@ -63,21 +63,31 @@ enum HistoryFold {
         }
 
         var result = Result()
-        var edits: [String: (source: String, project: String, id: String, edit: StoredEdit)] = [:]
+        var edits: [String: (source: String, project: String, id: String, edit: StoredEdit, delegated: Bool)] = [:]
         var missing: [String: (sourceID: String, project: String, folder: String, edits: Int, directories: Set<String>)] = [:]
         for item in attributed {
             let session = item.session
+            let isDelegated = session.parentSessionID != nil
             result.activity.append(ProjectActivity(sourceID: session.sourceID, projectPath: item.home,
                 latestActivity: session.latestActivity, sessionCount: 1, workspacePath: item.launch,
-                history: [ActivityDay(day: session.createdAt, sessionCount: 1)]))
+                history: [ActivityDay(day: session.createdAt, sessionCount: 1)], sessionStarts: [session.createdAt]))
             if item.home != canonicalPath(session.recordedWorkspace) {
                 result.associations.append(SessionProjectAssociation(sourceID: session.sourceID,
                     sessionID: session.sessionID, recordedWorkspace: session.recordedWorkspace, projectPath: item.home))
             }
             for entry in item.edits {
                 let key = session.sourceID + "\u{0}" + entry.project + "\u{0}" + entry.id
-                let retained = edits[key].map { $0.edit.earlier(than: entry.edit) } ?? entry.edit
-                edits[key] = (session.sourceID, entry.project, entry.id, retained)
+                guard let old = edits[key] else {
+                    edits[key] = (session.sourceID, entry.project, entry.id, entry.edit, isDelegated)
+                    continue
+                }
+                // The same winner `earlier(than:)` keeps. A spawned thread's
+                // identical copy of a parent edit stays the parent's.
+                let incomingWins = entry.edit.date < old.edit.date
+                    || (entry.edit.date == old.edit.date && entry.edit.workspace < old.edit.workspace)
+                let identical = entry.edit.date == old.edit.date && entry.edit.workspace == old.edit.workspace
+                let delegated = incomingWins ? isDelegated : (identical ? (old.delegated && isDelegated) : old.delegated)
+                edits[key] = (session.sourceID, entry.project, entry.id, old.edit.earlier(than: entry.edit), delegated)
             }
             for (folder, directories) in item.missing {
                 let key = session.sourceID + "\u{0}" + item.base + "\u{0}" + folder
@@ -91,9 +101,12 @@ enum HistoryFold {
             guard let latest = records.max(by: { ($0.edit.date, $0.id) < ($1.edit.date, $1.id) }) else { continue }
             let days = Dictionary(grouping: records, by: { ActivityDay.start(of: $0.edit.date) })
                 .map { ActivityDay(day: $0.key, editCount: $0.value.count) }
+            let moments: [EditMoment] = records.map { EditMoment(date: $0.edit.date, delegated: $0.delegated) }
+                .sorted(by: EditMoment.chronological)
             result.activity.append(ProjectActivity(sourceID: latest.source, projectPath: latest.project,
                 latestActivity: latest.edit.date, latestEdit: latest.edit.date, sessionCount: 0,
-                workspacePath: latest.edit.workspace, latestEditWorkspacePath: latest.edit.workspace, history: days))
+                workspacePath: latest.edit.workspace, latestEditWorkspacePath: latest.edit.workspace, history: days,
+                editMoments: moments))
         }
         // Count each missing folder's edits from the deduplicated set.
         for value in edits.values {

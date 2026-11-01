@@ -74,11 +74,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
                         edits[key] = ProjectEdits(sourceID: task.session.source.id, projectPath: task.session.projectPath)
                     }
                     for (id, edit) in entry.confirmedEdits {
-                        if let existing = edits[key]?.byToolID[id] {
-                            edits[key]?.byToolID[id] = firstOccurrence(existing, edit)
-                        } else {
-                            edits[key]?.byToolID[id] = edit
-                        }
+                        edits[key]?.record(id, edit, delegated: task.delegated)
                     }
                 }
                 if entry.malformedLines > 0 {
@@ -194,6 +190,26 @@ public final class ClaudeActivityProvider: ActivityProvider {
         let sourceID: String
         let projectPath: String
         var byToolID: [String: ConfirmedEdit] = [:]
+        /// Tool IDs whose earliest record exists only in subagent transcripts.
+        var delegated: Set<String> = []
+
+        /// Keeps the first occurrence, as `firstOccurrence` does. An identical
+        /// root copy clears the flag, so the result is independent of order.
+        mutating func record(_ id: String, _ edit: ConfirmedEdit, delegated isDelegated: Bool) {
+            guard let existing = byToolID[id] else {
+                byToolID[id] = edit
+                if isDelegated { delegated.insert(id) }
+                return
+            }
+            let incomingWins = edit.date < existing.date || (edit.date == existing.date && edit.workspace < existing.workspace)
+            let identical = edit.date == existing.date && edit.workspace == existing.workspace
+            if incomingWins {
+                byToolID[id] = edit
+                if isDelegated { delegated.insert(id) } else { delegated.remove(id) }
+            } else if identical && !isDelegated {
+                delegated.remove(id)
+            }
+        }
     }
 
     private func result(metadata: Metadata, edits: [String: ProjectEdits], extraNotices: [String]) -> ScanResult {
@@ -206,31 +222,37 @@ public final class ClaudeActivityProvider: ActivityProvider {
                 let path = located(project.projectPath, edit.date)
                 let key = project.sourceID + "\u{0}" + path
                 let moved = ConfirmedEdit(date: edit.date, workspace: located(edit.workspace, edit.date))
-                var group = relocated[key] ?? ProjectEdits(sourceID: project.sourceID, projectPath: path)
-                group.byToolID[id] = group.byToolID[id].map { firstOccurrence($0, moved) } ?? moved
-                relocated[key] = group
+                relocated[key, default: ProjectEdits(sourceID: project.sourceID, projectPath: path)]
+                    .record(id, moved, delegated: project.delegated.contains(id))
             }
         }
-        let activity = metadata.sessions.map {
+        let sessionActivity: [ProjectActivity] = metadata.sessions.map {
             ProjectActivity(sourceID: $0.source.id, projectPath: located($0.projectPath, $0.createdAt),
                 latestActivity: $0.latestActivity, workspacePath: located($0.workspacePath, $0.createdAt),
-                history: [ActivityDay(day: $0.createdAt, sessionCount: 1)])
-        } + relocated.values.compactMap { project -> ProjectActivity? in
+                history: [ActivityDay(day: $0.createdAt, sessionCount: 1)], sessionStarts: [$0.createdAt])
+        }
+        let editActivity: [ProjectActivity] = relocated.values.compactMap { project -> ProjectActivity? in
             guard let latest = project.byToolID.values.max(by: { $0.date < $1.date }) else { return nil }
             let days = Dictionary(grouping: project.byToolID.values, by: { ActivityDay.start(of: $0.date) })
                 .map { ActivityDay(day: $0.key, editCount: $0.value.count) }
+            let moments: [EditMoment] = project.byToolID.map {
+                EditMoment(date: $0.value.date, delegated: project.delegated.contains($0.key))
+            }.sorted(by: EditMoment.chronological)
             return ProjectActivity(sourceID: project.sourceID, projectPath: project.projectPath,
                 latestActivity: latest.date, latestEdit: latest.date, sessionCount: 0,
                 workspacePath: latest.workspace, latestEditWorkspacePath: latest.workspace,
-                history: days)
+                history: days, editMoments: moments)
         }
-        return ScanResult(projects: ProjectSummary.merge(activity),
+        return ScanResult(projects: ProjectSummary.merge(sessionActivity + editActivity),
             notices: Array(Set(metadata.notices + extraNotices)).sorted())
     }
 
     private struct TranscriptTask {
         let url: URL
         let session: DesktopSession
+        /// Read from the session's `subagents` folder. Taken from the location
+        /// at scan time, so the transcript cache needs no new field.
+        let delegated: Bool
     }
 
     private func discoverTranscripts(metadata: Metadata, notices: inout [String]) -> [TranscriptTask] {
@@ -251,7 +273,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
                     do {
                         for url in try files.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
                             if url.pathExtension == "jsonl", let session = byCLI[url.deletingPathExtension().lastPathComponent] {
-                                tasks.append(TranscriptTask(url: url, session: session))
+                                tasks.append(TranscriptTask(url: url, session: session, delegated: false))
                                 foundSessions.insert(session.id)
                             } else if let session = byCLI[url.lastPathComponent],
                                       (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
@@ -260,7 +282,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
                                    let enumerator = files.enumerator(at: subagents, includingPropertiesForKeys: [.isRegularFileKey],
                                     options: [.skipsHiddenFiles], errorHandler: { _, _ in failed = true; return true }) {
                                     for case let transcript as URL in enumerator where transcript.pathExtension == "jsonl" {
-                                        tasks.append(TranscriptTask(url: transcript, session: session))
+                                        tasks.append(TranscriptTask(url: transcript, session: session, delegated: true))
                                         foundSessions.insert(session.id)
                                     }
                                 }
@@ -313,10 +335,10 @@ public final class ClaudeActivityProvider: ActivityProvider {
     private struct CacheHeader: Decodable { let version: Int }
 
     private func readTranscript(_ task: TranscriptTask) throws -> TranscriptCache {
-        let attributes = try files.attributesOfItem(atPath: task.url.path)
-        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let identity = "\(attributes[.systemNumber] ?? ""):\(attributes[.systemFileNumber] ?? ""):\((attributes[.creationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        let metadata = try FileStat.required(task.url)
+        let size = metadata.size
+        let modified = metadata.modified.timeIntervalSince1970
+        let identity = metadata.identity
         let handle = try FileHandle(forReadingFrom: task.url)
         defer { try? handle.close() }
         var entry = cache[task.url.path] ?? TranscriptCache(identity: identity)

@@ -80,10 +80,15 @@ public struct ActivityDay: Identifiable, Codable, Equatable, Sendable {
         self.sessionCount = sessionCount
     }
 
-    public static func start(of date: Date) -> Date {
+    // Cached: history merges call this for every record on each overview rebuild.
+    private static let utcCalendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        return calendar.startOfDay(for: date)
+        return calendar
+    }()
+
+    public static func start(of date: Date) -> Date {
+        utcCalendar.startOfDay(for: date)
     }
 
     public static func merge(_ records: [ActivityDay]) -> [ActivityDay] {
@@ -91,6 +96,25 @@ public struct ActivityDay: Identifiable, Codable, Equatable, Sendable {
             ActivityDay(day: day, editCount: values.reduce(0) { $0 + $1.editCount },
                         sessionCount: values.reduce(0) { $0 + $1.sessionCount })
         }.sorted { $0.day < $1.day }
+    }
+}
+
+/// One confirmed edit's completion time. `delegated` is true when the edit's earliest
+/// record came from a Claude subagent transcript or a Codex spawned thread. Grok never sets it.
+public struct EditMoment: Hashable, Sendable {
+    public var date: Date
+    public var delegated: Bool
+
+    public init(date: Date, delegated: Bool = false) {
+        self.date = date
+        self.delegated = delegated
+    }
+
+    /// Date order. Direct edits go first at the same instant, so merged
+    /// arrays never depend on dictionary iteration order.
+    static func chronological(_ lhs: EditMoment, _ rhs: EditMoment) -> Bool {
+        if lhs.date != rhs.date { return lhs.date < rhs.date }
+        return !lhs.delegated && rhs.delegated
     }
 }
 
@@ -103,8 +127,13 @@ public struct ProjectActivity: Sendable {
     public var workspacePath: String?
     public var latestEditWorkspacePath: String?
     public var history: [ActivityDay]
+    /// Every confirmed edit counted in `history`, ascending. Raw instants, so
+    /// local days can be derived in any time zone without rescanning.
+    public var editMoments: [EditMoment]
+    /// Creation time of every session counted in `history`, ascending.
+    public var sessionStarts: [Date]
 
-    public init(sourceID: String, projectPath: String, latestActivity: Date, latestEdit: Date? = nil, sessionCount: Int = 1, workspacePath: String? = nil, latestEditWorkspacePath: String? = nil, history: [ActivityDay] = []) {
+    public init(sourceID: String, projectPath: String, latestActivity: Date, latestEdit: Date? = nil, sessionCount: Int = 1, workspacePath: String? = nil, latestEditWorkspacePath: String? = nil, history: [ActivityDay] = [], editMoments: [EditMoment] = [], sessionStarts: [Date] = []) {
         self.sourceID = sourceID
         self.projectPath = projectPath
         self.latestActivity = latestActivity
@@ -113,6 +142,8 @@ public struct ProjectActivity: Sendable {
         self.workspacePath = workspacePath
         self.latestEditWorkspacePath = latestEditWorkspacePath
         self.history = history
+        self.editMoments = editMoments
+        self.sessionStarts = sessionStarts
     }
 }
 
@@ -144,7 +175,9 @@ public struct ProjectSummary: Identifiable, Sendable {
                     sessionCount: records.reduce(0) { $0 + $1.sessionCount },
                     workspacePath: lastActive.workspacePath,
                     latestEditWorkspacePath: lastEdited?.latestEditWorkspacePath ?? lastEdited?.workspacePath,
-                    history: ActivityDay.merge(records.flatMap(\.history)))
+                    history: ActivityDay.merge(records.flatMap(\.history)),
+                    editMoments: records.flatMap(\.editMoments).sorted(by: EditMoment.chronological),
+                    sessionStarts: records.flatMap(\.sessionStarts).sorted())
             }.sorted { $0.latestActivity > $1.latestActivity }
             return ProjectSummary(path: path, activities: merged)
         }.sorted {

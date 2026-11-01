@@ -244,6 +244,102 @@ final class ClaudeActivityProviderTests: XCTestCase {
         XCTAssertTrue(ClaudeActivityProvider().scan(sources: [fixture.source]).notices.contains { $0.contains("unavailable") })
     }
 
+    func testSubagentOnlyEditIsDelegatedAndRootEditIsNot() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        try fixture.write([fixture.request("root", path: path), fixture.response("root", seconds: 10, path: path)])
+        try fixture.write([fixture.request("worker", name: "Write", path: path), fixture.response("worker", seconds: 20, path: path)],
+            to: fixture.projectLogs.appendingPathComponent("cli-session/subagents/agent-one.jsonl"))
+        let project = try XCTUnwrap(ClaudeActivityProvider().scan(sources: [fixture.source]).projects.first)
+        XCTAssertEqual(moments(project), [EditMoment(date: fixture.date(10)), EditMoment(date: fixture.date(20), delegated: true)])
+    }
+
+    func testIdenticalRootAndSubagentCopiesAreNotDelegated() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        let shared = [fixture.request("shared", path: path), fixture.response("shared", seconds: 10, path: path)]
+        let agentOnly = [fixture.request("agents", path: path), fixture.response("agents", seconds: 20, path: path)]
+        try fixture.write(shared)
+        try fixture.write(shared + agentOnly, to: fixture.projectLogs.appendingPathComponent("cli-session/subagents/agent-one.jsonl"))
+        try fixture.write(agentOnly, to: fixture.projectLogs.appendingPathComponent("cli-session/subagents/agent-two.jsonl"))
+        let project = try XCTUnwrap(ClaudeActivityProvider().scan(sources: [fixture.source]).projects.first)
+        XCTAssertEqual(project.recordedEditCount, 2)
+        // A root copy proves the edit was direct; copies in two subagents do not.
+        XCTAssertEqual(moments(project), [EditMoment(date: fixture.date(10)), EditMoment(date: fixture.date(20), delegated: true)])
+    }
+
+    func testEarlierSubagentCopyIsDelegatedAndLaterOneIsNot() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        try fixture.write([fixture.request("copied", path: path), fixture.response("copied", seconds: 30, path: path),
+            fixture.request("kept", path: path), fixture.response("kept", seconds: 40, path: path)])
+        try fixture.write([fixture.request("copied", path: path), fixture.response("copied", seconds: 20, path: path),
+            fixture.request("kept", path: path), fixture.response("kept", seconds: 50, path: path)],
+            to: fixture.projectLogs.appendingPathComponent("cli-session/subagents/agent-one.jsonl"))
+        let provider = ClaudeActivityProvider(cacheURL: fixture.cache)
+        let expected = [EditMoment(date: fixture.date(20), delegated: true), EditMoment(date: fixture.date(40))]
+        let project = try XCTUnwrap(provider.scan(sources: [fixture.source]).projects.first)
+        XCTAssertEqual(project.recordedEditCount, 2)
+        XCTAssertEqual(moments(project), expected)
+        // The flag comes from the transcript's location, so cached entries keep it.
+        let reopened = try XCTUnwrap(ClaudeActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source]).projects.first)
+        XCTAssertEqual(moments(reopened), expected)
+    }
+
+    func testMomentsMatchHistoryCountsAndAreSorted() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        // A newer session without a transcript sorts first in metadata order.
+        let second: [String: Any] = ["sessionId": "local_second", "cliSessionId": "no-transcript",
+            "cwd": fixture.project.path, "originCwd": fixture.project.path,
+            "createdAt": 2_000_000, "lastActivityAt": 3_000_000]
+        try JSONSerialization.data(withJSONObject: second)
+            .write(to: fixture.metadata.deletingLastPathComponent().appendingPathComponent("local_second.json"))
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        try fixture.write([fixture.request("late", path: path), fixture.response("late", seconds: 30, path: path),
+            fixture.request("early", path: path), fixture.response("early", seconds: 10, path: path)])
+        try fixture.write([fixture.request("middle", name: "Write", path: path), fixture.response("middle", seconds: 20, path: path)],
+            to: fixture.projectLogs.appendingPathComponent("cli-session/subagents/agent-one.jsonl"))
+        let starts = [Date(timeIntervalSince1970: 1000), Date(timeIntervalSince1970: 2000)]
+        let provider = ClaudeActivityProvider()
+
+        let metadata = provider.metadata(sources: [fixture.source])
+        assertMomentInvariants(metadata.projects)
+        let listed = try XCTUnwrap(metadata.projects.first?.activities.first)
+        XCTAssertTrue(listed.editMoments.isEmpty)
+        XCTAssertEqual(listed.sessionStarts, starts)
+
+        let result = provider.scan(sources: [fixture.source])
+        assertMomentInvariants(result.projects)
+        XCTAssertEqual(result.projects.count, 1)
+        let activity = try XCTUnwrap(result.projects.first?.activities.first)
+        XCTAssertEqual(activity.sessionCount, 2)
+        XCTAssertEqual(activity.sessionStarts, starts)
+        XCTAssertEqual(activity.editMoments.map(\.date), [fixture.date(10), fixture.date(20), fixture.date(30)])
+        XCTAssertEqual(activity.editMoments.map(\.delegated), [false, true, false])
+    }
+
+    private func moments(_ project: ProjectSummary) -> [EditMoment] {
+        project.activities.flatMap(\.editMoments).sorted(by: EditMoment.chronological)
+    }
+
+    private func assertMomentInvariants(_ projects: [ProjectSummary], file: StaticString = #filePath, line: UInt = #line) {
+        for activity in projects.flatMap(\.activities) {
+            XCTAssertEqual(activity.editMoments.count, activity.history.reduce(0) { $0 + $1.editCount }, file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts.count, activity.history.reduce(0) { $0 + $1.sessionCount }, file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts.count, activity.sessionCount, file: file, line: line)
+            XCTAssertEqual(activity.editMoments.map(\.date), activity.editMoments.map(\.date).sorted(), file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts, activity.sessionStarts.sorted(), file: file, line: line)
+        }
+    }
+
     private final class Fixture {
         let root: URL
         let project: URL

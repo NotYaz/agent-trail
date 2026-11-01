@@ -9,15 +9,23 @@ enum PanelSection: String, CaseIterable {
     var symbol: String {
         switch self {
         case .projects: return "square.stack.3d.up"
-        case .growth: return "point.3.connected.trianglepath.dotted"
+        case .growth: return "chart.line.uptrend.xyaxis"
         }
     }
+}
+
+/// A Growth section another view can ask to scroll to. Growth consumes it once.
+enum GrowthAnchor: Hashable {
+    case chart, calendar, rhythm, profiles, projects
 }
 
 @MainActor
 final class AppStore: ObservableObject {
     @Published var projects: [ProjectSummary] = [] {
-        didSet { rebuildProjectOverviews() }
+        didSet {
+            rebuildProjectOverviews()
+            scheduleStatistics()
+        }
     }
     @Published private(set) var projectOverviews: [ProjectOverview] = []
     @Published var sources: [AgentSource] = []
@@ -43,10 +51,32 @@ final class AppStore: ObservableObject {
     /// A project path whose new location is being linked.
     @Published private(set) var pendingLocationLink: String?
     @Published var infoMessage: String?
+    /// Every statistic the UI shows. Rebuilt only when history evidence, the
+    /// activity day or the time zone changes; live ticks never touch it.
+    @Published private(set) var stats: StatsIndex = .empty
+    /// Copied out of `stats` so project cards read a dictionary, not the index.
+    @Published private(set) var trends: [String: ProjectTrend] = [:]
+    @Published private(set) var pulse: PulseSummary = .empty
+    /// Rebuilt with the overview, so it always describes the current live snapshot.
+    @Published private(set) var liveSummary: LiveSummary = .empty
+    /// Increments each time a new index is published, so views can key work on
+    /// history changes instead of on every live tick.
+    @Published private(set) var historyRevision = 0
+    /// Growth selection lives here because Growth unmounts while it is hidden.
+    @Published var growthProjectPath: String?
+    @Published var growthPeriod: StatsPeriod = .month
+    @Published var growthFocusSourceID: String?
+    @Published var growthAnchor: GrowthAnchor?
+    /// False while the popover is closed, so continuous effects can stop.
+    @Published var isPanelVisible = true
     let demoMode: Bool
+    /// A fixed clock for deterministic renders; nil follows the system clock.
+    let pinnedNow: Date?
+    var now: Date { pinnedNow ?? Date() }
+    /// A snapshot of the system time zone, replaced when that changes.
+    private(set) var activityCalendar = ActivityCalendar.current
     let configurationURL = ProfileConfiguration.defaultURL
     var showProfiles: (() -> Void)?
-    var showActivity: (() -> Void)?
     /// Reopens the floating panel, which closes while a folder picker is up.
     var showPanel: (() -> Void)?
 
@@ -59,12 +89,24 @@ final class AppStore: ObservableObject {
     private let locationsURL: URL
     private var generation = UUID()
     private var configurationIsValid = false
+    private let statisticsQueue = DispatchQueue(label: "app.agenttrail.stats", qos: .utility)
+    /// Inputs of the newest build started, so unchanged history never rebuilds.
+    private var statisticsFingerprint: Int?
+    private var isBuildingStatistics = false
+    private var statisticsPending = false
+    private var statisticsPendingForce = false
+    /// Not published: views fill it while rendering, which must not schedule another update.
+    private var statisticsCache: [StatisticsKey: ActivityStatistics] = [:]
+    private var timeZoneObserver: NSObjectProtocol?
 
     private func rebuildProjectOverviews() {
         let locations = projectLocations
         projectOverviews = ProjectOverview.merge(projects: projects, sessions: liveSessions,
             sessionProjects: sessionProjects,
             relocate: locations.locations.isEmpty ? nil : { locations.relocatedPath($0) })
+        let summary = LiveSummary.make(projectOverviews)
+        // The menu-bar tint subscribes to this; an unchanged snapshot stays quiet.
+        if summary != liveSummary { liveSummary = summary }
     }
 
     /// Identity state must be in place before `projects` changes, because that
@@ -85,12 +127,14 @@ final class AppStore: ObservableObject {
         missingFolders.filter { $0.projectPath == path }.max { $0.editCount < $1.editCount }
     }
 
-    init(demoMode: Bool = CommandLine.arguments.contains("--demo")) {
+    init(demoMode: Bool = CommandLine.arguments.contains("--demo"), now: Date? = nil) {
         self.demoMode = demoMode
+        pinnedNow = now
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AgentTrail", isDirectory: true)
         cacheURL = support.appendingPathComponent("activity-cache.json")
         locationsURL = support.appendingPathComponent("project-locations.json")
+        observeTimeZone()
         if demoMode {
             sources = DemoData.sources
             scheduleRefresh()
@@ -161,7 +205,7 @@ final class AppStore: ObservableObject {
 
     func refresh() {
         if demoMode {
-            let result = DemoData.result()
+            let result = DemoData.result(now: now, calendar: .current)
             applyIdentity(result)
             projects = result.projects
             lastScan = result.scannedAt
@@ -240,8 +284,10 @@ final class AppStore: ObservableObject {
     }
 
     func refreshLive() {
+        // The 3 s tick doubles as the day-rollover clock; it never rebuilds otherwise.
+        checkDayRollover()
         if demoMode {
-            let now = Date()
+            let now = self.now
             liveSessions = [
                 LiveAgentSession(sourceID: sources[0].id, projectPath: "/Demo/Projects/orbit", workspacePath: "/Demo/Projects/orbit",
                                  sessionID: "sample-needs-input", status: .waiting, updatedAt: now, pid: 4101),
@@ -338,8 +384,7 @@ final class AppStore: ObservableObject {
     }
 
     func abbreviate(_ path: String) -> String {
-        let home = NSHomeDirectory()
-        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+        PathFormat.abbreviate(path)
     }
 
     func reveal(path: String) {
@@ -357,6 +402,144 @@ final class AppStore: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(path, forType: .string)
     }
+
+    // MARK: Statistics
+
+    /// Memoized until the next index, so views can call it from `body`.
+    func statistics(projectPath: String?, period: StatsPeriod) -> ActivityStatistics {
+        let key = StatisticsKey(projectPath: projectPath ?? "", period: period)
+        if let cached = statisticsCache[key] { return cached }
+        let computed = stats.statistics(projectPath: projectPath, period: period)
+        statisticsCache[key] = computed
+        return computed
+    }
+
+    func portrait(projectPath: String?, period: StatsPeriod, showNames: Bool) -> PortraitSummary {
+        stats.portrait(projectPath: projectPath, period: period, showNames: showNames)
+    }
+
+    /// Opens Growth on a scope. A nil period keeps the one already chosen.
+    func showGrowth(projectPath: String?, period: StatsPeriod?, anchor: GrowthAnchor?) {
+        growthProjectPath = projectPath
+        if let period { growthPeriod = period }
+        growthFocusSourceID = nil
+        growthAnchor = anchor
+        panelSection = .growth
+    }
+
+    /// Builds from overview histories, which already fold canonical aliases
+    /// into one project, so no edit is counted twice. Overviews follow live
+    /// attention, so inputs are sorted by path: a live reorder alone must not
+    /// change the fingerprint or the index's project order.
+    private func scheduleStatistics(force: Bool = false) {
+        let inputs = projectOverviews.compactMap(\.history)
+            .filter { !$0.activities.isEmpty }
+            .sorted { $0.path < $1.path }
+        let fingerprint = statisticsInputFingerprint(inputs)
+        guard force || fingerprint != statisticsFingerprint else { return }
+        if demoMode {
+            // Demo and render output must be complete on the first frame.
+            statisticsFingerprint = fingerprint
+            applyStatistics(StatsIndex.build(projects: inputs, sources: sources, calendar: activityCalendar, now: now))
+            return
+        }
+        guard !isBuildingStatistics else {
+            // One build in flight, one pending: a scan's progress bursts collapse into a single rebuild.
+            statisticsPending = true
+            statisticsPendingForce = statisticsPendingForce || force
+            return
+        }
+        statisticsFingerprint = fingerprint
+        isBuildingStatistics = true
+        let currentSources = sources
+        let calendar = activityCalendar
+        let date = now
+        let currentGeneration = generation
+        statisticsQueue.async { [weak self] in
+            let index = StatsIndex.build(projects: inputs, sources: currentSources, calendar: calendar, now: date)
+            DispatchQueue.main.async { [weak self] in
+                self?.finishStatistics(index, generation: currentGeneration)
+            }
+        }
+    }
+
+    private func finishStatistics(_ index: StatsIndex, generation built: UUID) {
+        isBuildingStatistics = false
+        if generation == built {
+            applyStatistics(index)
+        } else {
+            // A profile change replaced the inputs; never publish the old index.
+            statisticsFingerprint = nil
+            statisticsPending = true
+        }
+        guard statisticsPending else { return }
+        let force = statisticsPendingForce
+        statisticsPending = false
+        statisticsPendingForce = false
+        scheduleStatistics(force: force)
+    }
+
+    private func applyStatistics(_ index: StatsIndex) {
+        stats = index
+        trends = index.trends
+        pulse = index.pulse
+        statisticsCache = [:]
+        historyRevision += 1
+        if let path = growthProjectPath, !index.projectPaths.contains(path) {
+            growthProjectPath = nil
+        }
+    }
+
+    /// Counts and newest instants stand in for the full moment arrays, which
+    /// are only ever appended to by a scan. Today is included so a rollover
+    /// with unchanged history still differs.
+    private func statisticsInputFingerprint(_ inputs: [ProjectSummary]) -> Int {
+        var hasher = Hasher()
+        hasher.combine(inputs.count)
+        for project in inputs {
+            hasher.combine(project.path)
+            hasher.combine(project.activities.count)
+            for activity in project.activities {
+                hasher.combine(activity.sourceID)
+                hasher.combine(activity.editMoments.count)
+                hasher.combine(activity.sessionStarts.count)
+                hasher.combine(activity.editMoments.last?.date)
+                hasher.combine(activity.sessionStarts.last)
+            }
+        }
+        hasher.combine(activityCalendar.timeZone.identifier)
+        hasher.combine(activityCalendar.rolloverHour)
+        hasher.combine(activityCalendar.day(of: now).index)
+        hasher.combine(sources.map(\.id))
+        return hasher.finalize()
+    }
+
+    /// A build already in flight is left alone; the next tick checks its result.
+    private func checkDayRollover() {
+        guard !stats.isEmpty, !isBuildingStatistics, activityCalendar.day(of: now) != stats.today else { return }
+        scheduleStatistics(force: true)
+    }
+
+    /// Moments are raw instants, so a new time zone needs a rebuild, never a rescan.
+    private func observeTimeZone() {
+        timeZoneObserver = NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.timeZoneDidChange() }
+        }
+    }
+
+    private func timeZoneDidChange() {
+        // Swift's TimeZone has no reset; the NSTimeZone one also refreshes TimeZone.current.
+        NSTimeZone.resetSystemTimeZone()
+        activityCalendar = .current
+        scheduleStatistics(force: true)
+    }
+}
+
+/// One memoized statistics query. A nil project path is stored as "", which no project has.
+private struct StatisticsKey: Hashable {
+    let projectPath: String
+    let period: StatsPeriod
 }
 
 /// Live metadata has its own queue so a first history index cannot delay it.
