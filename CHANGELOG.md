@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Published crypto donation addresses with QR codes on the support page: Bitcoin; ETH, USDC, and USDT on Ethereum, Base, or Arbitrum One (one shared address); and USDT on TRON (TRC-20).
+
 ## 0.1.0-alpha.7 — 2026-11-01
 
 - Redesigned panel. A Pulse strip shows live sessions, edits in the last 7 days, active projects, and your day streak. Project cards gain a 30-day sparkline, the change from the previous 30 days, a profile mix bar, New and Dormant chips, a profile stack with live status rings, and an attention edge. A pinned toolbar adds filter chips and sorting by edits, trend, or name. Keyboard shortcuts: ⌘1, ⌘2, ⌘F, ⌘R.
