@@ -22,7 +22,7 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 - Filter to projects shared across profiles.
 - See worktree context alongside recorded edits, and where a session was started when that was outside the project.
 - Keep a project's history when you move its folder; earlier locations are remembered automatically.
-- Focus an identified running Claude instance with one click. Codex and Grok profiles show local activity without an app-focus button by default.
+- Jump straight to the work: each card's main button opens the most urgent live session (needs input, then working, then idle) in Claude, Codex, or the terminal running Grok.
 - See live Needs input, Working, Idle, and Unknown counts inside each project card.
 - Read the Pulse strip at a glance: live sessions, edits in the last 7 days, active projects, and your day streak.
 - Each card shows a 30-day sparkline, its recorded edits with the change from the previous 30 days, and which profiles did the work.
@@ -49,7 +49,16 @@ Routine refreshes keep the last complete history visible while the next scan fin
 
 To install, copy `dist/Agent Trail.app` to your Applications folder. The script also creates an architecture-labeled ZIP and SHA-256 checksum in `dist/`. These alpha builds use an **ad-hoc signature** and are **not Apple-notarized**. A downloaded build may be blocked by Gatekeeper. Building locally is the supported starting point for this alpha; see Apple's [guidance for opening apps safely](https://support.apple.com/en-us/102445).
 
-Claude profile buttons focus an existing Claude Desktop instance. They do not open a particular project or conversation. Codex and Grok profiles show local history and runtime status; an empty bundle identifier means there is no desktop app configured for focus. Agent Trail does not launch, quit, kill, or restart an assistant.
+### Jump to the work
+
+Each card's main button opens the session that most needs you: one waiting for input first (**Answer**), then a working one (**Open**), then an idle one (**Resume**). It shows the profile, the session title, and how long the session has been in that state when the assistant records it. The ⌄ menu next to it lists every live session, plus **Open in** your editor or terminal at that worktree, **Reveal in Finder**, **Copy path**, a recorded pull request, and **Bring {profile} forward**. Each session row in **Details** has its own ↗.
+
+- **Claude Desktop:** opens that Code session with Claude's `claude://code/continue` link. This link is not publicly documented and may change. With several Claude instances (for example Main and Second), macOS hands the link to the instance in front, so Agent Trail first brings the session's own instance forward and sends the link only once it is frontmost. If that instance does not come forward, or another one takes the link, it brings the right instance forward and shows a short hint naming the session to pick.
+- **Codex:** opens the thread with `codex://threads/<id>` when the Codex desktop app owns it; otherwise it brings the owning app forward.
+- **Grok:** brings forward the terminal app it runs in, when the process environment identifies it.
+- **Otherwise:** it brings the assistant's app forward, or shows the folder in your running editor or Finder.
+
+Agent Trail opens a session or brings an app forward only after you click, and only when that app is already running. It never launches, quits, kills, or restarts an assistant, and it needs no Automation or Accessibility permission. **Open in** menu items can open your editor or terminal.
 
 ## Configure profiles
 
@@ -143,7 +152,18 @@ Search also matches earlier locations and launch folders. **Forget earlier locat
 
 Live status is available for Claude Desktop, loaded Codex threads, and registered Grok sessions. Each adapter requires runtime presence and explicit status or turn events; recent edits and file timestamps do not establish a live state.
 
-The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with a reported input request sort first, followed by projects with working sessions, under every sort. The Pulse strip shows needs-input and working counts, and the menu-bar icon turns amber and filled while a session needs input. Use **Needs input** or **Working** to filter those projects. Selecting both includes projects with either state; search and **Shared** still apply.
+The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with a reported input request sort first, followed by projects with working sessions, under every sort. The Pulse strip shows needs-input and working counts. Use **Needs input** or **Working** to filter those projects. Selecting both includes projects with either state; search and **Shared** still apply.
+
+The menu-bar icon shows the same at a glance:
+
+| Icon | Meaning |
+| --- | --- |
+| Plain trail | Nothing is working or waiting. |
+| A dot travelling along the trail | At least one session is working. With Reduce Motion or Low Power Mode, a still dot instead. |
+| Amber and filled, with a count | A session needs input. It bounces once when a new request arrives. |
+| Checkmark, for a few seconds | Work just finished and nothing else is running. |
+
+Right-click the icon for a list of live sessions grouped by state; choose one to jump to it. The panel's ⋯ menu has **Menu bar** settings (animation, the needs-input count) and **Show session titles**. Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
 
 Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. Claude requires a matching desktop session; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
 
@@ -225,7 +245,7 @@ swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
 swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
 
-Add `--light` for the light appearance, or `--height N` to render a taller panel for review. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
+`--render-status-demo OUTPUT.png` draws the menu-bar icon states large, with the nodes the working animation follows marked in order. Add `--light` for the light appearance, or `--height N` to render a taller panel for review. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
 
 ## Development
 

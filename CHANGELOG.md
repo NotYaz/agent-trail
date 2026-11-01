@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Jump to the work.** Each project card's main button now opens the most urgent live session (Answer, Open, or Resume) with its title and time in state, instead of one button per Claude instance. Claude Code sessions open through Claude's session link, also with several Claude instances: the session's own instance comes forward first and receives the link, with a hint as the fallback. Codex threads open through `codex://threads`, and Grok brings its terminal forward. A ⌄ menu lists every live session and opens the worktree in your editor, terminal, or Finder. Details rows get their own ↗.
+- **A menu-bar icon that shows state.** A dot travels along the trail while agents work, the icon turns amber with a count when input is needed, and a checkmark appears briefly when work finishes. Right-click lists live sessions to jump to. Settings for animation, the count, and session titles are in the ⋯ menu. Animation runs in Core Animation and stops for Reduce Motion, Low Power Mode, and sleeping displays.
+- Live sessions now carry their title, Claude's needs-action sentence, branch, and pull requests in memory only, plus the app that owns a Codex or Grok session. No new permissions and no cache changes.
 - Published crypto donation addresses with QR codes on the support page: Bitcoin; ETH, USDC, and USDT on Ethereum, Base, or Arbitrum One (one shared address); and USDT on TRON (TRC-20).
 
 ## 0.1.0-alpha.7 — 2026-11-01

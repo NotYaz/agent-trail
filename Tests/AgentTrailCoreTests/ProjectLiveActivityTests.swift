@@ -220,11 +220,92 @@ final class ProjectLiveActivityTests: XCTestCase {
         XCTAssertTrue(ProjectOverview.merge(projects: [], sessions: records).isEmpty)
     }
 
+    func testRelocatedKeepsEveryOtherFieldIncludingDetails() {
+        let original = session(project: "/Demo/Old", workspace: "/Demo/Old/.claude/worktrees/feature",
+            id: "relocate", pid: 42, status: .waiting, updated: 300, details: sampleDetails)
+        let moved = original.relocated(projectPath: "/Demo/New", workspacePath: "/Demo/New/.claude/worktrees/feature")
+        XCTAssertEqual(moved.projectPath, "/Demo/New")
+        XCTAssertEqual(moved.workspacePath, "/Demo/New/.claude/worktrees/feature")
+        XCTAssertEqual(moved.sourceID, original.sourceID)
+        XCTAssertEqual(moved.sessionID, original.sessionID)
+        XCTAssertEqual(moved.status, original.status)
+        XCTAssertEqual(moved.updatedAt, original.updatedAt)
+        XCTAssertEqual(moved.pid, original.pid)
+        XCTAssertEqual(moved.id, original.id)
+        XCTAssertEqual(moved.details, sampleDetails)
+        XCTAssertEqual(session().details, LiveSessionDetails.none)
+    }
+
+    func testGroupKeepsDetailsThroughCanonicalPathsAndNewestCopy() throws {
+        let aliased = session(project: "/Demo/../Demo/Project", details: sampleDetails)
+        let grouped = try XCTUnwrap(ProjectLiveActivity.group([aliased])["/Demo/Project"])
+        XCTAssertEqual(grouped.sessions.first?.details, sampleDetails)
+
+        var newer = sampleDetails
+        newer.title = "Landing copy pass"
+        let copies = [session(status: .idle, updated: 100, details: sampleDetails),
+                      session(status: .working, updated: 200, details: newer)]
+        let newest = try XCTUnwrap(ProjectLiveActivity.group(copies)["/Demo/Project"])
+        XCTAssertEqual(newest.sessions.first?.details.title, "Landing copy pass")
+
+        // An equal-time status conflict becomes unknown but keeps details the copies share.
+        let conflict = [session(status: .working, details: sampleDetails), session(status: .idle, details: sampleDetails)]
+        let unknown = try XCTUnwrap(ProjectLiveActivity.group(conflict)["/Demo/Project"])
+        XCTAssertEqual(unknown.sessions.first?.status, .unknown)
+        XCTAssertEqual(unknown.sessions.first?.details, sampleDetails)
+    }
+
+    func testEqualTimeCopiesWithConflictingDetailsKeepNoneInEitherOrder() throws {
+        var other = sampleDetails
+        other.desktopSessionID = "local_other"
+        let records = [session(details: sampleDetails), session(details: other)]
+        let first = try XCTUnwrap(ProjectLiveActivity.group(records)["/Demo/Project"])
+        let reversed = try XCTUnwrap(ProjectLiveActivity.group(records.reversed())["/Demo/Project"])
+        XCTAssertEqual(first.sessions.first?.details, LiveSessionDetails.none)
+        XCTAssertEqual(reversed.sessions.first?.details, LiveSessionDetails.none)
+        XCTAssertEqual(first.sessions.first?.status, .working)
+    }
+
+    func testMergeKeepsDetailsForPlainAssociatedAndRelocatedSessions() throws {
+        let plain = session(project: "/Demo/Plain", id: "plain", details: sampleDetails)
+        let plainOverview = try XCTUnwrap(ProjectOverview.merge(projects: [], sessions: [plain]).first)
+        XCTAssertEqual(plainOverview.live?.sessions.first?.details, sampleDetails)
+
+        // History shows where this session's edits landed; it is re-homed there.
+        let launched = session(project: "/Demo/Launch", id: "associated", details: sampleDetails)
+        let association = SessionProjectAssociation(sourceID: "main", sessionID: "associated",
+            recordedWorkspace: "/Demo/Launch", projectPath: "/Demo/Repository")
+        let associated = ProjectOverview.merge(projects: [history(path: "/Demo/Repository", activity: 100)],
+            sessions: [launched], sessionProjects: [association])
+        let repository = try XCTUnwrap(associated.first { $0.path == "/Demo/Repository" })
+        XCTAssertEqual(repository.live?.sessions.first?.workspacePath, "/Demo/Launch")
+        XCTAssertEqual(repository.live?.sessions.first?.details, sampleDetails)
+
+        // A session still reporting a folder that has since moved follows it.
+        let stale = session(project: "/Demo/Old", workspace: "/Demo/Old/.worktrees/a", id: "moved", details: sampleDetails)
+        let relocated = ProjectOverview.merge(projects: [], sessions: [stale], relocate: { path in
+            path.hasPrefix("/Demo/Old") ? "/Demo/New" + String(path.dropFirst("/Demo/Old".count)) : path
+        })
+        let moved = try XCTUnwrap(relocated.first)
+        XCTAssertEqual(moved.path, "/Demo/New")
+        XCTAssertEqual(moved.live?.sessions.first?.workspacePath, "/Demo/New/.worktrees/a")
+        XCTAssertEqual(moved.live?.sessions.first?.details, sampleDetails)
+    }
+
+    /// Synthetic values only.
+    private var sampleDetails: LiveSessionDetails {
+        LiveSessionDetails(title: "Tighten sync retries", desktopSessionID: "local_demo-1",
+            needsAction: "Approve running the migration", stateSince: Date(timeIntervalSince1970: 50),
+            branch: "feature/retries",
+            pullRequests: [LivePullRequest(number: 7, url: URL(string: "https://example.com/demo/pull/7")!)],
+            hostBundleID: "com.openai.codex", parentThreadID: "00000000-0000-4000-8000-000000000001")
+    }
+
     private func session(source: String = "main", project: String = "/Demo/Project", workspace: String? = nil,
                          id: String = "session", pid: Int32 = 10, status: LiveStatus = .working,
-                         updated: TimeInterval = 100) -> LiveAgentSession {
+                         updated: TimeInterval = 100, details: LiveSessionDetails = LiveSessionDetails()) -> LiveAgentSession {
         LiveAgentSession(sourceID: source, projectPath: project, workspacePath: workspace ?? project,
-            sessionID: id, status: status, updatedAt: Date(timeIntervalSince1970: updated), pid: pid)
+            sessionID: id, status: status, updatedAt: Date(timeIntervalSince1970: updated), pid: pid, details: details)
     }
 
     private func history(path: String, source: String = "main", activity: TimeInterval,

@@ -86,7 +86,7 @@ final class GrokLiveActivityProviderTests: XCTestCase {
         let exiting = GrokLiveActivityProvider(processStartTimes: { _ in
             calls += 1
             return calls == 1 ? [101: f.birth] : [:]
-        })
+        }, terminalHints: { _ in nil })
         XCTAssertTrue(exiting.scan(sources: [f.source], now: f.now).sessions.isEmpty)
     }
 
@@ -231,6 +231,115 @@ final class GrokLiveActivityProviderTests: XCTestCase {
         XCTAssertTrue(result.notices.contains { $0.contains("conflicting") })
     }
 
+    func testAgreeingTerminalHintsNameTheHostAndAreReadOncePerProcess() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        try f.register()
+        try f.events([f.event("turn_started", seconds: 1)])
+        var reads: [Int32] = []
+        let provider = GrokLiveActivityProvider(processStartTimes: { _ in [101: f.birth] }, terminalHints: { pid in
+            reads.append(pid)
+            // Empty profile overrides fail a profile identity, never the hints.
+            return GrokLiveActivityProviderTests.hints(["CODEX_HOME=", "TERM_PROGRAM=ghostty", "GROK_HOME=",
+                                                        "__CFBundleIdentifier=com.mitchellh.ghostty"])
+        })
+        for _ in 0..<2 {
+            let session = provider.scan(sources: [f.source], now: f.now).sessions.first
+            XCTAssertEqual(session?.status, .working)
+            XCTAssertEqual(session?.details.hostBundleID, "com.mitchellh.ghostty")
+        }
+        XCTAssertEqual(reads, [101])
+    }
+
+    func testStaleOrMissingTerminalHintsLeaveTheHostUnknownButKeepTheSession() throws {
+        for environment in [
+            // A shell inside Claude Desktop still names the terminal that launched Claude.
+            ["TERM_PROGRAM=iTerm.app", "__CFBundleIdentifier=com.anthropic.claudefordesktop"],
+            ["TERM_PROGRAM=tmux", "__CFBundleIdentifier=com.apple.Terminal"],
+            ["TERM_PROGRAM=Apple_Terminal"],
+            ["__CFBundleIdentifier=com.apple.Terminal"],
+            ["TERM_PROGRAM=Apple_Terminal", "TERM_PROGRAM=iTerm.app", "__CFBundleIdentifier=com.apple.Terminal"],
+            []
+        ] {
+            let f = try Fixture()
+            defer { f.remove() }
+            try f.register()
+            try f.events([f.event("turn_started", seconds: 1)])
+            let provider = GrokLiveActivityProvider(processStartTimes: { _ in [101: f.birth] },
+                terminalHints: { _ in GrokLiveActivityProviderTests.hints(environment) })
+            let session = provider.scan(sources: [f.source], now: f.now).sessions.first
+            XCTAssertEqual(session?.status, .working)
+            XCTAssertNil(session?.details.hostBundleID)
+        }
+    }
+
+    func testUnreadableProcessRecordIsTriedAgainAndReusedPIDIsReadAfresh() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        try f.register()
+        try f.events([f.event("turn_started", seconds: 1)])
+        var calls = 0
+        var birth = f.birth
+        let provider = GrokLiveActivityProvider(processStartTimes: { _ in [101: birth] }, terminalHints: { _ in
+            calls += 1
+            switch calls {
+            case 1: return nil
+            case 2: return GrokLiveActivityProviderTests.hints(["TERM_PROGRAM=Apple_Terminal", "__CFBundleIdentifier=com.apple.Terminal"])
+            default: return GrokLiveActivityProviderTests.hints(["TERM_PROGRAM=iTerm.app", "__CFBundleIdentifier=com.googlecode.iterm2"])
+            }
+        })
+        XCTAssertNil(provider.scan(sources: [f.source], now: f.now).sessions.first?.details.hostBundleID)
+        XCTAssertEqual(provider.scan(sources: [f.source], now: f.now).sessions.first?.details.hostBundleID, "com.apple.Terminal")
+        XCTAssertEqual(provider.scan(sources: [f.source], now: f.now).sessions.first?.details.hostBundleID, "com.apple.Terminal")
+        XCTAssertEqual(calls, 2)
+        // A new process under the same PID is a different session and host.
+        birth = f.birth + 1_000_000
+        try f.json([f.record().merging(["pid_start": birth], uniquingKeysWith: { _, new in new })],
+                   at: f.home.appendingPathComponent("active_sessions.json"))
+        XCTAssertEqual(provider.scan(sources: [f.source], now: f.now).sessions.first?.details.hostBundleID, "com.googlecode.iterm2")
+        XCTAssertEqual(calls, 3)
+    }
+
+    func testRecordThatNeverParsesSettlesAsUnknownAfterTwoReads() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        try f.register()
+        try f.events([f.event("turn_started", seconds: 1)])
+        var calls = 0
+        var birth = f.birth
+        let provider = GrokLiveActivityProvider(processStartTimes: { _ in [101: birth] }, terminalHints: { _ in
+            calls += 1
+            return nil
+        })
+        for _ in 0..<5 {
+            let session = provider.scan(sources: [f.source], now: f.now).sessions.first
+            XCTAssertEqual(session?.status, .working)
+            XCTAssertNil(session?.details.hostBundleID)
+        }
+        XCTAssertEqual(calls, 2)
+        // The settled answer belongs to that process; a reused PID is read again.
+        birth = f.birth + 1_000_000
+        try f.json([f.record().merging(["pid_start": birth], uniquingKeysWith: { _, new in new })],
+                   at: f.home.appendingPathComponent("active_sessions.json"))
+        XCTAssertNil(provider.scan(sources: [f.source], now: f.now).sessions.first?.details.hostBundleID)
+        XCTAssertEqual(calls, 3)
+    }
+
+    /// A synthetic KERN_PROCARGS2 record for a terminal-launched grok binary.
+    private static func hints(_ environment: [String]) -> ProcessIdentity.TerminalHints? {
+        let executable = "/Users/example/.grok/bin/grok"
+        var count = Int32(1)
+        var data = withUnsafeBytes(of: &count) { Data($0) }
+        data.append(contentsOf: executable.utf8)
+        data.append(contentsOf: [0, 0, 0])
+        for value in [executable] + environment {
+            data.append(contentsOf: value.utf8)
+            data.append(0)
+        }
+        data.append(0)
+        return ProcessIdentity.parseTerminalHints(data)
+    }
+
     private final class Fixture {
         let root: URL
         let home: URL
@@ -259,7 +368,10 @@ final class GrokLiveActivityProviderTests: XCTestCase {
         }
 
         func remove() { try? FileManager.default.removeItem(at: root) }
-        func provider() -> GrokLiveActivityProvider { GrokLiveActivityProvider(processStartTimes: { _ in [101: self.birth] }) }
+        /// Fixture PID 101 is not a real Grok process, so its environment is never read.
+        func provider() -> GrokLiveActivityProvider {
+            GrokLiveActivityProvider(processStartTimes: { _ in [101: self.birth] }, terminalHints: { _ in nil })
+        }
         func status(_ provider: GrokLiveActivityProvider) -> LiveStatus? { provider.scan(sources: [source], now: now).sessions.first?.status }
         func stamp(_ seconds: Int) -> String { ISO8601DateFormatter().string(from: opened.addingTimeInterval(Double(seconds))) }
         func record(openedSeconds: Int = 0) -> [String: Any] {

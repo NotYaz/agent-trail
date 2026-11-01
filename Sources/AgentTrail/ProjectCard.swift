@@ -4,8 +4,8 @@ import AgentTrailCore
 
 /// One project in the Projects list. Row A carries identity and the 30-day
 /// trend, row B the location, row C the profile mix, row D the live block and
-/// row E the latest edit with focus buttons. Every number comes from the cached
-/// `ProjectTrend`; live state comes only from the live snapshot.
+/// row E the latest edit with the Jump control. Every number comes from the
+/// cached `ProjectTrend`; live state comes only from the live snapshot.
 struct ProjectCard: View {
     private let project: ProjectOverview
     private let trend: ProjectTrend?
@@ -20,6 +20,8 @@ struct ProjectCard: View {
     private let isUnavailable: Bool
     private let isLinking: Bool
     private let open: (AgentSource) -> Void
+    private let jump: (LiveAgentSession) -> Void
+    private let perform: (WorkspaceAction) -> Void
     private let reveal: () -> Void
     private let copyPath: (String) -> Void
     private let locate: (MissingFolder?) -> Void
@@ -29,12 +31,16 @@ struct ProjectCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.rendersStill) private var rendersStill
     @Environment(\.referenceNow) private var referenceNow
+    @AppStorage(AppSettings.Key.showSessionTitles) private var showSessionTitles = true
     @State private var confirmForget = false
 
+    /// `open` brings a profile's app forward, `jump` opens one live session and
+    /// `perform` runs a folder action; all three come from the store.
     init(project: ProjectOverview, trend: ProjectTrend?, sources: [AgentSource], runningSourceIDs: Set<String>,
          isScanning: Bool, lastLiveScan: Date?, isActive: Bool, demoMode: Bool, location: ProjectLocation?,
          missingFolder: MissingFolder?, isUnavailable: Bool, isLinking: Bool,
-         open: @escaping (AgentSource) -> Void, reveal: @escaping () -> Void,
+         open: @escaping (AgentSource) -> Void, jump: @escaping (LiveAgentSession) -> Void,
+         perform: @escaping (WorkspaceAction) -> Void, reveal: @escaping () -> Void,
          copyPath: @escaping (String) -> Void, locate: @escaping (MissingFolder?) -> Void,
          forget: @escaping () -> Void, showInGrowth: @escaping () -> Void) {
         self.project = project
@@ -50,6 +56,8 @@ struct ProjectCard: View {
         self.isUnavailable = isUnavailable
         self.isLinking = isLinking
         self.open = open
+        self.jump = jump
+        self.perform = perform
         self.reveal = reveal
         self.copyPath = copyPath
         self.locate = locate
@@ -276,7 +284,7 @@ struct ProjectCard: View {
     @ViewBuilder private var liveRow: some View {
         if let live = project.live {
             ProjectLiveStatusView(activity: live, sources: sources, lastScan: lastLiveScan,
-                                  isActive: isActive, demoMode: demoMode, focus: open)
+                                  isActive: isActive, demoMode: demoMode, focus: open, jump: jump)
         } else {
             Text(noReportText)
                 .font(Theme.Typeface.note)
@@ -289,39 +297,102 @@ struct ProjectCard: View {
         lastLiveScan == nil ? "Checking live status…" : "No live sessions reported"
     }
 
-    // MARK: Row E: last edit and focus
+    // MARK: Row E: last edit and the Jump control
 
-    @ViewBuilder private func lastEditRow(now: Date) -> some View {
-        let focusable = focusSources
-        if focusable.isEmpty {
-            editSummary(now: now)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            ViewThatFits(in: .horizontal) {
-                lastEditLayout(now: now, focusable: focusable, compact: false)
-                lastEditLayout(now: now, focusable: focusable, compact: true)
-            }
+    /// The Jump control wins the space: when both do not fit at full width,
+    /// the edit summary shortens to "Edited ● 5 min. ago" first, keeping the
+    /// workspace chip while it fits, so a worktree edit stays visible.
+    private func lastEditRow(now: Date) -> some View {
+        let control = jumpControl(now: now)
+        return ViewThatFits(in: .horizontal) {
+            lastEditLayout(now: now, style: .full, control: control)
+            lastEditLayout(now: now, style: .compactWithChip, control: control)
+            lastEditLayout(now: now, style: .compact, control: control)
         }
     }
 
-    /// Full profile names when they fit; monograms (with names in help and VoiceOver) when they do not.
-    private func lastEditLayout(now: Date, focusable: [AgentSource], compact: Bool) -> some View {
+    private enum EditSummaryStyle {
+        case full, compactWithChip, compact
+    }
+
+    private func lastEditLayout(now: Date, style: EditSummaryStyle, control: JumpControl) -> some View {
         HStack(spacing: 6) {
-            editSummary(now: now)
-            Spacer(minLength: Theme.Space.xs)
-            HStack(spacing: 6) {
-                ForEach(focusable) { (source: AgentSource) in
-                    focusButton(source, compact: compact)
-                }
+            switch style {
+            case .full: editSummary(now: now)
+            case .compactWithChip: compactEditSummary(now: now, showChip: true)
+            case .compact: compactEditSummary(now: now, showChip: false)
             }
-            .fixedSize()
+            Spacer(minLength: Theme.Space.xs)
+            control
         }
     }
 
-    private func focusButton(_ source: AgentSource, compact: Bool) -> some View {
-        ProjectCardFocusButton(source: source, tint: sourceColor(source.id),
-                               isRunning: runningSourceIDs.contains(source.id), compact: compact,
-                               projectName: displayName, action: { open(source) })
+    private func jumpControl(now: Date) -> JumpControl {
+        JumpControl(entries: jumpEntries(now: now), projectName: displayName, projectPath: project.path,
+                    profiles: jumpProfiles, jump: jump, perform: perform, focus: open)
+    }
+
+    /// Live sessions in Jump order: waiting longest first, then working, idle, unknown.
+    private func jumpEntries(now: Date) -> [JumpControl.Entry] {
+        guard let live = project.live else { return [] }
+        return LiveSessionRanking.ordered(live.sessions).map { (session: LiveAgentSession) -> JumpControl.Entry in
+            jumpEntry(session, now: now)
+        }
+    }
+
+    private func jumpEntry(_ session: LiveAgentSession, now: Date) -> JumpControl.Entry {
+        let since = session.details.stateSince
+        return JumpControl.Entry(session: session,
+                                 label: SessionLabel.make(session, showTitles: showSessionTitles),
+                                 title: SessionLabel.title(session, showTitles: showSessionTitles),
+                                 needsAction: SessionLabel.needsAction(session, showTitles: showSessionTitles),
+                                 profileName: sourceName(session.sourceID), tint: sourceColor(session.sourceID),
+                                 age: ElapsedFormat.compact(since: since, now: now),
+                                 spokenAge: ElapsedFormat.spoken(since: since, now: now))
+    }
+
+    /// "Bring {profile} forward" for each profile on the project with a desktop app.
+    private var jumpProfiles: [JumpControl.Profile] {
+        focusSources.map { (source: AgentSource) -> JumpControl.Profile in
+            JumpControl.Profile(source: source, tint: sourceColor(source.id),
+                                isRunning: runningSourceIDs.contains(source.id))
+        }
+    }
+
+    /// "Edited ● 5 min. ago": the profile lives in the dot's color, help and VoiceOver.
+    /// Help and VoiceOver also name the workspace, since the chip may not fit.
+    @ViewBuilder private func compactEditSummary(now: Date, showChip: Bool) -> some View {
+        if let edit = project.history?.latestEdit, let date = edit.latestEdit {
+            HStack(spacing: 5) {
+                Text("Edited")
+                    .foregroundStyle(.secondary)
+                profileDot(edit.sourceID)
+                Text(RelativeTime.string(for: date, now: now))
+                    .foregroundStyle(.secondary)
+                if showChip, let label = workspaceLabel(for: edit) { workspaceChip(label, edit: edit) }
+            }
+            .font(Theme.Typeface.caption)
+            .lineLimit(1)
+            .help(compactEditHelp(edit, date: date, now: now))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(compactEditAccessibilityLabel(edit, date: date, now: now))
+        } else {
+            editSummary(now: now)
+        }
+    }
+
+    private func compactEditHelp(_ edit: ProjectActivity, date: Date, now: Date) -> String {
+        let when = date.formatted(date: .abbreviated, time: .standard)
+        var text = "Last edit by \(sourceName(edit.sourceID)) · \(when)"
+        if let label = workspaceLabel(for: edit) { text += "\n" + workspaceHelp(label, edit: edit) }
+        return withLatestActivity(text + "\n" + editExplanation, now: now)
+    }
+
+    /// "Last edit 1 min. ago by Codex, Worktree · navigation".
+    private func compactEditAccessibilityLabel(_ edit: ProjectActivity, date: Date, now: Date) -> String {
+        var text = "Last edit \(RelativeTime.string(for: date, now: now)) by \(sourceName(edit.sourceID))"
+        if let label = workspaceLabel(for: edit) { text += ", " + label.title(abbreviate: PathFormat.abbreviate) }
+        return text
     }
 
     @ViewBuilder private func editSummary(now: Date) -> some View {
@@ -362,11 +433,15 @@ struct ProjectCard: View {
     }
 
     private func workspaceChip(_ label: WorkspaceLabel, edit: ProjectActivity) -> some View {
+        Pill(text: label.shortTitle, symbol: label.symbol)
+            .help(workspaceHelp(label, edit: edit))
+    }
+
+    /// "Worktree · navigation" and where the edit landed.
+    private func workspaceHelp(_ label: WorkspaceLabel, edit: ProjectActivity) -> String {
         let workspace = edit.latestEditWorkspacePath ?? project.path
-        let help = label.title(abbreviate: PathFormat.abbreviate) + "\n"
+        return label.title(abbreviate: PathFormat.abbreviate) + "\n"
             + label.help(workspace: workspace, project: project.path)
-        return Pill(text: label.shortTitle, symbol: label.symbol)
-            .help(help)
     }
 
     private func profileDot(_ sourceID: String) -> some View {
@@ -659,72 +734,6 @@ struct ProjectCard: View {
 
     private static func plural(_ count: Int, _ noun: String) -> String {
         "\(count.formatted()) \(count == 1 ? noun : noun + "s")"
-    }
-}
-
-// MARK: - Focus button
-
-/// "{profile} ↗": a compact button that brings the profile's desktop app forward.
-/// The dot is filled while the app is identified as running.
-private struct ProjectCardFocusButton: View {
-    private let source: AgentSource
-    private let tint: Color
-    private let isRunning: Bool
-    private let compact: Bool
-    private let projectName: String
-    private let action: () -> Void
-    @State private var isHovered = false
-
-    init(source: AgentSource, tint: Color, isRunning: Bool, compact: Bool, projectName: String,
-         action: @escaping () -> Void) {
-        self.source = source
-        self.tint = tint
-        self.isRunning = isRunning
-        self.compact = compact
-        self.projectName = projectName
-        self.action = action
-    }
-
-    var body: some View {
-        Button(action: action) { label }
-            .buttonStyle(ProjectCardPressStyle())
-            .onHover { hovering in isHovered = hovering }
-            .help(helpText)
-            .accessibilityLabel("Focus \(source.name) for \(projectName)")
-            .accessibilityValue(runningValue)
-    }
-
-    private var label: some View {
-        HStack(spacing: 4) {
-            dot
-            Text(title)
-                .font(Theme.Typeface.micro)
-                .lineLimit(1)
-            Image(systemName: "arrow.up.right")
-                .font(.system(size: 10, weight: .semibold))
-                .imageScale(.small)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, Theme.Space.xs)
-        .frame(height: 22)
-        .background(tint.opacity(washOpacity), in: Theme.Radius.shape(Theme.Radius.control))
-        .contentShape(Theme.Radius.shape(Theme.Radius.control))
-    }
-
-    private var dot: some View {
-        Circle()
-            .fill(isRunning ? tint : Color.clear)
-            .overlay(Circle().strokeBorder(tint, lineWidth: 1))
-            .frame(width: 6, height: 6)
-    }
-
-    private var title: String { compact ? ProfileColor.monogram(source.name) : source.name }
-    private var washOpacity: Double { isHovered ? 0.18 : 0.10 }
-    private var runningValue: String { isRunning ? "Running" : "Not running" }
-
-    private var helpText: String {
-        if isRunning { return "Focus the running \(source.name) instance" }
-        return "\(source.name) is not currently identified as running. Click to check again."
     }
 }
 

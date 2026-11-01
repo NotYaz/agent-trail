@@ -5,13 +5,23 @@ import Foundation
 /// written after this particular session was opened establish a live state. The
 /// registry's microsecond PID birth time must match the current native process.
 /// Nothing is written to Grok's home and no process signals or commands are used.
+/// The hosting terminal comes from two inherited environment hints, read at most
+/// twice per verified process and trusted only when they agree.
 public final class GrokLiveActivityProvider {
     private let processStartTimes: (Set<Int32>) -> [Int32: UInt64]
+    private let terminalHints: (Int32) -> ProcessIdentity.TerminalHints?
     private let files = FileManager.default
     private var readers: [String: GrokLiveTail] = [:]
+    /// Terminal bundle id (or a settled nil) per PID and PID birth time.
+    private var terminalHosts: [String: String?] = [:]
+    /// Failed hint reads per PID and PID birth time, until they settle.
+    private var failedHostReads: [String: Int] = [:]
 
-    public init(processStartTimes: ((Set<Int32>) -> [Int32: UInt64])? = nil) {
+    /// `terminalHints` receives only PIDs whose birth time matched the registry.
+    public init(processStartTimes: ((Set<Int32>) -> [Int32: UInt64])? = nil,
+                terminalHints: ((Int32) -> ProcessIdentity.TerminalHints?)? = nil) {
         self.processStartTimes = processStartTimes ?? Self.readProcessStartTimes
+        self.terminalHints = terminalHints ?? { ProcessIdentity.readTerminalHints(pid: $0) }
     }
 
     public func scan(sources: [AgentSource], now: Date = Date()) -> LiveSnapshot {
@@ -64,11 +74,15 @@ public final class GrokLiveActivityProvider {
         let starts = processStartTimes(Set(candidates.map { Int32($0.record.pid) }))
         var sessions: [LiveAgentSession] = []
         var retained: Set<String> = []
+        var retainedHosts: Set<String> = []
         for candidate in candidates {
             let pid = Int32(candidate.record.pid)
             // Missing identity includes dead processes. A matching PID alone is
             // insufficient because registries can survive process termination.
             guard starts[pid] == candidate.record.pid_start else { continue }
+            let hostKey = String(pid) + "\0" + String(candidate.record.pid_start)
+            retainedHosts.insert(hostKey)
+            let details = LiveSessionDetails(hostBundleID: terminalHost(pid: pid, key: hostKey))
             let key = candidate.key + "\0" + String(candidate.record.pid_start) + "\0" + candidate.record.opened_at
             retained.insert(key)
             let reader = readers[key] ?? GrokLiveTail(opened: candidate.opened)
@@ -80,7 +94,7 @@ public final class GrokLiveActivityProvider {
                     notices.append("\(candidate.source.name): a Grok lifecycle stream outside its profile was omitted.")
                     sessions.append(LiveAgentSession(sourceID: candidate.source.id, projectPath: candidate.workspace,
                         workspacePath: candidate.workspace, sessionID: candidate.record.session_id,
-                        status: .unknown, updatedAt: candidate.opened, pid: pid))
+                        status: .unknown, updatedAt: candidate.opened, pid: pid, details: details))
                     continue
                 }
                 try reader.read(eventURL,
@@ -97,9 +111,11 @@ public final class GrokLiveActivityProvider {
             }
             sessions.append(LiveAgentSession(sourceID: candidate.source.id, projectPath: candidate.workspace,
                 workspacePath: candidate.workspace, sessionID: candidate.record.session_id,
-                status: reader.status, updatedAt: reader.updatedAt ?? candidate.opened, pid: pid))
+                status: reader.status, updatedAt: reader.updatedAt ?? candidate.opened, pid: pid, details: details))
         }
         readers = readers.filter { retained.contains($0.key) }
+        terminalHosts = terminalHosts.filter { retainedHosts.contains($0.key) }
+        failedHostReads = failedHostReads.filter { retainedHosts.contains($0.key) }
         // Verify presence again after reading files, without inspecting arguments.
         let finalStarts = processStartTimes(Set(sessions.map(\.pid)))
         sessions.removeAll { finalStarts[$0.pid] != starts[$0.pid] }
@@ -110,6 +126,29 @@ public final class GrokLiveActivityProvider {
             return $0.id < $1.id
         }
         return LiveSnapshot(sessions: sessions, notices: Array(Set(notices)).sorted(), scannedAt: now)
+    }
+
+    /// A process's launch environment does not change, so one successful read
+    /// settles it for that process. An unreadable record is tried once more next
+    /// poll, in case the read raced the process; a second failure settles it as
+    /// unknown, so a record that never parses is not read again every poll.
+    /// The final birth-time check below drops the session if the PID was reused.
+    private func terminalHost(pid: Int32, key: String) -> String? {
+        if let known = terminalHosts[key] { return known }
+        guard let hints = terminalHints(pid) else {
+            let failures = (failedHostReads[key] ?? 0) + 1
+            if failures >= 2 {
+                failedHostReads[key] = nil
+                terminalHosts.updateValue(nil, forKey: key)
+            } else {
+                failedHostReads[key] = failures
+            }
+            return nil
+        }
+        failedHostReads[key] = nil
+        let host = hints.terminalBundleIdentifier
+        terminalHosts.updateValue(host, forKey: key)
+        return host
     }
 
     private struct RegistryRecord: Decodable {
