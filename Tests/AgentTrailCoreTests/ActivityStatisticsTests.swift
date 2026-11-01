@@ -549,9 +549,12 @@ final class ActivityStatisticsTests: XCTestCase {
         let expected = projects.reduce(0) { $0 + $1.activities.reduce(0) { $0 + $1.editMoments.count } }
         XCTAssertGreaterThan(expected, 80_000)
 
+        // Generous wall-clock bounds: this runs as a debug build on shared CI
+        // runners, including slower Intel machines. They catch an accidental
+        // quadratic pass (seconds at this scale), not small timing noise.
         let started = Date()
         let index = build(projects)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
         XCTAssertEqual(index.statistics(projectPath: nil, period: .all).current.edits, expected)
 
         var fastest = Double.infinity
@@ -560,7 +563,7 @@ final class ActivityStatisticsTests: XCTestCase {
             _ = index.statistics(projectPath: nil, period: .month)
             fastest = min(fastest, Date().timeIntervalSince(start))
         }
-        XCTAssertLessThan(fastest, 0.05)
+        XCTAssertLessThan(fastest, 0.5)
         measure {
             _ = index.statistics(projectPath: nil, period: .month)
         }
