@@ -511,6 +511,65 @@ final class CodexActivityProviderTests: XCTestCase {
         XCTAssertEqual(rescanned.projects.first?.recordedEditCount, 1)
         XCTAssertFalse(rescanned.notices.contains { $0.contains("rebuilt") })
     }
+
+    func testSpawnedThreadEditsAreDelegatedAndItsParentsAreNot() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        let helperPath = fixture.project.appendingPathComponent("helper.swift").path
+        let parentEdit = fixture.fileChange("parent-edit", status: "completed", files: [path: "update"], seconds: 10)
+        try fixture.write(fixture.sessionLines() + [parentEdit])
+        // The spawned thread repeats its parent's edit; that copy stays direct.
+        try fixture.write(fixture.sessionLines(timestamp: fixture.stamp(5), sessionID: "helper", parent: "session-1") + [
+            parentEdit,
+            fixture.fileChange("helper-edit", status: "completed", files: [helperPath: "add"], seconds: 20)
+        ], to: fixture.root.appendingPathComponent("sessions/rollout-helper.jsonl"))
+        let provider = CodexActivityProvider()
+
+        let metadata = provider.metadata(sources: [fixture.source])
+        assertMomentInvariants(metadata.projects)
+        XCTAssertEqual(metadata.projects.first?.activities.first?.sessionStarts, [fixture.date(0), fixture.date(5)])
+        XCTAssertEqual(metadata.projects.first?.activities.first?.editMoments, [])
+
+        let result = provider.scan(sources: [fixture.source])
+        assertMomentInvariants(result.projects)
+        XCTAssertEqual(result.projects.count, 1)
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.recordedEditCount, 2)
+        XCTAssertEqual(project.sessionCount, 2)
+        let activity = try XCTUnwrap(project.activities.first)
+        XCTAssertEqual(activity.editMoments, [EditMoment(date: fixture.date(10)), EditMoment(date: fixture.date(20), delegated: true)])
+        XCTAssertEqual(activity.sessionStarts, [fixture.date(0), fixture.date(5)])
+    }
+
+    func testMomentInvariantsHoldAcrossCheckoutsAndMissingFolders() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let first = try fixture.git("first")
+        let second = try fixture.git("second")
+        let vanished = fixture.project.appendingPathComponent("outputs/AgentTrail")
+        try fixture.write(fixture.sessionLines() + [
+            fixture.fileChange("first-edit", status: "completed", files: [first.appendingPathComponent("main.swift").path: "add"], seconds: 30),
+            fixture.fileChange("second-edit", status: "completed", files: [second.appendingPathComponent("main.swift").path: "add"], seconds: 20),
+            fixture.fileChange("lost-edit", status: "completed", files: [vanished.appendingPathComponent("a.swift").path: "add"], seconds: 10)
+        ])
+        let result = CodexActivityProvider().scan(sources: [fixture.source])
+        assertMomentInvariants(result.projects)
+        let activities = result.projects.flatMap(\.activities)
+        XCTAssertEqual(activities.flatMap(\.editMoments).count, 3)
+        XCTAssertEqual(activities.flatMap(\.sessionStarts), [fixture.date(0)])
+        XCTAssertFalse(activities.flatMap(\.editMoments).contains(where: \.delegated))
+    }
+
+    private func assertMomentInvariants(_ projects: [ProjectSummary], file: StaticString = #filePath, line: UInt = #line) {
+        for activity in projects.flatMap(\.activities) {
+            XCTAssertEqual(activity.editMoments.count, activity.history.reduce(0) { $0 + $1.editCount }, file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts.count, activity.history.reduce(0) { $0 + $1.sessionCount }, file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts.count, activity.sessionCount, file: file, line: line)
+            XCTAssertEqual(activity.editMoments.map(\.date), activity.editMoments.map(\.date).sorted(), file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts, activity.sessionStarts.sorted(), file: file, line: line)
+        }
+    }
 }
 
 private final class Fixture {

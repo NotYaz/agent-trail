@@ -58,4 +58,50 @@ final class ProjectSummaryTests: XCTestCase {
         XCTAssertEqual(project.latestActivity.workspacePath, "/tmp/repo")
         XCTAssertEqual(project.latestEdit?.latestEditWorkspacePath, "/tmp/repo/.claude/worktrees/feature")
     }
+
+    func testMergeConcatenatesAndSortsMomentsPerSource() throws {
+        func at(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: seconds) }
+        let records: [ProjectActivity] = [
+            ProjectActivity(sourceID: "main", projectPath: "/tmp/example", latestActivity: at(100), latestEdit: at(90),
+                editMoments: [EditMoment(date: at(30)), EditMoment(date: at(60), delegated: true), EditMoment(date: at(90), delegated: true)],
+                sessionStarts: [at(50)]),
+            ProjectActivity(sourceID: "main", projectPath: "/tmp/example/../example", latestActivity: at(80), latestEdit: at(60),
+                editMoments: [EditMoment(date: at(10)), EditMoment(date: at(60))], sessionStarts: [at(5), at(70)]),
+            ProjectActivity(sourceID: "second", projectPath: "/tmp/example", latestActivity: at(40), latestEdit: at(20),
+                editMoments: [EditMoment(date: at(20), delegated: true)], sessionStarts: [at(15)])
+        ]
+        let project = try XCTUnwrap(ProjectSummary.merge(records).first)
+        let main = try XCTUnwrap(project.activities.first { $0.sourceID == "main" })
+        let second = try XCTUnwrap(project.activities.first { $0.sourceID == "second" })
+        // At the same instant a direct edit sorts before a delegated one.
+        XCTAssertEqual(main.editMoments, [EditMoment(date: at(10)), EditMoment(date: at(30)), EditMoment(date: at(60)),
+            EditMoment(date: at(60), delegated: true), EditMoment(date: at(90), delegated: true)])
+        XCTAssertEqual(main.sessionStarts, [at(5), at(50), at(70)])
+        XCTAssertEqual(second.editMoments, [EditMoment(date: at(20), delegated: true)])
+        XCTAssertEqual(second.sessionStarts, [at(15)])
+    }
+
+    func testOverviewOfCanonicalAliasesKeepsOneActivitysMoments() throws {
+        func at(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: seconds) }
+        let older = ProjectActivity(sourceID: "main", projectPath: "/Demo/Project",
+            latestActivity: at(200), latestEdit: at(150), sessionCount: 1,
+            history: [ActivityDay(day: at(100), editCount: 2, sessionCount: 1)],
+            editMoments: [EditMoment(date: at(100)), EditMoment(date: at(150), delegated: true)], sessionStarts: [at(50)])
+        let newer = ProjectActivity(sourceID: "main", projectPath: "/Demo/../Demo/Project",
+            latestActivity: at(300), latestEdit: at(250), sessionCount: 2,
+            history: [ActivityDay(day: at(100), editCount: 3, sessionCount: 2)],
+            editMoments: [EditMoment(date: at(100)), EditMoment(date: at(150), delegated: true), EditMoment(date: at(250))],
+            sessionStarts: [at(50), at(260)])
+        let snapshots = [ProjectSummary(path: "/Demo/Project", activities: [older]),
+                         ProjectSummary(path: "/Demo/../Demo/Project", activities: [newer])]
+        let orders: [[ProjectSummary]] = [snapshots, snapshots.reversed()]
+        for input in orders {
+            let overviews = ProjectOverview.merge(projects: input, sessions: [])
+            XCTAssertEqual(overviews.count, 1)
+            let activity = try XCTUnwrap(overviews.first?.history?.activities.first)
+            XCTAssertEqual(activity.editMoments, newer.editMoments)
+            XCTAssertEqual(activity.sessionStarts, newer.sessionStarts)
+            XCTAssertEqual(activity.editMoments.count, activity.history.reduce(0) { $0 + $1.editCount })
+        }
+    }
 }

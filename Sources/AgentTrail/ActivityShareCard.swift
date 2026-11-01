@@ -3,368 +3,931 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AgentTrailCore
 
-/// A local, path-free portrait of the history supplied by the activity garden.
-struct ActivityShareCard: View {
-    let projects: [ProjectSummary]
-    let sources: [AgentSource]
-    var anonymize: Bool = true
-    var sampleData: Bool = false
+/// A local, path-free portrait of one scope and period. It reads only a
+/// `PortraitSummary`, which carries day totals and no hours, slots or paths, so
+/// rhythm and folder names can never reach an exported image. Every color is
+/// fixed: ImageRenderer carries no NSAppearance.
+struct ActivityShareCard: View, Equatable {
+    static let size = CGSize(width: 1000, height: 700)
 
-    private var history: [ActivityDay] { ActivityDay.merge(projects.flatMap(\.history)) }
-    private var editCount: Int { history.reduce(0) { $0 + $1.editCount } }
-    private var sessionCount: Int { history.reduce(0) { $0 + $1.sessionCount } }
-    private var portraits: [SharePortraitSource] {
-        let activities = projects.flatMap(\.activities)
-        let knownOrder = sources.map(\.id)
-        let ids = Set(activities.map(\.sourceID)).sorted { first, second in
-            let firstIndex = knownOrder.firstIndex(of: first) ?? Int.max
-            let secondIndex = knownOrder.firstIndex(of: second) ?? Int.max
-            return firstIndex == secondIndex ? first < second : firstIndex < secondIndex
-        }
-        return ids.enumerated().compactMap { index, id in
-            let days = ActivityDay.merge(activities.filter { $0.sourceID == id }.flatMap(\.history))
-                .filter { $0.editCount > 0 || $0.sessionCount > 0 }
-            guard !days.isEmpty else { return nil }
-            let name = anonymize ? "Agent \(index + 1)"
-                : (sources.first { $0.id == id }?.name ?? "Unknown profile")
-            return SharePortraitSource(id: id, name: name, days: days,
-                                       color: ProfileColor.color(id, sources: sources))
-        }
+    private let summary: PortraitSummary
+    private let sampleData: Bool
+    private let tree: ShareCardTreeModel
+    private let strip: ShareCardStripModel
+
+    init(summary: PortraitSummary, sources: [AgentSource], sampleData: Bool = false) {
+        self.summary = summary
+        self.sampleData = sampleData
+        self.tree = ShareCardTreeModel(summary: summary, sources: sources)
+        self.strip = ShareCardStripModel(strip: summary.strip, busiestDay: summary.busiestDay, calendar: summary.calendar)
     }
 
-    private var projectTitle: String {
-        guard !projects.isEmpty else { return "No projects selected" }
-        guard projects.count == 1 else { return "\(projects.count) projects" }
-        return anonymize ? "My project" : (projects[0].name.isEmpty ? "Project" : projects[0].name)
+    /// The tree model carries the resolved profile colors, so it covers `sources`.
+    static func == (lhs: ActivityShareCard, rhs: ActivityShareCard) -> Bool {
+        guard lhs.sampleData == rhs.sampleData, lhs.summary == rhs.summary else { return false }
+        return lhs.tree == rhs.tree
     }
 
     var body: some View {
         ZStack {
-            Color(red: 0.025, green: 0.038, blue: 0.065)
-            RoundedRectangle(cornerRadius: 29)
-                .fill(LinearGradient(colors: [Color(red: 0.055, green: 0.079, blue: 0.12),
-                                              Color(red: 0.028, green: 0.043, blue: 0.071)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing))
-                .padding(12)
-            Ellipse()
-                .fill(Color.blue.opacity(0.10))
-                .frame(width: 470, height: 280)
-                .blur(radius: 100)
-                .offset(x: 240, y: -80)
-            Ellipse()
-                .fill(Color.orange.opacity(0.055))
-                .frame(width: 330, height: 220)
-                .blur(radius: 80)
-                .offset(x: -230, y: 200)
-
-            VStack(alignment: .leading, spacing: 0) {
-                brand
-                HStack(alignment: .top, spacing: 0) {
-                    introduction
-                        .frame(width: 350, alignment: .leading)
-                    ActivityPortraitTree(sources: portraits, history: history)
-                        .frame(width: 540, height: 340)
-                        .padding(.top, 8)
-                }
-                .padding(.top, 35)
-                Spacer(minLength: 0)
-                metrics
-                footnote
-            }
-            .padding(.horizontal, 55)
-            .padding(.top, 43)
-            .padding(.bottom, 37)
-            RoundedRectangle(cornerRadius: 29)
-                .stroke(.white.opacity(0.075), lineWidth: 1)
-                .padding(12)
+            Theme.Palette.Share.background
+            ShareCardBackdrop()
+            content
+            ShareCardBackdrop.panelShape
+                .stroke(Theme.Palette.Share.stroke, lineWidth: 1)
+                .padding(ShareCardBackdrop.inset)
         }
-        .frame(width: 1000, height: 700)
+        .frame(width: Self.size.width, height: Self.size.height)
         .environment(\.colorScheme, .dark)
     }
 
-    private var brand: some View {
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ShareCardBrandRow(sampleData: sampleData)
+            HStack(alignment: .top, spacing: 0) {
+                ShareCardIntroduction(summary: summary, strip: strip)
+                    .frame(width: ShareCardLayout.leftColumn, alignment: .topLeading)
+                ShareCardTree(model: tree)
+                    .frame(width: ShareCardLayout.treeWidth, height: ShareCardLayout.treeHeight)
+                    .padding(.top, 6)
+            }
+            .padding(.top, 30)
+            Spacer(minLength: 0)
+            ShareCardMetrics(summary: summary)
+            ShareCardFootnote(namesShown: summary.namesShown)
+        }
+        .padding(.horizontal, ShareCardLayout.horizontalPadding)
+        .padding(.top, 42)
+        .padding(.bottom, 34)
+    }
+}
+
+// MARK: - Layout
+
+private enum ShareCardLayout {
+    /// 40 + 380 + 540 + 40 = 1000.
+    static let horizontalPadding: CGFloat = 40
+    static let leftColumn: CGFloat = 380
+    static let treeWidth: CGFloat = 540
+    static let treeHeight: CGFloat = 340
+}
+
+/// Ink for the card. Everything derives from the fixed share constants.
+private enum ShareCardInk {
+    static let brandName = Theme.Palette.Share.headline.opacity(0.97)
+    static let guide = Theme.Palette.Share.hairline.opacity(0.35)
+    static let rootHalo = Theme.Palette.Share.hairline.opacity(0.4)
+    static let nodeRing = Theme.Palette.Share.faintText.opacity(0.67)
+    static let sessionDot = Theme.Palette.Share.text.opacity(0.78)
+    static let laneName = Theme.Palette.Share.text.opacity(0.85)
+    static let divider: [Color] = [Theme.Palette.Share.hairline, Theme.Palette.Share.hairline.opacity(0.3)]
+
+    static func ramp(_ level: Int) -> Color {
+        let ramp = Theme.Palette.Share.inkRamp
+        return ramp[min(max(level, 0), ramp.count - 1)]
+    }
+}
+
+/// Nearest-rank quartiles of the non-zero values, the same rule the app's
+/// calendar uses (spec §9 row 16).
+private enum ShareCardLevels {
+    static func thresholds(_ values: [Int]) -> LevelThresholds {
+        let sorted = values.filter { $0 > 0 }.sorted()
+        guard !sorted.isEmpty else { return .empty }
+        func rank(_ percent: Int) -> Int {
+            let position = (percent * sorted.count + 99) / 100
+            return sorted[min(sorted.count - 1, max(0, position - 1))]
+        }
+        return LevelThresholds(q1: rank(25), q2: rank(50), q3: rank(75))
+    }
+}
+
+// MARK: - Backdrop
+
+private struct ShareCardBackdrop: View {
+    static let inset: CGFloat = 12
+    static let panelShape = RoundedRectangle(cornerRadius: 29, style: .continuous)
+
+    var body: some View {
+        ZStack {
+            Self.panelShape.fill(LinearGradient(colors: [Theme.Palette.Share.panelTop, Theme.Palette.Share.panelBottom],
+                                                startPoint: .topLeading, endPoint: .bottomTrailing))
+            Ellipse()
+                .fill(Theme.Palette.Share.glowIndigo)
+                .frame(width: 520, height: 300)
+                .blur(radius: 110)
+                .offset(x: 250, y: -170)
+            Ellipse()
+                .fill(Theme.Palette.Share.glowViolet)
+                .frame(width: 440, height: 260)
+                .blur(radius: 100)
+                .offset(x: -240, y: 200)
+        }
+        .clipShape(Self.panelShape)
+        .padding(Self.inset)
+    }
+}
+
+// MARK: - Brand row
+
+private struct ShareCardBrandRow: View {
+    let sampleData: Bool
+
+    var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "point.3.connected.trianglepath.dotted")
                 .font(.system(size: 21, weight: .medium))
-                .foregroundStyle(Color(red: 0.54, green: 0.73, blue: 1))
+                .foregroundStyle(Theme.Palette.Share.brand)
             Text("Agent Trail")
                 .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.93))
+                .foregroundStyle(ShareCardInk.brandName)
             Spacer()
             Text(sampleData ? "SAMPLE DATA · ACTIVITY PORTRAIT" : "ACTIVITY PORTRAIT")
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(2.1)
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(Theme.Palette.Share.secondaryText)
         }
-    }
-
-    private var introduction: some View {
-        VStack(alignment: .leading, spacing: 21) {
-            Text("A project.\nMany minds.")
-                .font(.system(size: 53, weight: .semibold, design: .rounded))
-                .tracking(-2.4)
-                .lineSpacing(-2)
-                .foregroundStyle(.white.opacity(0.96))
-                .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(Color(red: 0.45, green: 0.68, blue: 1))
-                        .frame(width: 6, height: 6)
-                    Text(projectTitle)
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.83))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                Text(dateRange)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.41))
-            }
-            Text("A little picture of\nthe work that adds up.")
-                .font(.system(size: 15))
-                .lineSpacing(5)
-                .foregroundStyle(.white.opacity(0.44))
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 3)
-        }
-    }
-
-    private var metrics: some View {
-        HStack(alignment: .top, spacing: 0) {
-            metric(editCount, label: "RECORDED EDITS", tint: Color(red: 0.53, green: 0.73, blue: 1))
-            metric(sessionCount, label: "SAVED SESSIONS", tint: Color(red: 1, green: 0.67, blue: 0.40))
-            metric(portraits.count, label: "ACTIVE AGENTS", tint: Color(red: 0.62, green: 0.84, blue: 0.76))
-        }
-        .padding(.top, 24)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(LinearGradient(colors: [.white.opacity(0.13), .white.opacity(0.035)],
-                                     startPoint: .leading, endPoint: .trailing))
-                .frame(height: 1)
-        }
-    }
-
-    private func metric(_ value: Int, label: String, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(value.formatted(.number.grouping(.automatic)))
-                .font(.system(size: 41, weight: .medium, design: .rounded))
-                .tracking(-1.5)
-                .monospacedDigit()
-                .foregroundStyle(tint)
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .tracking(1.5)
-                .foregroundStyle(.white.opacity(0.43))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var footnote: some View {
-        HStack(alignment: .bottom) {
-            Text("From local session records · Edits exclude shell and external changes")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.30))
-            Spacer(minLength: 10)
-            Label(anonymize ? "Names hidden" : "Names included", systemImage: anonymize ? "eye.slash" : "eye")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.30))
-        }
-        .padding(.top, 30)
-    }
-
-    private var dateRange: String {
-        guard let first = history.first?.day, let last = history.last?.day else { return "No recorded history yet" }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "MMM d, yyyy"
-        if first == last { return "\(formatter.string(from: first)) · UTC" }
-        return "\(formatter.string(from: first)) – \(formatter.string(from: last)) · UTC"
     }
 }
 
-private struct SharePortraitSource: Identifiable {
-    let id: String
-    let name: String
-    let days: [ActivityDay]
-    let color: Color
+// MARK: - Left column
 
-}
+private struct ShareCardIntroduction: View {
+    let summary: PortraitSummary
+    let strip: ShareCardStripModel
 
-private struct ActivityPortraitTree: View {
-    let sources: [SharePortraitSource]
-    let history: [ActivityDay]
-
-    /// The last 14 active days keep the portrait legible; totals cover the supplied history.
-    private var visibleDays: [Date] {
-        Array(history.filter { $0.editCount > 0 || $0.sessionCount > 0 }.map(\.day).suffix(14))
+    private var periodLine: String {
+        "\(summary.periodTitle) · \(summary.dateRangeText) · local days"
     }
-    private var shownSources: [SharePortraitSource] { Array(sources.prefix(4)) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if shownSources.isEmpty {
-                emptyTree
-            } else {
-                ZStack(alignment: .topLeading) {
-                    Canvas { context, size in
-                        drawTree(context: context, size: size)
-                    }
-                    ForEach(Array(shownSources.enumerated()), id: \.element.id) { index, source in
-                        HStack(spacing: 6) {
-                            Circle().fill(source.color).frame(width: 5, height: 5)
-                            Text(source.name)
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.67))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                        .frame(width: 110, alignment: .leading)
-                        .offset(x: 427, y: laneY(index) - 6)
-                    }
-                }
-                .frame(height: 287)
-                HStack(spacing: 8) {
-                    Circle().fill(.white.opacity(0.30)).frame(width: 4, height: 4)
-                    Circle().fill(.white.opacity(0.45)).frame(width: 7, height: 7)
-                    Text("Node size = recorded edits")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.35))
-                    Spacer()
-                    Text(visibleDays.count == history.filter { $0.editCount > 0 || $0.sessionCount > 0 }.count
-                         ? "\(visibleDays.count) ACTIVE \(visibleDays.count == 1 ? "DAY" : "DAYS")"
-                         : "LAST \(visibleDays.count) ACTIVE DAYS")
-                        .font(.system(size: 8, weight: .medium))
-                        .tracking(0.8)
-                        .foregroundStyle(.white.opacity(0.30))
-                }
-                .padding(.leading, 33)
-                .padding(.trailing, 3)
-                .padding(.top, 12)
-                if sources.count > shownSources.count {
-                    Text("Showing \(shownSources.count) of \(sources.count) agent branches · totals include all agents")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.30))
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.top, 8)
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            Text(summary.headline)
+                .font(.system(size: 54, weight: .semibold, design: .rounded))
+                .tracking(-2)
+                .lineSpacing(-2)
+                .foregroundStyle(Theme.Palette.Share.headline)
+                .lineLimit(2)
+                .minimumScaleFactor(0.55)
+                .allowsTightening(true)
+            ShareCardScopeLine(title: summary.scopeTitle)
+                .padding(.top, 18)
+            Text(periodLine)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Palette.Share.secondaryText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 7)
+            ShareCardStrip(model: strip)
+                .padding(.top, 26)
+        }
+    }
+}
+
+private struct ShareCardScopeLine: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(LinearGradient(colors: Theme.Palette.Share.underline, startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(Theme.Palette.Share.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+}
+
+// MARK: - Mini strip
+
+/// The window's days, ready to draw: seven bars for 7D, otherwise a
+/// Monday-first calendar of the window's weeks only.
+private struct ShareCardStripModel: Equatable {
+    struct Bar: Identifiable, Equatable {
+        let id: Int
+        let title: String
+        let edits: Int
+        let level: Int
+        let height: CGFloat
+    }
+
+    struct Cell: Equatable {
+        let column: Int
+        let row: Int
+        let level: Int
+        let inWindow: Bool
+    }
+
+    struct Tick: Equatable {
+        let index: Int
+        let text: String
+    }
+
+    struct Weeks: Equatable {
+        let columns: Int
+        let cells: [Cell]
+        let months: [Tick]
+        let rows: [Tick]
+    }
+
+    enum Graphic: Equatable {
+        case bars([Bar])
+        case weeks(Weeks)
+    }
+
+    static let barMaxHeight: CGFloat = 90
+
+    let graphic: Graphic
+    let caption: String
+
+    var showsLegend: Bool {
+        if case .weeks = graphic { return true }
+        return false
+    }
+
+    /// The caption comes from the summary's `busiestDay`, which covers the
+    /// whole range; a weeks strip keeps only the latest 26 weeks.
+    init(strip: PortraitStrip, busiestDay: PortraitDay?, calendar: ActivityCalendar) {
+        switch strip {
+        case .days(let days):
+            graphic = .bars(Self.bars(days))
+        case .weeks(let firstDay, let weeks, let days):
+            graphic = .weeks(Self.weeks(firstDay: firstDay, count: weeks, days: days, calendar: calendar))
+        }
+        caption = Self.caption(busiestDay, calendar: calendar)
+    }
+
+    private static func bars(_ days: [PortraitDay]) -> [Bar] {
+        let thresholds = ShareCardLevels.thresholds(days.map(\.edits))
+        let peak = CGFloat(max(days.map(\.edits).max() ?? 0, 1))
+        var bars: [Bar] = []
+        for day in days {
+            let height: CGFloat = day.edits > 0 ? max(4, barMaxHeight * CGFloat(day.edits) / peak) : 0
+            bars.append(Bar(id: day.day.index, title: DayFormat.weekday(day.day.weekday, style: .short),
+                            edits: day.edits, level: thresholds.level(day.edits), height: height))
+        }
+        return bars
+    }
+
+    /// Cells before the window draw empty at 30%; days after it (the rest of
+    /// the current week) are not drawn, as in the app's Trail calendar.
+    private static func weeks(firstDay: DayKey, count: Int, days: [PortraitDay], calendar: ActivityCalendar) -> Weeks {
+        let columns = max(1, min(count, 26))
+        let windowFirst = days.first?.day
+        let windowLast = days.last?.day
+        var edits: [Int: Int] = [:]
+        for day in days { edits[day.day.index, default: 0] += day.edits }
+        let thresholds = ShareCardLevels.thresholds(days.map(\.edits))
+
+        var cells: [Cell] = []
+        for column in 0..<columns {
+            for row in 0..<7 {
+                let day = firstDay.adding(days: column * 7 + row)
+                if let windowLast, day > windowLast { continue }
+                let inWindow = windowFirst.map { day >= $0 } ?? false
+                let level = inWindow ? thresholds.level(edits[day.index] ?? 0) : 0
+                cells.append(Cell(column: column, row: row, level: level, inWindow: inWindow))
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        let rows = [0, 2, 4].map { (row: Int) -> Tick in Tick(index: row, text: DayFormat.weekday(row, style: .narrow)) }
+        return Weeks(columns: columns, cells: cells, months: monthTicks(firstDay: firstDay, columns: columns, calendar: calendar),
+                     rows: rows)
     }
 
-    private var emptyTree: some View {
-        VStack(spacing: 17) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 72, weight: .ultraLight))
-                .foregroundStyle(.white.opacity(0.12))
-            Text("Every trail starts somewhere.")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.35))
+    /// A label where the column's Monday starts a new month. A label closer
+    /// than three columns to the next one is dropped, so the later, true month
+    /// change wins.
+    private static func monthTicks(firstDay: DayKey, columns: Int, calendar: ActivityCalendar) -> [Tick] {
+        var candidates: [Tick] = []
+        var previousMonth: Int?
+        for column in 0..<columns {
+            let monday = firstDay.adding(days: column * 7)
+            let month = monday.year * 12 + monday.month
+            if month != previousMonth {
+                candidates.append(Tick(index: column, text: DayFormat.monthAbbreviation(monday, calendar: calendar)))
+            }
+            previousMonth = month
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func laneY(_ index: Int) -> CGFloat {
-        let count = shownSources.count
-        return count == 1 ? 135 : 45 + CGFloat(index) * (190 / CGFloat(max(1, count - 1)))
-    }
-
-    private func drawTree(context: GraphicsContext, size: CGSize) {
-        let root = CGPoint(x: 25, y: 149)
-        let terminalX: CGFloat = 412
-        // Quiet guides reveal chronology without turning the card into a dashboard.
-        for index in 0..<5 {
-            let x = 90 + CGFloat(index) * 79
-            var guide = Path()
-            guide.move(to: CGPoint(x: x, y: 19))
-            guide.addLine(to: CGPoint(x: x, y: 263))
-            context.stroke(guide, with: .color(.white.opacity(0.035)),
-                           style: StrokeStyle(lineWidth: 1, dash: [2, 7]))
+        var ticks: [Tick] = []
+        for (position, tick) in candidates.enumerated() {
+            if position + 1 < candidates.count, candidates[position + 1].index - tick.index < 3 { continue }
+            ticks.append(tick)
         }
+        return ticks
+    }
 
-        for (index, source) in shownSources.enumerated() {
-            let y = laneY(index)
-            var trunk = Path()
-            trunk.move(to: root)
-            trunk.addCurve(to: CGPoint(x: terminalX, y: y),
-                           control1: CGPoint(x: 155, y: 149),
-                           control2: CGPoint(x: 155, y: y))
-            context.stroke(trunk, with: .color(source.color.opacity(0.045)),
-                           style: StrokeStyle(lineWidth: 17, lineCap: .round))
-            context.stroke(trunk, with: .linearGradient(Gradient(colors: [source.color.opacity(0.08), source.color.opacity(0.65)]),
-                                                       startPoint: root, endPoint: CGPoint(x: terminalX, y: y)),
-                           style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+    /// The busiest day of the whole range, not just the drawn weeks.
+    private static func caption(_ busiest: PortraitDay?, calendar: ActivityCalendar) -> String {
+        guard let busiest, busiest.edits > 0 else { return "No recorded edits in this window" }
+        let noun = busiest.edits == 1 ? "edit" : "edits"
+        return "Busiest day \(DayFormat.long(busiest.day, calendar: calendar)) · \(busiest.edits.formatted(.number)) \(noun)"
+    }
+}
 
-            let records = Dictionary(grouping: source.days, by: \.day)
-            for (dayIndex, day) in visibleDays.enumerated() {
-                guard let record = records[day]?.first else { continue }
-                let progress = visibleDays.count <= 1 ? 0.65 : CGFloat(dayIndex) / CGFloat(visibleDays.count - 1)
-                let x = 110 + progress * 288
-                let bend = sin(progress * .pi) * (index.isMultiple(of: 2) ? -14.0 : 14.0)
-                let node = CGPoint(x: x, y: y + bend)
-                let radius = min(12, 3.5 + sqrt(CGFloat(max(0, record.editCount))) * 0.82)
+private struct ShareCardStrip: View {
+    let model: ShareCardStripModel
 
-                var twig = Path()
-                let branchOrigin = CGPoint(x: max(72, x - 47), y: interpolatedY(x: max(72, x - 47), target: y))
-                twig.move(to: branchOrigin)
-                twig.addQuadCurve(to: node, control: CGPoint(x: x - 11, y: branchOrigin.y))
-                context.stroke(twig, with: .color(source.color.opacity(0.37)),
-                               style: StrokeStyle(lineWidth: 1, lineCap: .round))
-
-                let halo = CGRect(x: node.x - radius * 2.0, y: node.y - radius * 2.0,
-                                  width: radius * 4.0, height: radius * 4.0)
-                context.fill(Path(ellipseIn: halo), with: .color(source.color.opacity(0.055)))
-                let circle = CGRect(x: node.x - radius, y: node.y - radius, width: radius * 2, height: radius * 2)
-                context.fill(Path(ellipseIn: circle), with: .color(source.color.opacity(0.84)))
-                context.stroke(Path(ellipseIn: circle), with: .color(.white.opacity(0.20)), lineWidth: 0.7)
-                if record.sessionCount > 0 {
-                    let center = CGRect(x: node.x - 1.4, y: node.y - 1.4, width: 2.8, height: 2.8)
-                    context.fill(Path(ellipseIn: center), with: .color(.white.opacity(0.65)))
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            graphic
+            HStack(spacing: 14) {
+                if model.showsLegend {
+                    ShareCardLegend()
                 }
+                Text(model.caption)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Palette.Share.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
-
-        context.fill(Path(ellipseIn: CGRect(x: root.x - 14, y: root.y - 14, width: 28, height: 28)),
-                     with: .color(.white.opacity(0.04)))
-        context.fill(Path(ellipseIn: CGRect(x: root.x - 5, y: root.y - 5, width: 10, height: 10)),
-                     with: .color(Color(red: 0.73, green: 0.82, blue: 0.96)))
     }
 
-    private func interpolatedY(x: CGFloat, target: CGFloat) -> CGFloat {
-        // Find the actual cubic trunk point at x so every twig stays attached.
+    @ViewBuilder private var graphic: some View {
+        switch model.graphic {
+        case .bars(let bars):
+            ShareCardBars(bars: bars)
+        case .weeks(let weeks):
+            ShareCardWeeks(weeks: weeks)
+        }
+    }
+}
+
+private struct ShareCardBars: View {
+    static let barWidth: CGFloat = 28
+    let bars: [ShareCardStripModel.Bar]
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 18) {
+            ForEach(bars) { (bar: ShareCardStripModel.Bar) in
+                ShareCardBarColumn(bar: bar)
+            }
+        }
+    }
+}
+
+private struct ShareCardBarColumn: View {
+    let bar: ShareCardStripModel.Bar
+
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 6, style: .continuous) }
+    private var valueText: String { bar.edits > 0 ? CompactNumber.string(bar.edits) : "–" }
+    private var valueColor: Color { bar.edits > 0 ? Theme.Palette.Share.secondaryText : Theme.Palette.Share.faintText }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(valueText)
+                .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+                .foregroundStyle(valueColor)
+                .lineLimit(1)
+                .fixedSize()
+            ZStack(alignment: .bottom) {
+                shape.fill(ShareCardInk.ramp(0))
+                shape.fill(ShareCardInk.ramp(bar.level))
+                    .frame(height: bar.height)
+            }
+            .frame(width: ShareCardBars.barWidth, height: ShareCardStripModel.barMaxHeight)
+            Text(bar.title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.Palette.Share.faintText)
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .frame(width: ShareCardBars.barWidth)
+    }
+}
+
+/// A Canvas calendar: month labels above, M/W/F on the left, 11pt cells with
+/// 3pt gaps, capped at 26 weeks (375pt wide with the label column).
+private struct ShareCardWeeks: View {
+    static let cell: CGFloat = 11
+    static let gap: CGFloat = 3
+    static let labelColumn: CGFloat = 14
+    static let monthRow: CGFloat = 16
+
+    let weeks: ShareCardStripModel.Weeks
+
+    private var width: CGFloat { Self.labelColumn + CGFloat(weeks.columns) * (Self.cell + Self.gap) - Self.gap }
+    private var height: CGFloat { Self.monthRow + 7 * (Self.cell + Self.gap) - Self.gap }
+
+    var body: some View {
+        let weeks = self.weeks
+        Canvas { context, _ in
+            ShareCardWeeks.draw(weeks, in: &context)
+        }
+        .frame(width: max(width, 1), height: height)
+    }
+
+    private static func draw(_ weeks: ShareCardStripModel.Weeks, in context: inout GraphicsContext) {
+        let pitch = cell + gap
+        for tick in weeks.months {
+            let origin = CGPoint(x: labelColumn + CGFloat(tick.index) * pitch, y: 0)
+            drawLabel(tick.text, at: origin, anchor: .topLeading, in: &context)
+        }
+        for tick in weeks.rows {
+            let origin = CGPoint(x: 0, y: monthRow + CGFloat(tick.index) * pitch + cell / 2)
+            drawLabel(tick.text, at: origin, anchor: .leading, in: &context)
+        }
+        for item in weeks.cells {
+            let rect = CGRect(x: labelColumn + CGFloat(item.column) * pitch, y: monthRow + CGFloat(item.row) * pitch,
+                              width: cell, height: cell)
+            let color = item.inWindow ? ShareCardInk.ramp(item.level) : ShareCardInk.ramp(0).opacity(0.3)
+            context.fill(Path(roundedRect: rect, cornerRadius: 3, style: .continuous), with: .color(color))
+        }
+    }
+
+    private static func drawLabel(_ text: String, at point: CGPoint, anchor: UnitPoint, in context: inout GraphicsContext) {
+        var resolved = context.resolve(Text(text).font(.system(size: 10, weight: .medium)))
+        resolved.shading = .color(Theme.Palette.Share.faintText)
+        context.draw(resolved, at: point, anchor: anchor)
+    }
+}
+
+private struct ShareCardLegend: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Less")
+            HStack(spacing: 2) {
+                ForEach(0..<5, id: \.self) { (level: Int) in
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(ShareCardInk.ramp(level))
+                        .frame(width: 9, height: 9)
+                }
+            }
+            Text("More")
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(Theme.Palette.Share.faintText)
+        .fixedSize()
+    }
+}
+
+// MARK: - Activity tree
+
+/// Every constant the tree is drawn with. `drawTree` and `interpolatedY` both
+/// read these, so twig origins always sit on their own branch.
+private enum ShareCardTreeGeometry {
+    static let canvasHeight: CGFloat = 287
+    static let root = CGPoint(x: 25, y: 149)
+    /// Where a branch finishes its fan-out from the root and runs flat as a lane.
+    static let laneStartX: CGFloat = 112
+    static let terminalX: CGFloat = 414
+    /// Each twig leaves its lane this far before its node.
+    static let twigReach: CGFloat = 47
+    /// The first node sits one twig past the lane start, so every twig origin
+    /// is on the flat part of its own lane, never on the shared fan-out.
+    static let firstNodeX: CGFloat = laneStartX + twigReach
+    static let lastNodeX: CGFloat = 400
+    static let bend: CGFloat = 14
+    static let labelX: CGFloat = 428
+    static let labelWidth: CGFloat = 108
+    static let guideTop: CGFloat = 19
+    static let guideBottom: CGFloat = 263
+    static let dateLabelY: CGFloat = 277
+    static let maximumLanes = 4
+    static let maximumDays = 14
+
+    static func laneY(_ index: Int, count: Int) -> CGFloat {
+        count <= 1 ? 135 : 45 + CGFloat(index) * (190 / CGFloat(max(1, count - 1)))
+    }
+
+    static func laneStart(laneY: CGFloat) -> CGPoint { CGPoint(x: laneStartX, y: laneY) }
+
+    /// The cubic fan-out from the root to the lane start. Control x values keep
+    /// x(t) monotonic, which `interpolatedY` relies on.
+    static func controls(laneY: CGFloat) -> (first: CGPoint, second: CGPoint) {
+        (CGPoint(x: root.x + 45, y: root.y), CGPoint(x: laneStartX - 40, y: laneY))
+    }
+
+    static func branchPath(laneY: CGFloat) -> Path {
+        let control = controls(laneY: laneY)
+        var path = Path()
+        path.move(to: root)
+        path.addCurve(to: laneStart(laneY: laneY), control1: control.first, control2: control.second)
+        path.addLine(to: CGPoint(x: terminalX, y: laneY))
+        return path
+    }
+
+    /// The branch's y at `x`: flat on the lane after `laneStartX`, otherwise the
+    /// fan-out cubic solved for x by bisection (x is monotonic in t).
+    static func interpolatedY(x: CGFloat, laneY: CGFloat) -> CGFloat {
+        if x >= laneStartX { return laneY }
+        if x <= root.x { return root.y }
+        let control = controls(laneY: laneY)
+        let end = laneStart(laneY: laneY)
         var lower: CGFloat = 0
         var upper: CGFloat = 1
         for _ in 0..<24 {
             let t = (lower + upper) / 2
-            let u = 1 - t
-            let curveX = u * u * u * 25 + 3 * u * u * t * 155 + 3 * u * t * t * 155 + t * t * t * 412
-            if curveX < x { lower = t } else { upper = t }
+            if cubic(t, root.x, control.first.x, control.second.x, end.x) < x { lower = t } else { upper = t }
         }
-        let progress = (lower + upper) / 2
-        let smooth = progress * progress * (3 - 2 * progress)
-        return 149 + (target - 149) * smooth
+        return cubic((lower + upper) / 2, root.y, control.first.y, control.second.y, end.y)
+    }
+
+    static func cubic(_ t: CGFloat, _ a: CGFloat, _ b: CGFloat, _ c: CGFloat, _ d: CGFloat) -> CGFloat {
+        // Split into typed terms: one 15-operator expression with integer
+        // literals is slow for the type checker.
+        let u: CGFloat = 1 - t
+        let first: CGFloat = u * u * u * a
+        let second: CGFloat = 3 * u * u * t * b
+        let third: CGFloat = 3 * u * t * t * c
+        let fourth: CGFloat = t * t * t * d
+        return first + second + third + fourth
+    }
+
+    static func nodeX(dayIndex: Int, dayCount: Int) -> CGFloat {
+        let progress: CGFloat = dayCount <= 1 ? 0.65 : CGFloat(dayIndex) / CGFloat(dayCount - 1)
+        return firstNodeX + progress * (lastNodeX - firstNodeX)
+    }
+
+    static func node(dayIndex: Int, dayCount: Int, laneIndex: Int, laneY: CGFloat, day: PortraitDay) -> ShareCardTreeModel.Node {
+        let progress: CGFloat = dayCount <= 1 ? 0.65 : CGFloat(dayIndex) / CGFloat(dayCount - 1)
+        let x = nodeX(dayIndex: dayIndex, dayCount: dayCount)
+        let direction: CGFloat = laneIndex.isMultiple(of: 2) ? -1 : 1
+        let wave: CGFloat = sin(progress * CGFloat.pi) * bend * direction
+        let center = CGPoint(x: x, y: laneY + wave)
+        let originX = max(root.x, x - twigReach)
+        let origin = CGPoint(x: originX, y: interpolatedY(x: originX, laneY: laneY))
+        let radius: CGFloat = day.edits > 0 ? min(12, 3.5 + sqrt(CGFloat(day.edits)) * 0.82) : 3.5
+        return ShareCardTreeModel.Node(center: center, origin: origin, radius: radius,
+                                       hasEdits: day.edits > 0, hasSessions: day.sessions > 0)
     }
 }
 
+/// The tree's lanes and nodes, laid out once per summary.
+private struct ShareCardTreeModel: Equatable {
+    struct Node: Equatable {
+        let center: CGPoint
+        let origin: CGPoint
+        let radius: CGFloat
+        let hasEdits: Bool
+        let hasSessions: Bool
+    }
+
+    struct Lane: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let caption: String
+        let color: Color
+        let y: CGFloat
+        let nodes: [Node]
+    }
+
+    struct DateTick: Identifiable, Equatable {
+        let id: Int
+        let x: CGFloat
+        let text: String
+    }
+
+    let lanes: [Lane]
+    let agentCount: Int
+    let dateTicks: [DateTick]
+    let dayCaption: String
+
+    init(summary: PortraitSummary, sources: [AgentSource]) {
+        let shown = Array(summary.agents.prefix(ShareCardTreeGeometry.maximumLanes))
+        var activeDays = Set<DayKey>()
+        for agent in summary.agents {
+            for day in agent.days { activeDays.insert(day.day) }
+        }
+        let allDays = activeDays.sorted()
+        let visible = Array(allDays.suffix(ShareCardTreeGeometry.maximumDays))
+        var position: [DayKey: Int] = [:]
+        for (index, day) in visible.enumerated() { position[day] = index }
+
+        var lanes: [Lane] = []
+        for (index, agent) in shown.enumerated() {
+            let y = ShareCardTreeGeometry.laneY(index, count: shown.count)
+            var nodes: [Node] = []
+            for day in agent.days {
+                guard let dayIndex = position[day.day] else { continue }
+                nodes.append(ShareCardTreeGeometry.node(dayIndex: dayIndex, dayCount: visible.count,
+                                                        laneIndex: index, laneY: y, day: day))
+            }
+            lanes.append(Lane(id: agent.sourceID, name: agent.name, caption: Self.caption(agent),
+                              color: ProfileColor.fixed(agent.sourceID, sources: sources, dark: true), y: y, nodes: nodes))
+        }
+        self.lanes = lanes
+        agentCount = summary.agents.count
+        dateTicks = Self.dateTicks(visible, calendar: summary.calendar)
+        dayCaption = Self.dayCaption(visible: visible.count, total: allDays.count)
+    }
+
+    private static func caption(_ agent: PortraitAgent) -> String {
+        var edits = 0
+        var sessions = 0
+        for day in agent.days {
+            edits += day.edits
+            sessions += day.sessions
+        }
+        if edits > 0 { return "\(edits.formatted(.number)) \(edits == 1 ? "edit" : "edits")" }
+        return "\(sessions.formatted(.number)) \(sessions == 1 ? "session" : "sessions")"
+    }
+
+    private static func dateTicks(_ visible: [DayKey], calendar: ActivityCalendar) -> [DateTick] {
+        guard let first = visible.first, let last = visible.last else { return [] }
+        let firstX = ShareCardTreeGeometry.nodeX(dayIndex: 0, dayCount: visible.count)
+        let firstTick = DateTick(id: first.index, x: firstX, text: DayFormat.short(first, calendar: calendar))
+        guard visible.count > 1 else { return [firstTick] }
+        let lastX = ShareCardTreeGeometry.nodeX(dayIndex: visible.count - 1, dayCount: visible.count)
+        return [firstTick, DateTick(id: last.index, x: lastX, text: DayFormat.short(last, calendar: calendar))]
+    }
+
+    private static func dayCaption(visible: Int, total: Int) -> String {
+        if visible < total { return "Last \(visible) days with activity" }
+        return "\(visible) \(visible == 1 ? "day" : "days") with activity"
+    }
+}
+
+private struct ShareCardTree: View {
+    let model: ShareCardTreeModel
+
+    var body: some View {
+        Group {
+            if model.lanes.isEmpty {
+                ShareCardEmptyTree()
+            } else {
+                content
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var content: some View {
+        VStack(spacing: 0) {
+            ShareCardTreePlot(model: model)
+                .frame(height: ShareCardTreeGeometry.canvasHeight)
+            ShareCardTreeLegend(caption: model.dayCaption)
+                .padding(.top, 10)
+            if model.agentCount > model.lanes.count {
+                Text("Showing \(model.lanes.count) of \(model.agentCount) agent branches · totals include all agents")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Palette.Share.faintText)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.top, 6)
+            }
+        }
+    }
+}
+
+private struct ShareCardTreePlot: View {
+    let model: ShareCardTreeModel
+
+    var body: some View {
+        let model = self.model
+        ZStack(alignment: .topLeading) {
+            Canvas { context, _ in
+                ShareCardTreePlot.drawTree(model, in: &context)
+            }
+            ForEach(model.lanes) { (lane: ShareCardTreeModel.Lane) in
+                ShareCardLaneLabel(lane: lane)
+                    .offset(x: ShareCardTreeGeometry.labelX, y: lane.y - 8)
+            }
+            ForEach(model.dateTicks) { (tick: ShareCardTreeModel.DateTick) in
+                Text(tick.text)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Theme.Palette.Share.faintText)
+                    .fixedSize()
+                    .position(x: tick.x, y: ShareCardTreeGeometry.dateLabelY)
+            }
+        }
+    }
+
+    private static func drawTree(_ model: ShareCardTreeModel, in context: inout GraphicsContext) {
+        drawGuides(in: &context)
+        for lane in model.lanes {
+            drawBranch(lane, in: &context)
+        }
+        for lane in model.lanes {
+            for node in lane.nodes { drawNode(node, color: lane.color, in: &context) }
+        }
+        drawRoot(in: &context)
+    }
+
+    /// Quiet guides reveal chronology without turning the card into a dashboard.
+    private static func drawGuides(in context: inout GraphicsContext) {
+        let first = ShareCardTreeGeometry.firstNodeX
+        let step = (ShareCardTreeGeometry.lastNodeX - first) / 4
+        for index in 0..<5 {
+            let x = first + CGFloat(index) * step
+            var guide = Path()
+            guide.move(to: CGPoint(x: x, y: ShareCardTreeGeometry.guideTop))
+            guide.addLine(to: CGPoint(x: x, y: ShareCardTreeGeometry.guideBottom))
+            context.stroke(guide, with: .color(ShareCardInk.guide), style: StrokeStyle(lineWidth: 1, dash: [2, 7]))
+        }
+    }
+
+    private static func drawBranch(_ lane: ShareCardTreeModel.Lane, in context: inout GraphicsContext) {
+        let root = ShareCardTreeGeometry.root
+        let end = CGPoint(x: ShareCardTreeGeometry.terminalX, y: lane.y)
+        let branch = ShareCardTreeGeometry.branchPath(laneY: lane.y)
+        context.stroke(branch, with: .color(lane.color.opacity(0.045)),
+                       style: StrokeStyle(lineWidth: 17, lineCap: .round, lineJoin: .round))
+        let gradient = Gradient(colors: [lane.color.opacity(0.08), lane.color.opacity(0.65)])
+        context.stroke(branch, with: .linearGradient(gradient, startPoint: root, endPoint: end),
+                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+        let terminus = CGRect(x: end.x - 2.5, y: end.y - 2.5, width: 5, height: 5)
+        context.fill(Path(ellipseIn: terminus), with: .color(lane.color.opacity(0.7)))
+
+        for node in lane.nodes {
+            var twig = Path()
+            twig.move(to: node.origin)
+            twig.addQuadCurve(to: node.center, control: CGPoint(x: node.center.x - 11, y: node.origin.y))
+            context.stroke(twig, with: .color(lane.color.opacity(0.37)), style: StrokeStyle(lineWidth: 1, lineCap: .round))
+        }
+    }
+
+    /// Filled nodes are days with edits (size = edits); a hollow ring is a
+    /// sessions-only day; the white center marks a day a session started.
+    private static func drawNode(_ node: ShareCardTreeModel.Node, color: Color, in context: inout GraphicsContext) {
+        let radius = node.radius
+        let halo = CGRect(x: node.center.x - radius * 2, y: node.center.y - radius * 2, width: radius * 4, height: radius * 4)
+        context.fill(Path(ellipseIn: halo), with: .color(color.opacity(0.055)))
+        let circle = Path(ellipseIn: CGRect(x: node.center.x - radius, y: node.center.y - radius,
+                                            width: radius * 2, height: radius * 2))
+        guard node.hasEdits else {
+            context.fill(circle, with: .color(color.opacity(0.14)))
+            context.stroke(circle, with: .color(color.opacity(0.85)), lineWidth: 1.2)
+            return
+        }
+        context.fill(circle, with: .color(color.opacity(0.84)))
+        context.stroke(circle, with: .color(ShareCardInk.nodeRing), lineWidth: 0.7)
+        if node.hasSessions {
+            let center = CGRect(x: node.center.x - 1.4, y: node.center.y - 1.4, width: 2.8, height: 2.8)
+            context.fill(Path(ellipseIn: center), with: .color(ShareCardInk.sessionDot))
+        }
+    }
+
+    private static func drawRoot(in context: inout GraphicsContext) {
+        let root = ShareCardTreeGeometry.root
+        context.fill(Path(ellipseIn: CGRect(x: root.x - 14, y: root.y - 14, width: 28, height: 28)),
+                     with: .color(ShareCardInk.rootHalo))
+        context.fill(Path(ellipseIn: CGRect(x: root.x - 5, y: root.y - 5, width: 10, height: 10)),
+                     with: .color(Theme.Palette.Share.brand))
+    }
+}
+
+private struct ShareCardLaneLabel: View {
+    let lane: ShareCardTreeModel.Lane
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Circle().fill(lane.color).frame(width: 6, height: 6)
+                Text(lane.name)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(ShareCardInk.laneName)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Text(lane.caption)
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(Theme.Palette.Share.faintText)
+                .lineLimit(1)
+                .padding(.leading, 12)
+        }
+        .frame(width: ShareCardTreeGeometry.labelWidth, alignment: .leading)
+    }
+}
+
+private struct ShareCardTreeLegend: View {
+    let caption: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle().fill(Theme.Palette.Share.faintText).frame(width: 4, height: 4)
+            Circle().fill(Theme.Palette.Share.secondaryText).frame(width: 7, height: 7)
+            Text("Node size = recorded edits")
+            Circle()
+                .strokeBorder(Theme.Palette.Share.secondaryText, lineWidth: 1)
+                .frame(width: 7, height: 7)
+                .padding(.leading, 6)
+            Text("Sessions only")
+            Spacer(minLength: 8)
+            Text(caption)
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(Theme.Palette.Share.faintText)
+        .lineLimit(1)
+        .padding(.leading, 18)
+        .padding(.trailing, 3)
+    }
+}
+
+private struct ShareCardEmptyTree: View {
+    var body: some View {
+        VStack(spacing: 17) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 72, weight: .ultraLight))
+                .foregroundStyle(Theme.Palette.Share.hairline)
+            Text("Every trail starts somewhere.")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.Palette.Share.secondaryText)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Metrics and footnote
+
+private struct ShareCardMetrics: View {
+    let summary: PortraitSummary
+
+    private var streakUnit: String { summary.longestStreak == 1 ? "day" : "days" }
+    private var agentLabel: String { summary.agents.count == 1 ? "Agent" : "Agents" }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            ShareCardMetric(value: summary.edits, unit: nil, label: "Recorded edits")
+            ShareCardMetric(value: summary.activeDays, unit: nil, label: "Active days")
+            ShareCardMetric(value: summary.longestStreak, unit: streakUnit, label: "Longest streak")
+            ShareCardMetric(value: summary.agents.count, unit: nil, label: agentLabel)
+        }
+        .padding(.top, 22)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(LinearGradient(colors: ShareCardInk.divider, startPoint: .leading, endPoint: .trailing))
+                .frame(height: 1)
+        }
+    }
+}
+
+/// A white numeral over a 2pt indigo-to-violet trail underline. No profile hues.
+private struct ShareCardMetric: View {
+    let value: Int
+    let unit: String?
+    let label: String
+
+    private var numeral: Text {
+        let number = Text(value.formatted(.number))
+            .font(.system(size: 41, weight: .medium, design: .rounded))
+            .foregroundStyle(Theme.Palette.Share.numeral)
+        guard let unit else { return number }
+        let suffix = Text(" " + unit)
+            .font(.system(size: 17, weight: .medium, design: .rounded))
+            .foregroundStyle(Theme.Palette.Share.secondaryText)
+        return number + suffix
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            numeral
+                .tracking(-1.5)
+                .monospacedDigit()
+                .lineLimit(1)
+                .padding(.bottom, 9)
+                .frame(minWidth: 40, alignment: .leading)
+                .overlay(alignment: .bottomLeading) { underline }
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.Palette.Share.secondaryText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var underline: some View {
+        Capsule()
+            .fill(LinearGradient(colors: Theme.Palette.Share.underline, startPoint: .leading, endPoint: .trailing))
+            .frame(height: 2)
+    }
+}
+
+private struct ShareCardFootnote: View {
+    let namesShown: Bool
+
+    var body: some View {
+        HStack(alignment: .bottom) {
+            Text("From local session records · Edits exclude shell and external changes")
+            Spacer(minLength: 10)
+            Label(namesShown ? "Names included" : "Names hidden", systemImage: namesShown ? "eye" : "eye.slash")
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(Theme.Palette.Share.faintText)
+        .padding(.top, 24)
+    }
+}
+
+// MARK: - Export
+
 @MainActor
 enum ActivityShareExporter {
-    /// Exports only to a location selected by the user. No upload or assistant access.
-    static func export(projects: [ProjectSummary], sources: [AgentSource], anonymize: Bool = true, sampleData: Bool = false) {
+    /// Exports only to a location the user picks. No upload or assistant access.
+    static func export(summary: PortraitSummary, sources: [AgentSource], sampleData: Bool) {
         let panel = NSSavePanel()
         panel.title = "Export activity portrait"
         panel.nameFieldStringValue = "Agent-Trail-activity.png"
         panel.allowedContentTypes = [.png]
         panel.canCreateDirectories = true
-        panel.message = anonymize
-            ? "Project and profile names are hidden. Your portrait contains activity totals and dates."
-            : "Project and profile names are included. Folder paths are never included."
+        panel.message = summary.namesShown
+            ? "Project and profile names are included. Your portrait contains activity totals, dates and day patterns. Folder paths are never included."
+            : "Project and profile names are hidden. Your portrait contains activity totals, dates and day patterns. Folder paths are never included."
         panel.prompt = "Export PNG"
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
-            let renderer = ImageRenderer(content: ActivityShareCard(projects: projects, sources: sources,
-                                                                    anonymize: anonymize, sampleData: sampleData))
+            let card = ActivityShareCard(summary: summary, sources: sources, sampleData: sampleData)
+            let renderer = ImageRenderer(content: card)
             renderer.scale = 2
             renderer.isOpaque = true
             guard let image = renderer.cgImage,

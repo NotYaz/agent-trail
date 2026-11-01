@@ -1,16 +1,24 @@
 import AppKit
+import Combine
 import SwiftUI
 import AgentTrailCore
 
 @main
 enum AgentTrailApp {
+    private static let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo"]
+    private static let usage = """
+        Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo OUTPUT.png [--light] [--height N]
+          --light     render the light appearance (panels only; the share card is always dark)
+          --height N  panel render height in points, 200-4000 (default 680; the width stays 600)
+
+        """
+
     @MainActor static func main() {
         let application = NSApplication.shared
-        let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo"]
         if let index = CommandLine.arguments.firstIndex(where: { renderFlags.contains($0) }) {
             application.setActivationPolicy(.prohibited)
             guard index + 1 < CommandLine.arguments.count else {
-                fputs("Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo OUTPUT.png [--light]\n", stderr)
+                fputs(usage, stderr)
                 exit(2)
             }
             do {
@@ -24,6 +32,13 @@ enum AgentTrailApp {
         let delegate = AgentTrailApplicationDelegate()
         application.delegate = delegate
         application.setActivationPolicy(.accessory)
+        installMainMenu(application)
+        withExtendedLifetime(delegate) {
+            application.run()
+        }
+    }
+
+    @MainActor private static func installMainMenu(_ application: NSApplication) {
         let menu = NSMenu()
         let appMenu = NSMenu()
         let appItem = NSMenuItem()
@@ -39,28 +54,33 @@ enum AgentTrailApp {
         windowMenu.addItem(NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
         application.mainMenu = menu
         application.windowsMenu = windowMenu
-        withExtendedLifetime(delegate) {
-            application.run()
-        }
     }
 
+    /// Renders are deterministic: the clock is pinned, continuous effects stop
+    /// and reveals jump to their final state.
     @MainActor private static func renderDemo(to output: URL, kind: String) throws {
-        let store = AppStore(demoMode: true)
+        let store = AppStore(demoMode: true, now: DemoData.referenceDate())
         if kind == "--render-share-demo" {
-            let renderer = ImageRenderer(content: ActivityShareCard(projects: store.projects, sources: store.sources, sampleData: true))
+            let summary = store.portrait(projectPath: nil, period: .month, showNames: false)
+            let card = ActivityShareCard(summary: summary, sources: store.sources, sampleData: true)
+                .environment(\.rendersStill, true)
+            let renderer = ImageRenderer(content: card)
             renderer.scale = 2
             renderer.isOpaque = true
             guard let image = renderer.cgImage,
                   let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
-            try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try png.write(to: output, options: .atomic)
+            try write(png, to: output)
             return
         }
-        // Keep the former Live render flag as an alias for the combined view.
+        // The former Live render flag stays an alias for Projects, which carries live status.
         store.panelSection = kind == "--render-growth-demo" ? .growth : .projects
-        let view = NSHostingView(rootView: AgentTrailShell(store: store, animatesCharts: false))
+        let height = renderHeight()
+        let root = AgentTrailShell(store: store, animatesCharts: false, height: height)
+            .environment(\.rendersStill, true)
+            .environment(\.referenceNow, store.now)
+        let view = NSHostingView(rootView: root)
         view.appearance = NSAppearance(named: CommandLine.arguments.contains("--light") ? .aqua : .darkAqua)
-        view.frame = NSRect(x: 0, y: 0, width: 600, height: 680)
+        view.frame = NSRect(x: 0, y: 0, width: AgentTrailShell.panelWidth, height: height)
         view.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
@@ -68,43 +88,71 @@ enum AgentTrailApp {
         }
         view.cacheDisplay(in: view.bounds, to: bitmap)
         guard let png = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+        try write(png, to: output)
+    }
+
+    /// `--height N` for panel renders. A missing or out-of-range value is a usage error.
+    @MainActor private static func renderHeight() -> CGFloat {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--height") else { return AgentTrailShell.panelHeight }
+        guard index + 1 < arguments.count, let value = Double(arguments[index + 1]), value >= 200, value <= 4000 else {
+            fputs(usage, stderr)
+            exit(2)
+        }
+        return CGFloat(value.rounded())
+    }
+
+    private static func write(_ png: Data, to output: URL) throws {
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         try png.write(to: output, options: .atomic)
     }
 }
 
+// MARK: - Application delegate
+
 @MainActor
-private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelegate {
+private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var store: AppStore?
     private var settingsWindow: NSWindow?
+    private var attentionObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let store = AppStore()
         self.store = store
         store.showProfiles = { [weak self] in self?.showProfileSettings() }
-        store.showActivity = { [weak self] in self?.showActivityGarden() }
         store.showPanel = { [weak self] in self?.showPanel() }
 
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 600, height: 680)
+        popover.contentSize = NSSize(width: AgentTrailShell.panelWidth, height: AgentTrailShell.panelHeight)
         popover.contentViewController = NSHostingController(rootView: AgentTrailShell(store: store))
+        popover.delegate = self
         self.popover = popover
 
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted",
-                                   accessibilityDescription: "Agent Trail")
-            button.image?.isTemplate = true
+            button.image = Self.statusImage(needsInput: false)
             button.toolTip = "Agent Trail"
             button.setAccessibilityLabel("Agent Trail")
             button.target = self
             button.action = #selector(togglePanel(_:))
         }
         self.statusItem = statusItem
+
+        // Created after the status item, because the first value arrives at once.
+        attentionObserver = store.$liveSummary
+            .map(\.waiting)
+            .removeDuplicates()
+            .sink { [weak self] waiting in
+                // AppStore is main-actor isolated, so every value arrives on the main thread.
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.updateStatusButton(waiting: waiting)
+                }
+            }
 
         DispatchQueue.main.async { [weak self] in self?.showPanel() }
     }
@@ -115,6 +163,15 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    // Continuous effects (pulses, live timelines) stop while the popover is closed.
+    func popoverDidShow(_ notification: Notification) {
+        store?.isPanelVisible = true
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        store?.isPanelVisible = false
+    }
 
     @objc private func togglePanel(_ sender: Any?) {
         guard let popover else { return }
@@ -132,6 +189,35 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
         popover.contentViewController?.view.window?.makeKey()
+    }
+
+    /// While any session needs input the glyph switches to its filled variant
+    /// and turns amber, so the state never rests on color alone; the
+    /// accessibility label and tooltip say it in words.
+    private func updateStatusButton(waiting: Int) {
+        guard let button = statusItem?.button else { return }
+        button.image = Self.statusImage(needsInput: waiting > 0)
+        if waiting > 0 {
+            let label = waiting == 1 ? "Agent Trail, 1 session needs input" : "Agent Trail, \(waiting) sessions need input"
+            button.contentTintColor = Theme.Palette.needsInputNSColor
+            button.setAccessibilityLabel(label)
+            button.toolTip = label
+        } else {
+            button.contentTintColor = nil
+            button.setAccessibilityLabel("Agent Trail")
+            button.toolTip = "Agent Trail"
+        }
+    }
+
+    /// Template images, so the menu bar adapts them to light and dark bars.
+    /// The plain glyph backs up the filled one should a system lack it.
+    private static func statusImage(needsInput: Bool) -> NSImage? {
+        let plain = "point.3.connected.trianglepath.dotted"
+        let name = needsInput ? "point.3.filled.connected.trianglepath.dotted" : plain
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Agent Trail")
+            ?? NSImage(systemSymbolName: plain, accessibilityDescription: "Agent Trail")
+        image?.isTemplate = true
+        return image
     }
 
     private func showProfileSettings() {
@@ -152,807 +238,396 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
     }
-
-    private func showActivityGarden() {
-        guard let store else { return }
-        store.panelSection = .growth
-        showPanel()
-    }
 }
 
-/// All primary views share one stable floating panel and retain their selection.
-private struct AgentTrailShell: View {
-    @ObservedObject var store: AppStore
-    var animatesCharts = true
+// MARK: - Shell
+
+/// The floating panel: a 44pt nav bar over two tabs. Projects stays mounted so
+/// its search and filters survive a tab switch; Growth mounts only while it is
+/// selected and keeps its selection in AppStore.
+struct AgentTrailShell: View {
+    static let panelWidth: CGFloat = 600
+    static let panelHeight: CGFloat = 680
+
+    @ObservedObject private var store: AppStore
+    private let animatesCharts: Bool
+    private let height: CGFloat
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.rendersStill) private var rendersStill
     @Namespace private var navigation
+    /// Bumped by ⌘F; the Projects panel focuses its search field when it changes.
+    @State private var focusSearch = 0
+
+    /// `height` exists for `--height` renders; the live popover is always 680pt.
+    init(store: AppStore, animatesCharts: Bool = true, height: CGFloat = AgentTrailShell.panelHeight) {
+        _store = ObservedObject(wrappedValue: store)
+        self.animatesCharts = animatesCharts
+        self.height = height
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             navigationBar
-            Divider()
-            ZStack {
-                section(.projects) { AgentTrailPanel(store: store, isActive: store.panelSection == .projects) }
-                section(.growth) { ActivityGardenView(store: store, compact: true, animatesCharts: animatesCharts) }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
+            Theme.Palette.hairline.frame(height: 1)
+            sections
         }
-        .frame(width: 600, height: 680)
-        .background(.regularMaterial)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: store.panelSection)
+        .frame(width: AgentTrailShell.panelWidth, height: height)
+        .panelBackground(opaque: !animatesCharts)
+        .background { shortcuts }
+        .animation(tabAnimation, value: store.panelSection)
     }
 
-    private var workingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.workingCount ?? 0) } }
-    private var waitingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.waitingCount ?? 0) } }
+    private var isStill: Bool { rendersStill || !animatesCharts }
 
-    private var navigationBar: some View {
-        HStack(spacing: 5) {
-            ForEach(PanelSection.allCases, id: \.self) { section in
-                navigationButton(section)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.tint)
-                .help("Agent Trail")
-        }
-        .padding(.horizontal, 16).padding(.vertical, 9)
+    private var tabAnimation: Animation? {
+        Theme.Motion.animation(Theme.Motion.tab, reduceMotion: reduceMotion, still: isStill)
     }
 
-    private func navigationButton(_ section: PanelSection) -> some View {
-        let selected = store.panelSection == section
-        return Button { store.panelSection = section } label: {
-            HStack(spacing: 6) {
-                Image(systemName: section.symbol)
-                Text(section.rawValue)
-                if section == .projects && (waitingCount > 0 || workingCount > 0) {
-                    Text(String(waitingCount > 0 ? waitingCount : workingCount))
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background((waitingCount > 0 ? Color.orange : Color.green).opacity(0.14), in: Capsule())
-                        .foregroundStyle(waitingCount > 0 ? Color.orange : Color.green)
-                        .help(waitingCount > 0 ? "\(waitingCount) sessions need input" : "\(workingCount) sessions reported working")
-                }
+    // MARK: Tabs
+
+    /// Toasts are a bottom safe-area inset, so both tabs' scroll views can
+    /// scroll their last row clear of a toast that waits to be dismissed.
+    private var sections: some View {
+        ZStack {
+            projectsSection
+            if store.panelSection == .growth {
+                GrowthView(store: store, animatesCharts: animatesCharts)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(growthTransition)
             }
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(selected ? Color.primary : Color.secondary)
-            .padding(.horizontal, 15).padding(.vertical, 9)
-            .background {
-                if selected {
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(.primary.opacity(0.07))
-                        .matchedGeometryEffect(id: "selection", in: navigation)
-                }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 9))
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(section.rawValue)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        .safeAreaInset(edge: .bottom, spacing: 0) { toasts }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 
-    private func section<Content: View>(_ section: PanelSection, @ViewBuilder content: () -> Content) -> some View {
-        let selected = store.panelSection == section
-        return content()
+    private var projectsSection: some View {
+        let selected = store.panelSection == .projects
+        return AgentTrailPanel(store: store, isActive: selected, focusSearch: $focusSearch)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .opacity(selected ? 1 : 0)
-            .offset(y: selected || reduceMotion ? 0 : 5)
+            .offset(y: hiddenOffset(selected))
             .allowsHitTesting(selected)
             .disabled(!selected)
             .accessibilityHidden(!selected)
     }
-}
 
-private struct AgentTrailPanel: View {
-    @ObservedObject var store: AppStore
-    var isActive = true
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var search = ""
-    @State private var sharedOnly = false
-    @State private var workingOnly = false
-    @State private var waitingOnly = false
-    @State private var showNotices = false
+    private func hiddenOffset(_ selected: Bool) -> CGFloat {
+        selected || reduceMotion ? 0 : 5
+    }
 
-    private var visibleProjects: [ProjectOverview] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return store.projectOverviews.filter { project in
-            (!sharedOnly || project.isShared) &&
-            ((!workingOnly && !waitingOnly) ||
-             (workingOnly && (project.live?.workingCount ?? 0) > 0) ||
-             (waitingOnly && (project.live?.waitingCount ?? 0) > 0)) &&
-            (query.isEmpty || project.path.localizedCaseInsensitiveContains(query) ||
-             project.sourceIDs.contains { sourceName($0).localizedCaseInsensitiveContains(query) } ||
-             (project.live?.sessions.contains { $0.workspacePath.localizedCaseInsensitiveContains(query) } ?? false) ||
-             (store.location(for: project.path)?.previousPaths.contains { $0.localizedCaseInsensitiveContains(query) } ?? false) ||
-             (project.history?.activities.contains {
-                 ($0.workspacePath ?? "").localizedCaseInsensitiveContains(query)
-                     || ($0.latestEditWorkspacePath ?? "").localizedCaseInsensitiveContains(query)
-             } ?? false))
+    private var growthTransition: AnyTransition {
+        reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .offset(y: 5))
+    }
+
+    // MARK: Navigation bar
+
+    private var navigationBar: some View {
+        HStack(spacing: Theme.Space.xxs) {
+            tabTrack
+            Spacer(minLength: Theme.Space.xs)
+            if store.demoMode && store.panelSection == .projects {
+                demoPill
+            }
+            refreshButton
+            moreMenu
+        }
+        .padding(.horizontal, Theme.Space.gutter)
+        .frame(height: 44)
+    }
+
+    private var tabTrack: some View {
+        HStack(spacing: 2) {
+            ForEach(PanelSection.allCases, id: \.self) { (section: PanelSection) in
+                tabButton(section)
+            }
+        }
+        .padding(2)
+        .background(Theme.Palette.sunken, in: Theme.Radius.shape(Theme.Radius.control))
+    }
+
+    private func tabButton(_ section: PanelSection) -> some View {
+        let selected = store.panelSection == section
+        return Button { select(section) } label: {
+            tabLabel(section, selected: selected)
+        }
+        .buttonStyle(.plain)
+        .help(tabHelp(section))
+        .accessibilityLabel(section.rawValue)
+        .accessibilityValue(section == .projects ? liveAccessibilityValue : "")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func tabLabel(_ section: PanelSection, selected: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: section.symbol)
+                .font(.system(size: 11, weight: .medium))
+            Text(section.rawValue)
+                .font(Theme.Typeface.caption.weight(.medium))
+            if section == .projects {
+                ShellLiveBadge(waiting: store.liveSummary.waiting, working: store.liveSummary.working)
+            }
+        }
+        .foregroundStyle(selected ? Color.primary : Color.secondary)
+        .padding(.horizontal, 12)
+        .frame(height: 28)
+        .background { tabPill(selected) }
+        .contentShape(Theme.Radius.shape(6))
+    }
+
+    @ViewBuilder private func tabPill(_ selected: Bool) -> some View {
+        if selected {
+            Theme.Radius.shape(6)
+                .fill(Theme.Palette.raised)
+                .shadow(color: Theme.Palette.surfaceShadow, radius: 2, x: 0, y: 1)
+                .matchedGeometryEffect(id: "tab", in: navigation)
         }
     }
 
-    private var sharedCount: Int { store.projectOverviews.filter(\.isShared).count }
-    private var workingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.workingCount ?? 0) } }
-    private var waitingCount: Int { store.projectOverviews.reduce(0) { $0 + ($1.live?.waitingCount ?? 0) } }
-    private var combinedNotices: [String] { Array(Set(store.notices + store.liveNotices)).sorted() }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            searchAndFilters
-
-            if let error = store.errorMessage, !error.isEmpty {
-                HStack(alignment: .top, spacing: 8) {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Button { store.errorMessage = nil } label: {
-                        Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Dismiss")
-                    .accessibilityLabel("Dismiss message")
-                }
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 10)
-            }
-
-            if let info = store.infoMessage, !info.isEmpty {
-                Label(info, systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 10)
-                    .transition(.opacity)
-                    .task(id: info) {
-                        try? await Task.sleep(for: .seconds(6))
-                        if store.infoMessage == info { store.infoMessage = nil }
-                    }
-            }
-
-            if store.projectOverviews.isEmpty && store.isScanning {
-                loadingState
-            } else if visibleProjects.isEmpty {
-                emptyState
-            } else {
-                projectList
-            }
-
-            if !combinedNotices.isEmpty { notices }
-            footer
+    private func tabHelp(_ section: PanelSection) -> String {
+        switch section {
+        case .projects: return "Projects (⌘1)"
+        case .growth: return "Growth (⌘2)"
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(.system(size: 23, weight: .medium))
-                    .foregroundStyle(.tint)
-                    .frame(width: 42, height: 42)
-                    .background(.tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Agent Trail")
-                        .font(.system(size: 19, weight: .semibold))
-                    Text(store.demoMode ? "Sample data · no local history" : "\(store.sources.count) profiles · \(store.runningSourceIDs.count) apps open")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
+    /// Always describes needs input and working separately, never as one number.
+    private var liveAccessibilityValue: String {
+        let live = store.liveSummary
+        if store.lastLiveScan == nil { return "Checking live status" }
+        guard live.reportingProjects > 0 else { return "No live reports" }
+        let waiting = live.waiting == 1 ? "1 needs input" : "\(live.waiting) need input"
+        return "\(waiting), \(live.working) working"
+    }
+
+    /// Projects has no header of its own, so the nav bar says the data is fake;
+    /// Growth shows the same pill in its title.
+    private var demoPill: some View {
+        Pill(text: "Demo")
+            .help("Sample data, not your local history")
+            .padding(.trailing, Theme.Space.xxs)
+    }
+
+    private var refreshButton: some View {
+        Button { store.refresh() } label: {
+            ZStack {
                 if store.isScanning {
-                    ProgressView().controlSize(.small).padding(.top, 9)
-                        .help("Reading local activity records")
-                }
-            }
-
-            HStack(spacing: 6) {
-                Text("\(store.projectOverviews.count)")
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.primary)
-                Text(store.projectOverviews.count == 1 ? "project" : "projects")
-                Text("·").padding(.horizontal, 3)
-                Text("\(sharedCount)")
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.primary)
-                Text("shared")
-                Spacer()
-                if store.lastLiveScan == nil {
-                    Text("Checking live status…")
-                } else if store.liveSessions.isEmpty {
-                    Text("No live sessions reported")
+                    ProgressView().controlSize(.mini)
                 } else {
-                    if waitingCount > 0 {
-                        HStack(spacing: 4) {
-                            Image(systemName: "hand.raised.fill")
-                                .font(.system(size: 10))
-                            Text(waitingCount.formatted())
-                                .fontWeight(.semibold).monospacedDigit()
-                                .contentTransition(.numericText())
-                            Text("needs input")
-                        }
-                        .foregroundStyle(.orange)
-                        .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: waitingCount)
-                        .help("An assistant reported a request needing attention. Check the corresponding assistant to respond.")
-                        Text("·").foregroundStyle(.tertiary)
-                    }
-                    HStack(spacing: 5) {
-                        Circle().fill(workingCount > 0 ? .green : .secondary).frame(width: 5, height: 5)
-                        Text(workingCount.formatted())
-                            .fontWeight(.semibold).monospacedDigit()
-                            .contentTransition(.numericText())
-                        Text("working now")
-                    }
-                    .foregroundStyle(workingCount > 0 ? Color.green : Color.secondary)
-                    .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: workingCount)
-                    .help("Active turns and reported busy sessions, checked every 3 seconds. Expand a project's live details for workspace and report age.")
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .medium))
                 }
             }
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
+            .frame(width: 26, height: 26)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 20)
-        .padding(.bottom, 15)
+        .buttonStyle(ShellIconButtonStyle())
+        .foregroundStyle(.secondary)
+        .help(refreshHelp)
+        .accessibilityLabel(store.isScanning ? "Refreshing local activity" : "Refresh")
     }
 
-    private var searchAndFilters: some View {
-        VStack(spacing: 13) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.tertiary)
-                TextField("Find a project or profile", text: $search)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .accessibilityLabel("Find a project or profile")
-                if !search.isEmpty {
-                    Button { search = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear search")
-                }
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 10)
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.65), in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(.primary.opacity(0.07), lineWidth: 1))
-
-            HStack {
-                Text("PROJECTS")
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(1.1)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Toggle(isOn: $waitingOnly) {
-                    Label("Needs input", systemImage: "hand.raised")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .toggleStyle(.button)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.orange)
-                .help("Show projects with a reported request for user attention. Select both live filters to include either state.")
-                Toggle(isOn: $workingOnly) {
-                    Label("Working now", systemImage: "dot.radiowaves.left.and.right")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .toggleStyle(.button)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Show projects with at least one reported working session")
-                Toggle(isOn: $sharedOnly) {
-                    Label("Shared only", systemImage: "square.on.square")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .toggleStyle(.button)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Show projects worked on by more than one assistant profile")
-            }
-        }
-        .padding(.horizontal, 18)
-        .padding(.bottom, 12)
+    private var refreshHelp: String {
+        if store.isScanning { return store.scanProgress ?? "Reading local activity records" }
+        if let lastScan = store.lastScan { return "Updated \(ShellTime.string(lastScan))" }
+        return "Read the latest local activity"
     }
 
-    private var projectList: some View {
-        ScrollView {
-            LazyVStack(spacing: 10) {
-                ForEach(visibleProjects) { project in
-                    ProjectCard(project: project, sources: store.sources,
-                                runningSourceIDs: store.runningSourceIDs,
-                                isScanning: store.isScanning,
-                                lastLiveScan: store.lastLiveScan, isActive: isActive, demoMode: store.demoMode,
-                                location: store.location(for: project.path),
-                                missingFolder: store.missingFolder(for: project.path),
-                                isUnavailable: store.unavailableProjects.contains(project.path),
-                                isLinking: store.pendingLocationLink == project.path,
-                                open: store.focus, reveal: { store.reveal(path: project.path) },
-                                copyPath: { store.copyPath($0) },
-                                locate: { store.locateMovedFolder(projectPath: project.path, missing: $0) },
-                                forget: { store.forgetPreviousLocations(of: project.path) },
-                                abbreviate: store.abbreviate)
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 16)
-            .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: visibleProjects.map(\.id))
-        }
-        .scrollIndicators(.automatic)
+    private var updatedTitle: String {
+        guard let lastScan = store.lastScan else { return "Not updated yet" }
+        return "Updated \(ShellTime.string(lastScan))"
     }
 
-    private var loadingState: some View {
-        VStack(spacing: 12) {
-            ProgressView().controlSize(.regular)
-            Text("Finding your projects…")
-                .font(.system(size: 13, weight: .medium))
-            Text("Reading the activity saved by your assistant profiles.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: search.isEmpty ? "folder.badge.questionmark" : "magnifyingglass")
-                .font(.system(size: 31, weight: .light))
-                .foregroundStyle(.tertiary)
-            Text(emptyTitle)
-                .font(.system(size: 14, weight: .semibold))
-            Text(search.isEmpty
-                 ? (waitingOnly || workingOnly ? "Projects appear here when an assistant reports a matching live state. Idle sessions do not establish an outstanding request for input."
-                    : sharedOnly ? "A project appears here when more than one profile works in the same folder."
-                    : "Projects appear when Claude, Codex, or Grok saves a local coding session. Check the profile notices below for details.")
-                 : "Try a different folder name, an earlier location, or an assistant profile.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            if sharedOnly || workingOnly || waitingOnly || !search.isEmpty {
-                Button("Show all projects") { search = ""; sharedOnly = false; workingOnly = false; waitingOnly = false }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .padding(.top, 4)
-            }
-        }
-        .padding(38)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var notices: some View {
-        DisclosureGroup(isExpanded: $showNotices) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 7) {
-                    ForEach(Array(combinedNotices.enumerated()), id: \.offset) { _, notice in
-                        Text(notice)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(.top, 7)
-            }
-            .frame(maxHeight: 100)
+    private var moreMenu: some View {
+        Menu {
+            moreMenuItems
         } label: {
-            Label("\(combinedNotices.count) profile \(combinedNotices.count == 1 ? "notice" : "notices")", systemImage: "info.circle")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 13, weight: .medium))
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        .background(.primary.opacity(0.025))
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .frame(width: 26, height: 26)
+        .help("More")
+        .accessibilityLabel("More")
     }
 
-    private var footer: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: 8) {
-                Button { store.refresh() } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .disabled(store.isScanning)
-                .help("Read the latest local activity")
-                Spacer(minLength: 4)
-                if let progress = store.scanProgress {
-                    Text(progress)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(progress)
-                } else if let lastScan = store.lastScan {
-                    Text(lastScan, style: .time)
-                        .foregroundStyle(.tertiary)
-                        .help("Last refreshed \(lastScan.formatted(date: .abbreviated, time: .standard))")
-                }
-                Menu {
-                    Button("Project growth…") { store.showActivity?() }
-                    Divider()
-                    Button("Profiles…") { store.showProfiles?() }
-                        .disabled(store.demoMode)
-                    Button("Reload profiles") { store.reloadProfiles() }
-                        .disabled(store.demoMode)
-                    Divider()
-                    Link("Project on GitHub", destination: URL(string: "https://github.com/NotYaz/agent-trail")!)
-                    Link("Support development", destination: URL(string: "https://github.com/NotYaz/agent-trail/blob/main/docs/SUPPORT.md")!)
-                    Divider()
-                    Button("Quit Agent Trail", role: .destructive) {
-                        NSApplication.shared.terminate(nil)
-                    }
-                    .keyboardShortcut("q")
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 14))
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("About and quit Agent Trail")
+    @ViewBuilder private var moreMenuItems: some View {
+        Button("Profiles…") { store.showProfiles?() }
+            .disabled(store.demoMode)
+        Button("Reload profiles") { store.reloadProfiles() }
+            .disabled(store.demoMode)
+        Divider()
+        Link("Project on GitHub", destination: ShellLinks.repository)
+        Link("Support development", destination: ShellLinks.support)
+        Divider()
+        Button(updatedTitle) {}
+            .disabled(true)
+        Button("Quit Agent Trail", role: .destructive) {
+            NSApplication.shared.terminate(nil)
+        }
+        .keyboardShortcut("q")
+    }
+
+    // MARK: Toasts
+
+    private var toasts: some View {
+        VStack(spacing: Theme.Space.xs) {
+            if let error = store.errorMessage, !error.isEmpty {
+                Toast(message: error, style: .error) { store.errorMessage = nil }
+                    .transition(toastTransition)
             }
-            .font(.system(size: 11))
-            .padding(.horizontal, 20)
-            .padding(.vertical, 13)
+            if let info = store.infoMessage, !info.isEmpty {
+                Toast(message: info, style: .info, autoDismissAfter: .seconds(6)) { dismissInfo(info) }
+                    .transition(toastTransition)
+            }
         }
+        .padding(.horizontal, Theme.Space.gutter)
+        // No toast, no inset: the scroll views keep their own bottom padding.
+        .padding(.bottom, hasToast ? Theme.Space.s : 0)
+        .animation(toastAnimation, value: store.errorMessage)
+        .animation(toastAnimation, value: store.infoMessage)
     }
 
-    private func sourceName(_ id: String) -> String {
-        store.sources.first { $0.id == id }?.name ?? id
+    private var hasToast: Bool {
+        !(store.errorMessage ?? "").isEmpty || !(store.infoMessage ?? "").isEmpty
     }
 
-    private var emptyTitle: String {
-        if !search.isEmpty { return "No matching projects" }
-        if waitingOnly && workingOnly { return "No matching live projects reported" }
-        if waitingOnly { return "No input requests reported" }
-        if workingOnly { return "No working projects reported" }
-        return sharedOnly ? "No shared projects yet" : "No projects found yet"
+    private var toastAnimation: Animation? {
+        Theme.Motion.animation(Theme.Motion.standard, reduceMotion: reduceMotion, still: isStill)
+    }
+
+    private var toastTransition: AnyTransition {
+        reduceMotion ? AnyTransition.opacity : AnyTransition.move(edge: .bottom).combined(with: .opacity)
+    }
+
+    /// A newer message may have replaced this one while its timer ran.
+    private func dismissInfo(_ info: String) {
+        if store.infoMessage == info { store.infoMessage = nil }
+    }
+
+    // MARK: Shortcuts
+
+    /// Invisible buttons that carry ⌘1, ⌘2, ⌘F and ⌘R while the panel is key.
+    private var shortcuts: some View {
+        ZStack {
+            Button("Show Projects") { select(.projects) }
+                .keyboardShortcut("1", modifiers: .command)
+            Button("Show Growth") { select(.growth) }
+                .keyboardShortcut("2", modifiers: .command)
+            Button("Find a project") { findProject() }
+                .keyboardShortcut("f", modifiers: .command)
+            Button("Refresh") { store.refresh() }
+                .keyboardShortcut("r", modifiers: .command)
+        }
+        .buttonStyle(.plain)
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func select(_ section: PanelSection) {
+        guard store.panelSection != section else { return }
+        store.panelSection = section
+    }
+
+    private func findProject() {
+        select(.projects)
+        focusSearch &+= 1
     }
 }
 
-private struct ProjectCard: View {
-    let project: ProjectOverview
-    let sources: [AgentSource]
-    let runningSourceIDs: Set<String>
-    let isScanning: Bool
-    let lastLiveScan: Date?
-    let isActive: Bool
-    let demoMode: Bool
-    let location: ProjectLocation?
-    let missingFolder: MissingFolder?
-    let isUnavailable: Bool
-    let isLinking: Bool
-    let open: (AgentSource) -> Void
-    let reveal: () -> Void
-    let copyPath: (String) -> Void
-    let locate: (MissingFolder?) -> Void
-    let forget: () -> Void
-    let abbreviate: (String) -> String
-    @State private var confirmForget = false
+// MARK: - Shell helpers
 
-    private var involvedSources: [AgentSource] {
-        sources.filter { project.sourceIDs.contains($0.id) }
+private enum ShellLinks {
+    static let repository = URL(string: "https://github.com/NotYaz/agent-trail")!
+    static let support = URL(string: "https://github.com/NotYaz/agent-trail/blob/main/docs/SUPPORT.md")!
+}
+
+private enum ShellTime {
+    /// Locale-aware hours and minutes, such as "18:28" or "6:28 PM".
+    static func string(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
     }
+}
 
-    private var latestActivity: ProjectActivity? { project.history?.activities.max { $0.latestActivity < $1.latestActivity } }
-    private var activityMatchesEdit: Bool {
-        guard let latestActivity else { return false }
-        return project.history?.latestEdit?.sourceID == latestActivity.sourceID
-    }
+/// The Projects tab badge: an amber hand capsule with the number of sessions
+/// that need input, otherwise a 6pt green dot while any session works. The tab's
+/// accessibility value carries the words, so the badge itself is hidden.
+private struct ShellLiveBadge: View {
+    let waiting: Int
+    let working: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.rendersStill) private var rendersStill
+    @State private var bounce = 0
 
-    private var activityHelp: String {
-        guard let activity = latestActivity else { return "Saved activity has not been indexed yet." }
-        let sourceName = sources.first { $0.id == activity.sourceID }?.name ?? activity.sourceID
-        return "Latest activity · \(sourceName)\nThe most recent saved session activity, which may not include a file change.\nWorkspace: \(activity.workspacePath ?? project.path)\n\(activity.latestActivity.formatted(date: .abbreviated, time: .standard))"
+    init(waiting: Int, working: Int) {
+        self.waiting = waiting
+        self.working = working
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 7) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Text(project.name.isEmpty ? project.path : project.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if project.isShared {
-                        Text("SHARED")
-                            .font(.system(size: 8, weight: .bold))
-                            .tracking(0.6)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(.primary.opacity(0.06), in: Capsule())
-                            .help("More than one assistant profile worked in this project")
-                    }
-                    Spacer(minLength: 0)
-                    Menu {
-                        projectActions
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18, height: 18)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("Project actions")
-                }
-                if isUnavailable {
-                    HStack(spacing: 6) {
-                        HStack(spacing: 6) {
-                            Label("Folder not found", systemImage: "questionmark.folder")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.orange)
-                            Text(abbreviatedPath(project.path))
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("Project folder not found at \(project.path)")
-                        Spacer(minLength: 4)
-                        if canLocateFolder { locateButton(nil) }
-                    }
-                    .help(canLocateFolder
-                          ? "This folder is no longer at \(project.path). If it was moved, locate it so its history follows it."
-                          : "This folder is no longer at \(project.path). Its recorded history is kept here.")
-                } else {
-                    Text(abbreviatedPath(project.path))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(project.path)
-                }
-                if let location, !location.previousLocations.isEmpty {
-                    Label(previousTitle(location), systemImage: "clock.arrow.circlepath")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(previousHelp(location))
-                        .accessibilityLabel("Previously at \(location.previousPaths.joined(separator: ", "))")
-                }
+        content
+            .onChange(of: waiting) { old, new in
+                guard !reduceMotion, !rendersStill, new > old else { return }
+                bounce += 1
             }
+            .accessibilityHidden(true)
+    }
 
-            if let live = project.live {
-                ProjectLiveStatusView(activity: live, sources: sources, lastScan: lastLiveScan,
-                                      isActive: isActive, demoMode: demoMode, focus: open)
-            } else {
-                Text(lastLiveScan == nil ? "Checking live status…" : "No live sessions reported")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .help("A missing live report does not establish that a project is idle.")
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                if let edit = project.history?.latestEdit, let date = edit.latestEdit {
-                    activityLine(title: "Last recorded edit", sourceID: edit.sourceID, date: date, prominent: true)
-                        .help("Confirmed recorded file edits; shell commands and external changes are not attributed. \(date.formatted(date: .abbreviated, time: .standard))")
-                    if let workspace = edit.latestEditWorkspacePath,
-                       let label = WorkspaceLabel.make(workspace: workspace, project: project.path) {
-                        Label(label.title(abbreviate: abbreviate), systemImage: label.symbol)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(label.help(workspace: workspace, project: project.path))
-                    }
-                } else {
-                    HStack(spacing: 5) {
-                        Image(systemName: "pencil.line").font(.system(size: 10))
-                        Text(isScanning ? "Checking edit history…" : project.history == nil ? "Saved history not indexed yet" : "No recorded file edits")
-                            .font(.system(size: 11))
-                    }
-                    .foregroundStyle(.tertiary)
-                    .help("Confirmed recorded file edits; shell commands and external changes are not attributed.")
-                }
-                if !activityMatchesEdit, let activity = latestActivity {
-                    activityLine(title: "Latest activity", sourceID: activity.sourceID,
-                                 date: activity.latestActivity, prominent: false)
-                        .help(activityHelp)
-                }
-                if let missingFolder {
-                    HStack(spacing: 6) {
-                        Label("\(missingFolder.editCount) \(missingFolder.editCount == 1 ? "edit" : "edits") in a folder that no longer exists · \(URL(fileURLWithPath: missingFolder.path).lastPathComponent)",
-                              systemImage: "questionmark.folder")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.orange.opacity(0.85))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 4)
-                        locateButton(missingFolder)
-                    }
-                    .help("\(missingFolder.path)\nIf this folder was moved, choose its new location so these edits join that project. If it was deleted, there is nothing to do.")
-                }
-            }
-
-            HStack(spacing: 7) {
-                ForEach(involvedSources) { source in
-                    if source.bundleIdentifier.isEmpty {
-                        HStack(spacing: 5) {
-                            Circle().fill(sourceColor(source.id)).frame(width: 5, height: 5)
-                            Text(source.name)
-                        }
-                        .font(.system(size: 10, weight: .medium))
-                        .padding(.horizontal, 8).padding(.vertical, 6)
-                        .background(sourceColor(source.id).opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
-                        .help("\(source.name) provides local activity. No desktop app is configured for focus.")
-                    } else {
-                    Button { open(source) } label: {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(runningSourceIDs.contains(source.id) ? sourceColor(source.id) : .clear)
-                                .overlay(Circle().stroke(sourceColor(source.id), lineWidth: 1))
-                                .frame(width: 5, height: 5)
-                            Text(openLabel(source))
-                                .font(.system(size: 10, weight: .medium))
-                                .lineLimit(1)
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 8, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(sourceColor(source.id).opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(sourceColor(source.id).opacity(0.16), lineWidth: 0.5))
-                    }
-                    .buttonStyle(.plain)
-                    .help(runningSourceIDs.contains(source.id)
-                          ? "Focus the running \(source.name) instance"
-                          : "\(source.name) is not currently identified as running. Click to check again.")
-                    .accessibilityLabel("Focus \(source.name) for \(project.name)")
-                    }
-                }
-                Spacer(minLength: 0)
-                if activityMatchesEdit, let activity = latestActivity {
-                    TimelineView(.periodic(from: .now, by: 30)) { context in
-                        Text("Seen \(relativeDate(activity.latestActivity, now: context.date))")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                    .help(activityHelp)
-                }
-            }
-        }
-        .padding(13)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.7), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.primary.opacity(0.055), lineWidth: 1))
-        .contextMenu { projectActions }
-        .alert("Forget earlier locations of “\(project.name)”?", isPresented: $confirmForget) {
-            Button("Forget", role: .destructive) { forget() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Session logs that mention those paths stop counting toward this project. A link still at an earlier path is learned again. Nothing on disk changes.")
+    @ViewBuilder private var content: some View {
+        if waiting > 0 {
+            waitingCapsule
+        } else if working > 0 {
+            Circle()
+                .fill(Theme.Palette.working)
+                .frame(width: 6, height: 6)
+                .help(working == 1 ? "1 session reported working" : "\(working) sessions reported working")
         }
     }
 
-    @ViewBuilder private var projectActions: some View {
-        Button("Reveal in Finder", systemImage: "folder") { reveal() }
-            .disabled(isUnavailable)
-        Button("Copy project path", systemImage: "doc.on.doc") { copyPath(project.path) }
-        if let location, !location.previousLocations.isEmpty {
-            if location.previousLocations.count == 1, let earlier = location.previousPaths.first {
-                Button("Copy earlier path", systemImage: "clock.arrow.circlepath") { copyPath(earlier) }
-            } else {
-                Menu("Copy earlier path") {
-                    ForEach(location.previousPaths, id: \.self) { earlier in
-                        Button(abbreviate(earlier)) { copyPath(earlier) }
-                    }
-                }
-            }
+    private var waitingCapsule: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "hand.raised.fill")
+                .font(.system(size: 9, weight: .bold))
+                .symbolEffect(.bounce, options: .nonRepeating, value: bounce)
+            Text(waiting.formatted())
+                .font(.system(size: 10, weight: .bold, design: .rounded).monospacedDigit())
+                .contentTransition(.numericText(value: Double(waiting)))
         }
-        if canLocateFolder || missingFolder != nil {
-            Divider()
-            Button("Locate moved folder…", systemImage: "folder.badge.questionmark") { locate(canLocateFolder ? nil : missingFolder) }
-                .disabled(demoMode || isLinking)
-        }
-        if let location, !location.previousLocations.isEmpty {
-            Divider()
-            Button("Forget earlier locations…", role: .destructive) { confirmForget = true }
-                .disabled(demoMode)
-        }
+        .foregroundStyle(Color.black.opacity(0.85))
+        .padding(.horizontal, 5)
+        .frame(height: 16)
+        .background(Theme.Palette.needsInput, in: Capsule())
+        .help(waiting == 1 ? "1 session needs input" : "\(waiting) sessions need input")
+    }
+}
+
+/// Nav icon buttons show a sunken backdrop on hover and press instead of a bezel.
+private struct ShellIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        ShellIconButtonBody(configuration: configuration)
+    }
+}
+
+private struct ShellIconButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    @State private var hovered = false
+
+    init(configuration: ButtonStyleConfiguration) {
+        self.configuration = configuration
     }
 
-    /// A vanished project folder can be located only when Agent Trail knew it
-    /// as a checkout; a plain launch folder has no evidence to check against.
-    private var canLocateFolder: Bool { isUnavailable && location != nil }
-
-    @ViewBuilder private func locateButton(_ missing: MissingFolder?) -> some View {
-        if isLinking {
-            HStack(spacing: 4) {
-                ProgressView().controlSize(.mini)
-                Text("Linking folder…").font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-        } else {
-            Button("Locate…") { locate(missing) }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .disabled(demoMode)
-                .help(demoMode ? "Not available with sample data"
-                      : "Choose where this project lives now. Agent Trail checks the folder's Git metadata and links the earlier path to it.")
-                .accessibilityLabel("Locate the moved folder for \(project.name)")
-        }
+    var body: some View {
+        configuration.label
+            .background(backdrop, in: Theme.Radius.shape(Theme.Radius.control))
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .onHover { hovering in hovered = hovering }
     }
 
-    private func previousTitle(_ location: ProjectLocation) -> String {
-        if location.previousLocations.count == 1, let earlier = location.previousPaths.first {
-            return "Previously at · \(abbreviate(earlier))"
-        }
-        return "Previously at · \(location.previousLocations.count) earlier locations"
-    }
-
-    private func previousHelp(_ location: ProjectLocation) -> String {
-        let lines = location.previousLocations.map { earlier -> String in
-            let how: String
-            switch earlier.origin {
-            case .link: how = "a link pointed here"
-            case .move: how = "the folder moved"
-            case .manual: how = "you linked it"
-            }
-            let shadow = earlier.shadowedSince == nil ? "" : " · another folder is there now, so only older records count"
-            return "• \(earlier.path) — \(how), noticed \(earlier.observedAt.formatted(date: .abbreviated, time: .omitted))\(shadow)"
-        }
-        return (["Agent Trail remembers where this folder used to be, so older session logs still count here."] + lines
-                + ["Use the project menu to copy or forget these."]).joined(separator: "\n")
-    }
-
-    private func activityLine(title: String, sourceID: String, date: Date, prominent: Bool) -> some View {
-        HStack(spacing: 5) {
-            Text(title)
-                .foregroundStyle(.secondary)
-                .font(.system(size: 10))
-            Circle().fill(sourceColor(sourceID)).frame(width: 5, height: 5)
-            Text(sources.first { $0.id == sourceID }?.name ?? sourceID)
-                .font(.system(size: 10, weight: prominent ? .semibold : .regular))
-                .foregroundStyle(prominent ? .primary : .secondary)
-                .lineLimit(1)
-            Spacer(minLength: 3)
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                Text(relativeDate(date, now: context.date))
-                    .font(.system(size: 10))
-                    .foregroundStyle(prominent ? .primary : .tertiary)
-                    .lineLimit(1)
-            }
-        }
-    }
-
-    private func sourceColor(_ sourceID: String) -> Color {
-        ProfileColor.color(sourceID, sources: sources)
-    }
-
-    private func abbreviatedPath(_ path: String) -> String {
-        let home = NSHomeDirectory()
-        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
-    }
-
-    private func openLabel(_ source: AgentSource) -> String {
-        switch source.id {
-        case "claude-primary": return "Open Main"
-        case "claude-second": return "Open Second"
-        default: return source.name
-        }
-    }
-
-    private func relativeDate(_ date: Date, now: Date) -> String {
-        if abs(date.timeIntervalSince(now)) < 60 { return "just now" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: now)
+    private var backdrop: Color {
+        hovered || configuration.isPressed ? Theme.Palette.sunken : Color.clear
     }
 }

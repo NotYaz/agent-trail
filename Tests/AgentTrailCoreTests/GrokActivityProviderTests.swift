@@ -384,6 +384,48 @@ final class GrokActivityProviderTests: XCTestCase {
         XCTAssertEqual(byPath[canonicalPath(fixture.project.path)]?.recordedEditCount, 1)
         XCTAssertEqual(forgotten.missingFolders.first?.path, old.path)
     }
+
+    func testMomentsMatchHistoryAndAreNeverDelegated() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        try fixture.write(summary: true, updates: [
+            fixture.call("late", name: "write", file: path, seconds: 20),
+            fixture.finish("late", status: "completed", absolute: path, output: "SearchReplace", seconds: 21),
+            fixture.call("early", name: "search_replace", file: path, seconds: 5),
+            fixture.finish("early", status: "completed", absolute: path, output: "SearchReplace", seconds: 6)
+        ])
+        // A fork repeats the original edit later; only the first date is kept.
+        try fixture.write(summary: true, created: fixture.stamp(100), active: fixture.stamp(130), updates: [
+            fixture.call("early", name: "search_replace", file: path, seconds: 105),
+            fixture.finish("early", status: "completed", absolute: path, output: "SearchReplace", seconds: 106),
+            fixture.call("fork", name: "write", file: path, seconds: 110),
+            fixture.finish("fork", status: "completed", absolute: path, output: "SearchReplace", seconds: 111)
+        ], sessionID: "session-2")
+        let provider = GrokActivityProvider()
+
+        let metadata = provider.metadata(sources: [fixture.source])
+        assertMomentInvariants(metadata.projects)
+        XCTAssertEqual(metadata.projects.first?.activities.first?.sessionStarts, [fixture.date(0), fixture.date(100)])
+
+        let result = provider.scan(sources: [fixture.source])
+        assertMomentInvariants(result.projects)
+        XCTAssertEqual(result.projects.count, 1)
+        let activity = try XCTUnwrap(result.projects.first?.activities.first)
+        XCTAssertEqual(activity.editMoments.map(\.date), [fixture.date(6), fixture.date(21), fixture.date(111)])
+        XCTAssertFalse(activity.editMoments.contains(where: \.delegated))
+        XCTAssertEqual(activity.sessionStarts, [fixture.date(0), fixture.date(100)])
+    }
+
+    private func assertMomentInvariants(_ projects: [ProjectSummary], file: StaticString = #filePath, line: UInt = #line) {
+        for activity in projects.flatMap(\.activities) {
+            XCTAssertEqual(activity.editMoments.count, activity.history.reduce(0) { $0 + $1.editCount }, file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts.count, activity.history.reduce(0) { $0 + $1.sessionCount }, file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts.count, activity.sessionCount, file: file, line: line)
+            XCTAssertEqual(activity.editMoments.map(\.date), activity.editMoments.map(\.date).sorted(), file: file, line: line)
+            XCTAssertEqual(activity.sessionStarts, activity.sessionStarts.sorted(), file: file, line: line)
+        }
+    }
 }
 
 private final class Fixture {

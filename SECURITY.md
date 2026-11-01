@@ -8,7 +8,7 @@ The app reads configured local histories on the Mac: Claude desktop session inde
 
 Live reads Claude process-registry records matched to desktop sessions; Codex app-server writer-handle presence and read-only turn metadata; and Grok active-session registry plus explicit lifecycle events matched to the exact PID start. These readers do not signal or modify assistants. Registry fields, database rows, paths, and process IDs are untrusted input. Omit dead/reused processes and sessions that cannot be matched. A recent edit, a leftover lock file, or registry presence alone must not create a live-status claim.
 
-Each cache retains confirmed tool IDs with edit dates and workspace paths, plus file positions and related indexing metadata. They support daily UTC statistics and deduplicate replayed/cross-file results. They do not retain prompts, commands, patches, diffs, or conversation text. Unknown or unreadable cache versions are rebuilt.
+Each cache retains confirmed tool IDs with edit dates and workspace paths, plus file positions and related indexing metadata. They support daily statistics, computed in memory on local activity days, and deduplicate replayed/cross-file results. The Codex and Grok caches also keep the parent folders of edited files, and the Claude cache can briefly keep the target path of an Edit or Write awaiting its result. They do not retain prompts, commands, patches, diffs, or conversation text. Unknown or unreadable cache versions are rebuilt.
 
 Local paths, profile names, tool IDs, and timestamps can reveal private information. An indexing cache or diagnostic report is not automatically safe to publish. Session logs can contain prompts, source code, commands, credentials, and other secrets. Never attach complete real logs to a public issue.
 
@@ -26,9 +26,9 @@ Project cards and expanded live details can show private project/workspace paths
 
 ## Activity images
 
-Growth visualizes available local records; the tree is not Git ancestry and its counts do not measure code quality or lines of code. Edit counts come from confirmed file edits by UTC day: Claude `Edit`/`Write`, Codex completed `FileChange`, and Grok completed `write`/`search_replace`. Sessions are grouped by their UTC creation day. Missing logs, shell commands, and external changes can leave the history incomplete.
+Growth visualizes available local records; its charts are not Git ancestry and its counts do not measure code quality, lines of code, or productivity. Edit counts come from confirmed file edits on local activity days, which start at 05:00 in the Mac's time zone: Claude `Edit`/`Write`, Codex completed `FileChange`, and Grok completed `write`/`search_replace`. Sessions are grouped by the day they started. The hour-of-day rhythm is shown in the app only. Missing logs, shell commands, and external changes can leave the history incomplete.
 
-PNG export saves only to a user-selected local location and never posts or uploads a card. The Share action hides project/profile names and excludes folder paths. Totals, dates, and activity patterns remain visible. Review an image before sharing it.
+PNG export saves only to a user-selected local location and never posts or uploads a card. Project and profile names are hidden by default and can be included with a toggle; folder paths and the hour-of-day rhythm are never included. Totals, dates, and day patterns in the mini calendar remain visible. Review an image before sharing it.
 
 `--demo`, `--render-demo`, `--render-growth-demo`, and `--render-share-demo` use synthetic sample data rather than reading local assistant history or process-registry records. The older `--render-live-demo` flag is an alias for the combined Projects preview. Use these modes for public screenshots. Screenshots of the ordinary app may contain private project names and paths.
 

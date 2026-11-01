@@ -59,6 +59,7 @@ let result = arguments.contains("--metadata-only")
     ? provider.metadata(sources: sources)
     : provider.scan(sources: sources)
 let formatter = ISO8601DateFormatter()
+let activityCalendar = ActivityCalendar.current
 let records: [[String: Any]] = result.projects.map { project in
     var item: [String: Any] = [
         "project": project.path,
@@ -74,6 +75,14 @@ let records: [[String: Any]] = result.projects.map { project in
     item["dailyHistoryUTC"] = project.history.map {
         ["day": formatter.string(from: $0.day), "edits": $0.editCount, "sessions": $0.sessionCount] as [String: Any]
     }
+    // Local activity days come from the raw moments, so they never inherit UTC boundaries.
+    var localEdits: [DayKey: Int] = [:], localSessions: [DayKey: Int] = [:]
+    for moment in project.activities.flatMap(\.editMoments) { localEdits[activityCalendar.day(of: moment.date), default: 0] += 1 }
+    for start in project.activities.flatMap(\.sessionStarts) { localSessions[activityCalendar.day(of: start), default: 0] += 1 }
+    item["localDays"] = Set(localEdits.keys).union(localSessions.keys).sorted().map { day -> [String: Any] in
+        ["day": String(format: "%04ld-%02ld-%02ld", day.year, day.month, day.day),
+         "edits": localEdits[day] ?? 0, "sessions": localSessions[day] ?? 0]
+    }
     if let edit = project.latestEdit, let date = edit.latestEdit {
         item["latestRecordedEdit"] = formatter.string(from: date)
         item["latestEditSource"] = edit.sourceID
@@ -84,6 +93,7 @@ let records: [[String: Any]] = result.projects.map { project in
 let report: [String: Any] = [
     "projectCount": records.count,
     "sharedCount": result.projects.filter(\.isShared).count,
+    "dayBoundary": String(format: "%02ld:00 local", activityCalendar.rolloverHour),
     "elapsedSeconds": Date().timeIntervalSince(started),
     "notices": result.notices,
     "projects": records,

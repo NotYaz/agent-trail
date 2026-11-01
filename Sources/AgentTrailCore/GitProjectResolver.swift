@@ -218,7 +218,7 @@ final class GitProjectResolver {
             if let known = symbolicLinks[prefix] {
                 isLink = known
             } else {
-                isLink = (try? files.attributesOfItem(atPath: prefix))?[.type] as? FileAttributeType == .typeSymbolicLink
+                isLink = FileStat.of(prefix)?.kind == .symbolicLink
                 symbolicLinks[prefix] = isLink
             }
             if isLink, linkTargets[prefix] == nil {
@@ -236,7 +236,7 @@ final class GitProjectResolver {
     /// including submodules, which have no `commondir`.
     private func linkedWorktreeCommonDirectory(_ checkout: String) -> String? {
         let marker = (checkout as NSString).appendingPathComponent(".git")
-        guard (try? files.attributesOfItem(atPath: marker))?[.type] as? FileAttributeType == .typeRegular,
+        guard FileStat.of(marker)?.kind == .regular,
               let text = smallText(URL(fileURLWithPath: marker)), text.hasPrefix("gitdir: "),
               let reference = singleLine(String(text.dropFirst("gitdir: ".count))),
               let gitDirectory = gitDirectory(reference, relativeTo: checkout),
@@ -247,12 +247,11 @@ final class GitProjectResolver {
 
     private func marker(at checkout: String) -> Marker {
         let marker = URL(fileURLWithPath: checkout, isDirectory: true).appendingPathComponent(".git")
-        guard let attributes = try? files.attributesOfItem(atPath: marker.path),
-              let type = attributes[.type] as? FileAttributeType else { return .absent }
-        if type == .typeDirectory || type == .typeSymbolicLink && isDirectory(marker.path) {
+        guard let type = FileStat.of(marker.path)?.kind else { return .absent }
+        if type == .directory || type == .symbolicLink && isDirectory(marker.path) {
             return validGitDirectory(marker) ? .valid : .invalid
         }
-        guard type == .typeRegular,
+        guard type == .regular,
               let text = smallText(marker), text.hasPrefix("gitdir: "),
               let reference = singleLine(String(text.dropFirst("gitdir: ".count))),
               gitDirectory(reference, relativeTo: checkout) != nil else { return .invalid }
@@ -307,9 +306,7 @@ final class GitProjectResolver {
 
     private func smallText(_ url: URL) -> String? {
         let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
-        guard let attributes = try? files.attributesOfItem(atPath: resolved.path),
-              attributes[.type] as? FileAttributeType == .typeRegular,
-              let size = attributes[.size] as? NSNumber, size.uint64Value <= 4_096,
+        guard let metadata = FileStat.of(resolved.path), metadata.kind == .regular, metadata.size <= 4_096,
               let handle = try? FileHandle(forReadingFrom: resolved) else { return nil }
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: 4_097), data.count <= 4_096 else { return nil }

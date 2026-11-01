@@ -125,11 +125,10 @@ enum JSONLTail {
     static let maximumLineBytes = 64 * 1024 * 1024
 
     static func read(url: URL, state: inout TailState, reset: () -> Void, parse: (Data) -> Bool) throws {
-        let files = FileManager.default
-        let attributes = try files.attributesOfItem(atPath: url.path)
-        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let identity = "\(attributes[.systemNumber] ?? ""):\(attributes[.systemFileNumber] ?? ""):\((attributes[.creationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
+        let metadata = try FileStat.required(url)
+        let size = metadata.size
+        let modified = metadata.modified.timeIntervalSince1970
+        let identity = metadata.identity
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var local = state

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Redesigned panel. A Pulse strip shows live sessions, edits in the last 7 days, active projects, and your day streak. Project cards gain a 30-day sparkline, the change from the previous 30 days, a profile mix bar, New and Dormant chips, a profile stack with live status rings, and an attention edge. A pinned toolbar adds filter chips and sorting by edits, trend, or name. Keyboard shortcuts: ⌘1, ⌘2, ⌘F, ⌘R.
+- Growth is rebuilt and follows the system appearance: KPI tiles, a recorded-edits chart with a 7-day average, peak, per-profile breakdown, sessions and running-total views, a 26-week Trail calendar with weekday totals, a **When edits land** punch card with peak hour and chronotype, a profile mix with delegated edits, and **Where edits landed**. The in-app growth tree moved to the exported portrait.
+- Statistics use local activity days that start at 05:00, so late-night work counts toward the evening it began. Changes are shown only when saved history covers the previous period. `AgentTrailInspect` adds `localDays` next to `dailyHistoryUTC`.
+- The exported portrait has a headline built from your numbers, a mini calendar clipped to the selected period, a longest-streak total, a live preview, and an optional names toggle. Names stay hidden by default; paths and hour-of-day data are never exported.
+- New profile palette with better separation from status colors: Claude · Second is magenta, Codex violet, and Grok teal. Errors and notices appear as toasts; long errors stay readable and selectable.
+- Statistics are built off the main thread from records the app already keeps, with no cache format change.
+- Fixed scans that could stall at launch. File metadata is now read without extended attributes, which made macOS ask for access to protected folders such as Documents and blocked indexing until someone answered. Cache entries and saved folder identities stay valid.
+
 - A project is now the Git checkout where confirmed edits landed. Each Claude, Codex, or Grok edit counts for the checkout containing its files after following links. A session started in a parent folder joins that checkout when its edits landed in exactly one, and its card shows **Launched from**. Edits spanning several checkouts are not merged, and repositories are never matched by name or remote.
 - Moved repositories keep their history. A link left at the old path is remembered, so removing it later changes nothing. A plain move on the same disk is followed through a bookmark and folder identity. A move never seen can be fixed once with **Locate…**. Cards show **Previously at** and offer **Forget earlier locations…**.
 - A new folder at an earlier location stays a separate project; only records made before it appeared count for the moved one. A repository at the home folder or above it is never treated as a project.

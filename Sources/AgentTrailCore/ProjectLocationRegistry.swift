@@ -335,10 +335,10 @@ public struct ProjectLocationRegistry: Codable, Equatable, Sendable {
             guard alias != checkout else { continue }
             guard !CheckoutPath.contains(root: alias, path: checkout),
                   !CheckoutPath.contains(root: checkout, path: alias) else { throw LocationError.overlappingAlias }
-            if let attributes = try? FileManager.default.attributesOfItem(atPath: alias) {
+            if let metadata = FileStat.of(alias) {
                 // A link into the checkout, or one left dangling by the move, is
                 // fine. Anything else at that path is another folder's.
-                let isLink = attributes[.type] as? FileAttributeType == .typeSymbolicLink
+                let isLink = metadata.kind == .symbolicLink
                 let target = canonicalPath(alias)
                 guard isLink, CheckoutPath.contains(root: checkout, path: target)
                         || !FileManager.default.fileExists(atPath: target) else {
@@ -495,8 +495,8 @@ public struct ProjectLocationRegistry: Codable, Equatable, Sendable {
             for previousIndex in location.previousLocations.indices {
                 let previous = location.previousLocations[previousIndex]
                 guard previous.shadowedSince == nil,
-                      let attributes = try? files.attributesOfItem(atPath: previous.path) else { continue }
-                if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                      let metadata = FileStat.of(previous.path) else { continue }
+                if metadata.kind == .symbolicLink {
                     let target = canonicalPath(previous.path)
                     if CheckoutPath.contains(root: location.currentPath, path: target) {
                         if previous.lastSeenAt.map({ now.timeIntervalSince($0) >= Self.lastSeenInterval || $0 > now }) ?? true {
@@ -507,7 +507,7 @@ public struct ProjectLocationRegistry: Codable, Equatable, Sendable {
                     }
                     if !files.fileExists(atPath: target) { continue }
                 }
-                let created = (attributes[.creationDate] as? Date) ?? .distantPast
+                let created = metadata.created
                 let confirmed = previous.origin == .move ? (previous.lastSeenAt ?? previous.observedAt)
                     : max(previous.lastSeenAt ?? .distantPast, previous.observedAt)
                 locations[index].previousLocations[previousIndex].shadowedSince = max(created, confirmed, previous.since ?? .distantPast)
@@ -520,7 +520,7 @@ public struct ProjectLocationRegistry: Codable, Equatable, Sendable {
     private static let lastSeenInterval: TimeInterval = 6 * 3_600
 
     private static func isOccupied(_ path: String) -> Bool {
-        (try? FileManager.default.attributesOfItem(atPath: path)) != nil
+        FileStat.of(path) != nil
     }
 
     private static func capped(_ previous: [PreviousLocation]) -> [PreviousLocation] {
@@ -565,12 +565,9 @@ struct ProjectFileIdentity: Codable, Equatable, Sendable {
     }
 
     static func read(_ path: String) -> ProjectFileIdentity? {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-              attributes[.type] as? FileAttributeType == .typeDirectory,
-              let device = attributes[.systemNumber] as? NSNumber,
-              let inode = attributes[.systemFileNumber] as? NSNumber,
-              let created = attributes[.creationDate] as? Date else { return nil }
-        return ProjectFileIdentity(device: device.uint64Value, inode: inode.uint64Value, created: created)
+        guard let metadata = FileStat.of(path), metadata.kind == .directory else { return nil }
+        return ProjectFileIdentity(device: UInt64(bitPattern: Int64(metadata.device)), inode: metadata.inode,
+                                   created: metadata.created)
     }
 }
 

@@ -2,13 +2,13 @@
 
 **Which agent touched this project last?**
 
-A small native macOS menu-bar app that brings your coding projects into one place. See recorded edits and reported live status together on each project, then jump back to the right running app. Projects and Growth share one compact floating panel.
+A small native macOS menu-bar app that brings your coding projects into one place. See recorded edits, trends, and reported live status together on each project, then jump back to the right running app. Projects and Growth share one compact floating panel.
 
 **0.1.0-alpha.6 · Public alpha · macOS 14+ · Claude, Codex, and Grok · MIT license**
 
 Agent Trail reads local history and live status from Claude Desktop, Codex, and Grok. One-click focus is available for identified Claude Desktop instances. Gemini CLI, OpenCode, and Cursor are not supported.
 
-<img src="docs/assets/demo.png" width="600" alt="Agent Trail Projects tab showing synthetic projects with live session counts, recorded edits, and quick-focus buttons">
+<img src="docs/assets/demo.png" width="600" alt="Agent Trail Projects tab with the Pulse strip, project trend sparklines, live session counts, and quick-focus buttons for synthetic projects">
 
 *Sample data. Project names, profiles, paths, and counts in these previews are synthetic.*
 
@@ -24,12 +24,14 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 - Keep a project's history when you move its folder; earlier locations are remembered automatically.
 - Focus an identified running Claude instance with one click. Codex and Grok profiles show local activity without an app-focus button by default.
 - See live Needs input, Working, Idle, and Unknown counts inside each project card.
-- Projects needing input sort first, followed by working projects; filter with **Needs input** or **Working now**.
-- Explore an activity tree and daily edit/session counts by project and agent profile.
+- Read the Pulse strip at a glance: live sessions, edits in the last 7 days, active projects, and your day streak.
+- Each card shows a 30-day sparkline, its recorded edits with the change from the previous 30 days, and which profiles did the work.
+- Projects needing input sort first, followed by working projects; filter with **Needs input** or **Working**, or sort by edits, trend, or name.
+- Explore Growth: recorded edits per day with a 7-day average, a 26-week Trail calendar, when your edits land by hour and weekday, the profile mix with delegated edits, and where edits landed.
 - Export a PNG activity portrait with project and profile names hidden by default.
 - Keep everything local, with no account or telemetry.
 
-<img src="docs/assets/growth.png" width="600" alt="Agent Trail Growth tab showing an activity tree and daily recorded-edit chart from synthetic sample projects">
+<img src="docs/assets/growth.png" width="600" alt="Agent Trail Growth tab with KPI tiles, the recorded-edits chart with a 7-day average, and the Trail calendar from synthetic sample projects">
 
 ## Try it
 
@@ -41,7 +43,7 @@ swift test
 open "dist/Agent Trail.app"
 ```
 
-Run these commands from the repository folder. The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects** and **Growth** inside the same 600 × 680 panel. Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; live status checks run separately every 3 seconds.
+Run these commands from the repository folder. The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects** and **Growth** inside the same 600 × 680 panel (⌘1 and ⌘2; ⌘F searches and ⌘R refreshes). Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; live status checks run separately every 3 seconds.
 
 Routine refreshes keep the last complete history visible while the next scan finishes. Tab changes and updates use gentle transitions that respect macOS Reduce Motion.
 
@@ -51,7 +53,7 @@ Claude profile buttons focus an existing Claude Desktop instance. They do not op
 
 ## Configure profiles
 
-Open **Profiles…** from the panel's bottom menu to add or adjust profiles. When `profiles.json` is missing, the default configuration is:
+Open **Profiles…** from the panel's ⋯ menu to add or adjust profiles. When `profiles.json` is missing, the default configuration is:
 
 | Profile | Assistant | Home | Desktop user data |
 | --- | --- | --- | --- |
@@ -141,9 +143,9 @@ Search also matches earlier locations and launch folders. **Forget earlier locat
 
 Live status is available for Claude Desktop, loaded Codex threads, and registered Grok sessions. Each adapter requires runtime presence and explicit status or turn events; recent edits and file timestamps do not establish a live state.
 
-The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with a reported input request sort first, followed by projects with working sessions. The header shows needs-input counts in amber and working counts in green. Use **Needs input** or **Working now** to filter those projects. Selecting both includes projects with either state; search and **Shared only** still apply.
+The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with a reported input request sort first, followed by projects with working sessions, under every sort. The Pulse strip shows needs-input and working counts, and the menu-bar icon turns amber and filled while a session needs input. Use **Needs input** or **Working** to filter those projects. Selecting both includes projects with either state; search and **Shared** still apply.
 
-Expand a card's live details with the chevron to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. Claude requires a matching desktop session; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
+Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. Claude requires a matching desktop session; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
 
 A session started outside a project joins the project its recorded edits landed in, so a Codex thread started in a parent folder appears on the repository's card. A Claude window still reporting a folder that has moved appears at the folder's current location.
 
@@ -168,19 +170,28 @@ Grok live status joins `active_sessions.json` to the matching session summary, v
 
 ## Explore project activity
 
-Choose the **Growth** tab in the floating panel. Select a project or **All projects**, then filter to **7D**, **30D**, **90D**, or **All**. The activity tree, daily edit chart, and session totals show how the available records accumulate across agent profiles. Explore a tree node to inspect its recorded day. Changing projects clears the previous graph's inspection so the labels and selected project stay aligned.
+Choose the **Growth** tab in the floating panel, or click a Pulse tile or **Show in Growth** on a card. Select a project or **All projects**, then filter to **7D**, **30D**, **90D**, or **All**.
 
-Project and period changes animate branches outward, bring in activity nodes, and grow chart bars from zero against the selected data's actual scale. Totals update with the same selection. Reduce Motion shows the result without the growth animation.
+- **Recorded edits, Active days, Saved sessions, Busiest day.** Totals for the period, with the change from the previous period of the same length. Active days count days with at least one edit, with your current and best streak.
+- **Recorded edits chart.** Bars per day, week, or month by profile, with a dashed 7-day average and the peak marked. Switch to **Sessions**, or to a running total. Select a bar for the per-profile breakdown, and click a legend chip to focus one profile everywhere.
+- **Trail calendar.** The last 26 weeks, one cell per day, shaded by recorded edits, with totals per weekday.
+- **When edits land.** A punch card of edits by weekday and local hour, the peak hour, the share of late-night work, and a label such as *Night owl* or *Daytime*. It needs at least 50 edits in the period and is never included in exported images.
+- **Profile mix.** Each profile's share of recorded edits, the change in share, when it first appears in saved history, and how many of its edits were **delegated**: first recorded in a Claude subagent or a spawned Codex thread. Grok does not report delegation. A footer counts days when two or more profiles edited the same project.
+- **Where edits landed.** For all projects, the projects ranked by recorded edits, split by profile.
 
-- **Recorded edits** count confirmed file edits, grouped by UTC calendar day and agent profile. Claude counts a successful `Edit` or `Write`. Codex counts one completed `FileChange`. Grok counts one completed `write` or `search_replace`. One tool operation counts as one edit, regardless of its size. Shell commands do not count.
-- **Saved sessions** are counted on their creation day in UTC. They are not the number of sessions active on each day.
+How the numbers are counted:
+
+- **Local activity days.** Days follow your Mac's time zone and start at 05:00, so work after midnight counts toward the evening it began. Hours in **When edits land** are local wall-clock hours.
+- **Recorded edits** count confirmed file edits. Claude counts a successful `Edit` or `Write`. Codex counts one completed `FileChange`. Grok counts one completed `write` or `search_replace`. One tool operation counts as one edit, regardless of its size. Shell commands do not count.
+- **Saved sessions** count on the day they started. A session means different things per assistant, so do not compare them across assistants.
+- **Changes are shown only when saved history covers the previous period.** Assistants delete old sessions, so an empty earlier period often means "not recorded". Streaks and totals cover only the history still on disk and can shrink.
 - Replayed tool results and repeated records across transcript files are deduplicated within each project's profile history.
 
-The tree connects activity over time as a visual summary. It does not show Git ancestry, dependencies between agents, or lines of code. Edit/session counts do not measure code quality, project size, or productivity. Shell and external changes remain outside these statistics, and missing logs mean the history may be incomplete. Day boundaries use UTC even when your Mac uses another time zone.
+Counts do not measure code quality, project size, lines of code, or productivity, and they do not show Git ancestry or dependencies between agents. Shell and external changes remain outside these statistics. Changing the period or project animates the charts from zero against the new scale; Reduce Motion shows the result directly. The activity tree now appears only on the exported portrait. `AgentTrailInspect` reports both `dailyHistoryUTC` and `localDays`.
 
 ## Export an activity portrait
 
-From Growth, choose **Share**, then **Export PNG** in the save dialog to save the card to a location on your Mac. The card uses the selected projects and time period. The Share action hides project and profile names, using labels such as “My project” and “Agent 1.” Folder paths are never included in the card. Activity totals and dates remain visible.
+From Growth, choose **Share** to preview the card, then **Export PNG…** to save it to a location you choose on your Mac. The card uses the selected project and period. Its headline, totals, longest streak, and a mini calendar (or a 7-day strip) cover only that period. Project and profile names are hidden by default, using labels such as “My project” and “Agent 1”; turn on **Show project and profile names** to include them. Folder paths are never included, and the hour-of-day rhythm is never exported. Activity totals, dates, and day patterns remain visible.
 
 <img src="docs/assets/share-card.png" width="700" alt="Sample exported Agent Trail activity portrait with anonymized agent names and synthetic activity counts">
 
@@ -192,7 +203,7 @@ Review a card before sharing it. Hiding names does not hide dates, counts, or pa
 
 Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs, Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records, Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
 
-Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, the parent folders of edited files, and related indexing metadata. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
+Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches also keep the parent folders of edited files. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
 
 `project-locations.json` (mode 0600) in the same folder remembers repositories Agent Trail attributed work to. It holds their current and earlier folder paths, which are learned from session evidence, plus a macOS bookmark and folder identity: device, inode, and creation date. It holds no prompts, commands, diffs, or conversation text, but the paths can still be sensitive; keep it private like the caches. An unreadable file is reported and never overwritten. With Agent Trail closed, deleting it forgets learned earlier locations; links still present are learned again.
 
@@ -214,7 +225,7 @@ swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
 swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
 
-The older `--render-live-demo` flag remains an alias for the combined Projects preview.
+Add `--light` for the light appearance, or `--height N` to render a taller panel for review. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
 
 ## Development
 

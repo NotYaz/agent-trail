@@ -41,70 +41,43 @@ struct ProfileSettingsView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 11) {
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.blue)
+        HStack(spacing: Theme.Space.s) {
+            Image(systemName: "person.2")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.tint)
                 .frame(width: 34, height: 34)
-                .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .background(.tint.opacity(0.10), in: Theme.Radius.shape(Theme.Radius.control))
             VStack(alignment: .leading, spacing: 2) {
                 Text("Profiles")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(Theme.Typeface.title)
                 Text("Connect the Claude, Codex, and Grok profiles you work with.")
-                    .font(.system(size: 11))
+                    .font(Theme.Typeface.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if store.demoMode {
-                Text("DEMO")
-                    .font(.system(size: 9, weight: .semibold))
-                    .tracking(0.7)
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(.orange.opacity(0.10), in: Capsule())
+                Pill(text: "Demo")
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 17)
+        .padding(.horizontal, Theme.Space.l)
+        .padding(.vertical, Theme.Space.m)
     }
 
     private var profileList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("PROFILES")
-                .font(.system(size: 9, weight: .semibold))
-                .tracking(1)
+            Text("Profiles")
+                .font(Theme.Typeface.caption.weight(.medium))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
+                .padding(.horizontal, Theme.Space.m)
+                .padding(.top, Theme.Space.m)
+                .padding(.bottom, Theme.Space.xs)
             ScrollView {
-                VStack(spacing: 4) {
-                    ForEach(Array(draftSources.enumerated()), id: \.element.id) { index, source in
-                        Button {
-                            selectedID = source.id
-                            validationMessage = nil
-                        } label: {
-                            HStack(spacing: 9) {
-                                Circle().fill(profileColor(index))
-                                    .frame(width: 7, height: 7)
-                                Text(source.name.isEmpty ? "Untitled profile" : source.name)
-                                    .font(.system(size: 12, weight: selectedID == source.id ? .medium : .regular))
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.horizontal, 10)
-                            .frame(height: 34)
-                            .background(selectedID == source.id ? Color.blue.opacity(0.10) : Color.clear,
-                                        in: RoundedRectangle(cornerRadius: 7))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Edit \(source.name) profile")
-                        .accessibilityAddTraits(selectedID == source.id ? .isSelected : [])
+                VStack(spacing: Theme.Space.xxs) {
+                    ForEach(draftSources) { source in
+                        profileRow(source)
                     }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, Theme.Space.xs)
             }
             HStack(spacing: 0) {
                 Button(action: addProfile) { Image(systemName: "plus").frame(width: 26, height: 24) }
@@ -122,12 +95,54 @@ struct ProfileSettingsView: View {
             .disabled(store.demoMode)
         }
         .frame(width: 182)
-        .background(.primary.opacity(0.018))
+        .background(Theme.Palette.sunken)
+    }
+
+    private func profileRow(_ source: AgentSource) -> some View {
+        let isSelected = selectedID == source.id
+        return Button {
+            selectedID = source.id
+            validationMessage = nil
+        } label: {
+            HStack(spacing: Theme.Space.xs) {
+                profileSwatch(source)
+                Text(source.name.isEmpty ? "Untitled profile" : source.name)
+                    .font(isSelected ? Theme.Typeface.body.weight(.medium) : Theme.Typeface.body)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background {
+                if isSelected {
+                    Theme.Radius.shape(Theme.Radius.control).fill(.tint.opacity(0.12))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Edit \(source.name) profile")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    /// The same identity color the panel and Growth use. Profiles past the six
+    /// palette slots share slate, so they also show a monogram.
+    @ViewBuilder private func profileSwatch(_ source: AgentSource) -> some View {
+        Circle()
+            .fill(ProfileColor.color(source.id, sources: draftSources))
+            .frame(width: 8, height: 8)
+            .accessibilityHidden(true)
+        if ProfileColor.slot(for: source.id, sources: draftSources) == .other {
+            Text(ProfileColor.monogram(source.name))
+                .font(Theme.Typeface.micro.monospaced())
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
     }
 
     private var profileEditor: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 17) {
+            VStack(alignment: .leading, spacing: Theme.Space.m) {
                 if let index = selectedIndex {
                     VStack(alignment: .leading, spacing: 6) {
                         fieldLabel("Assistant", symbol: "sparkles")
@@ -157,13 +172,13 @@ struct ProfileSettingsView: View {
                             folderField("Desktop user-data folder", symbol: "macwindow", placeholder: "Default Claude desktop profile",
                                         value: userDataBinding, field: .userData)
                             Text("Leave blank only for the default Claude profile. For custom config folders, enter the matching --user-data-dir folder.")
-                                .font(.system(size: 10))
+                                .font(Theme.Typeface.note)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     } else {
-                        Text("\(draftSources[index].assistant.displayName) history is read from this home. Shell commands are not counted as file edits, and there is no live status yet.")
-                            .font(.system(size: 10))
+                        Text("\(draftSources[index].assistant.displayName) history is read from this home. Shell commands are not counted as file edits. Live status comes from the assistant's own session records.")
+                            .font(Theme.Typeface.note)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -172,7 +187,7 @@ struct ProfileSettingsView: View {
 
                     HStack {
                         Label("Refresh activity", systemImage: "arrow.clockwise")
-                            .font(.system(size: 11))
+                            .font(Theme.Typeface.caption)
                             .foregroundStyle(.secondary)
                         Spacer()
                         Picker("Refresh activity", selection: $draftInterval) {
@@ -187,24 +202,24 @@ struct ProfileSettingsView: View {
                 }
             }
             .disabled(store.demoMode)
-            .padding(22)
+            .padding(Theme.Space.l)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
             if let validationMessage {
-                Label(validationMessage, systemImage: "exclamationmark.circle.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
+                Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(Theme.Typeface.caption)
+                    .foregroundStyle(Theme.Palette.errorText)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Could not save profiles: \(validationMessage)")
             }
-            HStack(spacing: 12) {
+            HStack(spacing: Theme.Space.s) {
                 Text(store.demoMode ? "Demo profiles are a preview. Relaunch without --demo to connect yours."
                      : "Reads local records. Saving never restarts an assistant.")
-                    .font(.system(size: 10))
+                    .font(Theme.Typeface.note)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 4)
@@ -216,13 +231,13 @@ struct ProfileSettingsView: View {
                     .disabled(store.demoMode)
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 14)
+        .padding(.horizontal, Theme.Space.l)
+        .padding(.vertical, Theme.Space.sectionPadding)
     }
 
     private func fieldLabel(_ title: String, symbol: String) -> some View {
         Label(title, systemImage: symbol)
-            .font(.system(size: 11, weight: .medium))
+            .font(Theme.Typeface.caption.weight(.medium))
             .foregroundStyle(.secondary)
     }
 
@@ -233,7 +248,7 @@ struct ProfileSettingsView: View {
             HStack(spacing: 7) {
                 TextField(placeholder, text: value)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Theme.Typeface.mono)
                     .accessibilityLabel(title)
                 Button { chooseFolder(field) } label: { Image(systemName: "folder") }
                     .help("Choose \(title.lowercased())")
@@ -365,9 +380,5 @@ struct ProfileSettingsView: View {
 
     private func close() {
         if let onClose { onClose() } else { dismiss() }
-    }
-
-    private func profileColor(_ index: Int) -> Color {
-        [.blue, .orange, .purple, .teal, .pink][index % 5]
     }
 }
