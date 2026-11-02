@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.10 — 2026-11-02
 
+- **A website.** Agent Trail now has a home page at https://notyaz.github.io/agent-trail/, published from `site/` with GitHub Pages. It covers the panel, live status, Jump, Growth, keeping long jobs visible, privacy, and installation.
+- The README explains how long-running jobs stay visible: what Agent Trail shows while a session's background command runs, how it recognizes that command from the process tree, how to keep a training run or other long job attached to its session, and the limits.
 - **Smoother scrolling.** Project cards are much cheaper to bring into view, so the Projects list no longer stutters each time a card appears, and both tabs stop pausing every 3 seconds when live status refreshes. A live check that changes nothing redraws nothing, and history is no longer merged again on every check. Cards look and behave as before; the ⋯ menu now opens when the click is released, like the Jump control's menu.
 - `AgentTrail --benchmark-scroll projects|growth` measures scrolling with sample data or your own history (see CONTRIBUTING).
 
