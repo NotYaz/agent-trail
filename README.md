@@ -8,6 +8,8 @@ A small native macOS menu-bar app that brings your coding projects into one plac
 
 Agent Trail reads local history and live status from Claude Desktop, Codex, and Grok. One-click focus is available for identified Claude Desktop instances. Gemini CLI, OpenCode, and Cursor are not supported.
 
+> **Long jobs stay visible.** When Claude starts a training run, a long build, or an evaluation sweep in the background and ends its turn, Claude reports the session as idle. Agent Trail sees that the session's own command is still running and shows it as **Working in background** until the job ends, so a quiet window never hides a run in progress. [How it works](#long-running-jobs-and-background-commands)
+
 <img src="docs/assets/demo.png" width="600" alt="Agent Trail Projects tab with the Pulse strip, project trend sparklines, live session counts, and quick-focus buttons for synthetic projects">
 
 *Sample data. Project names, profiles, paths, and counts in these previews are synthetic.*
@@ -24,6 +26,7 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 - Keep a project's history when you move its folder; earlier locations are remembered automatically.
 - Jump straight to the work: each card's main button opens the most urgent live session (needs input, then working, then idle) in Claude, Codex, or the terminal running Grok.
 - See live Needs input, Working, Idle, and Unknown counts inside each project card.
+- Keep long jobs in view: a Claude session whose background command is still running (a training run, a long build, a wait on another job) shows **Working in background**, not Idle.
 - Read the Pulse strip at a glance: live sessions, edits in the last 7 days, active projects, and your day streak.
 - Each card shows a 30-day sparkline, its recorded edits with the change from the previous 30 days, and which profiles did the work.
 - Projects needing input sort first, followed by working projects; filter with **Needs input** or **Working**, or sort by edits, trend, or name.
@@ -174,7 +177,7 @@ A project can have a session needing input while another is working or idle, so 
 | Status | Meaning |
 | --- | --- |
 | **Needs input** | Claude reported `waiting`, or Grok reported an unresolved permission request. Codex input dialogs are not distinguished by the currently available state. |
-| **Working** | Claude reported `busy`, Codex has an `inProgress` turn on a loaded thread, or Grok has an active turn/working phase. |
+| **Working** | Claude reported `busy`, Codex has an `inProgress` turn on a loaded thread, or Grok has an active turn/working phase. Claude also counts while it reports `idle` but a command its last turn started is still running, shown as **Working in background** (see [Long-running jobs](#long-running-jobs-and-background-commands)). |
 | **Idle** | Claude reported `idle`, or a loaded Codex/Grok session explicitly ended its turn. It does not establish that you need to reply. |
 | **Unknown** | The status is unrecognized or cannot be verified under the applicable freshness checks. |
 
@@ -186,7 +189,55 @@ Codex live status combines open thread-writer handles under `thread-writer-locks
 
 Grok live status joins `active_sessions.json` to the matching session summary, verifies the registered PID and microsecond process-start time, and reads explicit lifecycle events from `events.jsonl`. A registered session without a recognized event is Unknown. Completed and cancelled turns become Idle; permission requests become Needs input until resolved.
 
-**Working describes a reported active turn.** It does not claim that a file is being written or that work has succeeded. Recent edits, file modification times, and CPU usage do not determine live status. Missing live reports do not establish that every assistant has stopped.
+**Working describes a reported active turn, or a command that turn left running.** It does not claim that a file is being written or that work has succeeded. Recent edits, file modification times, and CPU usage do not determine live status; the only process fact used is whether a Claude session's own command is still running. Missing live reports do not establish that every assistant has stopped.
+
+## Long-running jobs and background commands
+
+Agents now hand off work that runs for hours: training or fine-tuning a model, a full test or benchmark suite, a data migration, a large build. Claude usually starts such a job as a background command and ends its turn, so its own status report says **idle**, even though the session still owns a job in flight and will pick it up again when the command finishes. With several sessions open, the one watching a six-hour run looks exactly like the ones you finished with this morning.
+
+Agent Trail tells them apart. While a command that a Claude session started during its last turn is still running, the session shows **Working in background** instead of Idle:
+
+- It counts as Working on its project card, in the Pulse strip, and under the **Working** filter.
+- The menu-bar dot keeps travelling along the trail.
+- The Jump menu and session tooltips say "Working in background", and the session's tooltip under **Details** says when the command started.
+- When the command exits, the session returns to the state Claude reports. Claude usually picks up the result and works again, and the menu-bar checkmark appears once nothing is running.
+
+### How it works
+
+Each Claude Code session in Claude Desktop runs as one `claude` process. Every Bash command it starts, in the foreground or the background, is a child of that process and leads its own process group. MCP servers are children too, but they stay in Claude's process group.
+
+```text
+Claude Desktop
+└─ claude              one Code session; its registry record says "idle"
+   ├─ node mcp-server  MCP server: in Claude's process group, ignored
+   └─ zsh -c …         Bash command: leads its own group → Working in background
+      └─ python train.py
+```
+
+On every live check (every 3 seconds), for each Claude session reported idle, Agent Trail lists that process's children and keeps the ones that:
+
+1. lead their own process group,
+2. started **before** the idle report, so they belong to the turn that just ended (a hook that runs after the turn does not count), and
+3. are still running rather than exited and waiting to be reaped.
+
+If any remain, the session is Working in background, and the oldest one's start time is shown. Busy, waiting, and Unknown sessions are unchanged, and the same process checks as for every Claude status apply.
+
+Only each child's parent process ID, process group, start time, and run state are read, through macOS `libproc` (`proc_listchildpids` and `proc_pidinfo`). Agent Trail does not read command lines, arguments, environment variables, or output, starts no helper process for this check, and sends no signals.
+
+### Make your long jobs visible
+
+Agent Trail can see a job only while it is attached to the session. Two patterns work well:
+
+- **Let Claude run the job as a background command**, for example by asking it to start `python train.py` in the background and check the result when it finishes. The command stays a child of the session for as long as it runs.
+- **For a job that is already detached**, started with `nohup … &`, `setsid`, `tmux`, `screen`, or a job scheduler, ask Claude to wait on it in the background, for example with `while kill -0 <pid>; do sleep 300; done`. The wait loop is a child of the session, so the session stays Working in background until the job exits, and Claude is told when the wait ends.
+
+`AgentTrailInspect --live` prints `backgroundSince` for each session working in the background, which shows exactly what Agent Trail sees.
+
+### Limits
+
+- A background command that never exits on its own, such as `tail -f` or a development server started as a background command, keeps its session Working in background until it stops or the session closes.
+- A job fully detached from the session, with no command waiting on it, is adopted by `launchd` and cannot be tied to any session.
+- This applies to Claude Desktop sessions. Codex and Grok live status are unchanged.
 
 ## Explore project activity
 
@@ -221,7 +272,7 @@ Review a card before sharing it. Hiding names does not hide dates, counts, or pa
 
 ## Privacy
 
-Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs, Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records, Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
+Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs, Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records and, for each Claude session process, its children's parent, process group, start time, and run state (never their arguments), Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
 
 Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches also keep the parent folders of edited files. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
 
