@@ -24,6 +24,16 @@ swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 
 These commands do not read assistant history or live process-registry data. The README previews use sample images at `docs/assets/demo.png`, `docs/assets/growth.png`, and `docs/assets/share-card.png`. Projects and Growth previews should show the same 600 × 680 floating-panel layout. Renders pin the clock, so they are repeatable; add `--light` to check the light appearance and `--height N` to see content below the fold. Check both appearances for Growth, which is no longer dark-only. `--render-live-demo` remains a compatibility alias for the merged Projects preview; do not add a separate Live-tab screenshot.
 
+To measure scrolling, run the scroll benchmark from a release build. It opens the panel in a popover, scrolls it one step per display frame, and prints main-thread CPU per frame, frames over the frame budget, late frames, and what an idle open panel spends on live ticks:
+
+```sh
+swift build -c release
+.build/release/AgentTrail --benchmark-scroll projects --copies 8
+.build/release/AgentTrail --benchmark-scroll growth --copies 8
+```
+
+`--copies N` repeats the five sample projects, and `--real` reads your own history the way the app does. `--quiet` stops the refresh and live timers for steadier comparisons. `--offscreen` steps on a timer and renders each step itself when no display link runs, for example on a locked screen; only its CPU figures are meaningful. Compare builds on the same Mac with the pointer in the same place, over several runs. Under Instruments, scrolling and idle time appear as points of interest. A card that scrolls into sight is built, measured, and given its AppKit views in a single frame, so keep cards cheap to create: avoid nested `ViewThatFits`, a SwiftUI `Menu` per row, and a timeline per row. Keep cards equatable, so a live tick redraws only the cards whose project changed.
+
 ## Make a focused change
 
 Describe the user-visible problem, the proposed behavior, and how you checked it. Keep changes small enough to review. Run `swift test` and a release build before opening a pull request. For interface changes, include a screenshot from demo mode and verify readability in light and dark appearances.

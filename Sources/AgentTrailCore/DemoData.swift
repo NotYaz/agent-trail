@@ -14,10 +14,14 @@ public enum DemoData {
     /// About six months of edit moments and session starts for five projects,
     /// generated per local activity day in the calendar's time zone. The UTC
     /// history is derived from those moments, so both views always agree.
-    public static func result(now: Date = Date(), calendar: Calendar = .current) -> ScanResult {
+    /// `copies` above 1 adds numbered copies ("orbit-2") with their own numbers,
+    /// for measuring long lists.
+    public static func result(now: Date = Date(), calendar: Calendar = .current, copies: Int = 1) -> ScanResult {
         let activityCalendar = ActivityCalendar(timeZone: calendar.timeZone)
-        let records: [ProjectActivity] = plans.enumerated().map { index, plan in
-            activity(plan, index: index, now: now, calendar: activityCalendar)
+        let records: [ProjectActivity] = (0..<max(copies, 1)).flatMap { copy in
+            plans.enumerated().map { index, plan in
+                activity(copied(plan, copy), index: copy * plans.count + index, now: now, calendar: activityCalendar)
+            }
         }
         // Atlas was moved; Agent Trail remembers where it used to be.
         let locations = ProjectLocationRegistry.demo([(atlas, [("/Demo/Archive/atlas", .move)])], now: now)
@@ -113,6 +117,21 @@ public enum DemoData {
             sessionCount: starts.count, workspacePath: plan.workspace ?? plan.project,
             latestEditWorkspacePath: plan.editWorkspace, history: ActivityDay.merge(editDays + sessionDays),
             editMoments: moments, sessionStarts: starts)
+    }
+
+    /// The first copy is the plan itself; later copies move every path to "{project}-{n}".
+    private static func copied(_ plan: Plan, _ copy: Int) -> Plan {
+        guard copy > 0 else { return plan }
+        var moved = plan
+        moved.project = copyPath(plan.project, copy)
+        moved.workspace = plan.workspace.map { $0.replacingOccurrences(of: plan.project, with: moved.project) }
+        moved.editWorkspace = plan.editWorkspace.map { $0.replacingOccurrences(of: plan.project, with: moved.project) }
+        return moved
+    }
+
+    /// "/Demo/Projects/orbit" → "/Demo/Projects/orbit-2" for copy 1.
+    public static func copyPath(_ path: String, _ copy: Int) -> String {
+        copy > 0 ? "\(path)-\(copy + 1)" : path
     }
 
     /// Share of edits first recorded in a subagent or spawned thread. Grok reports none.

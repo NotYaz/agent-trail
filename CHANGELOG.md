@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Smoother scrolling.** Project cards are much cheaper to bring into view, so the Projects list no longer stutters each time a card appears, and both tabs stop pausing every 3 seconds when live status refreshes. A live check that changes nothing redraws nothing, and history is no longer merged again on every check. Cards look and behave as before; the ⋯ menu now opens when the click is released, like the Jump control's menu.
+- `AgentTrail --benchmark-scroll projects|growth` measures scrolling with sample data or your own history (see CONTRIBUTING).
+
 ## 0.1.0-alpha.9 — 2026-11-02
 
 - **Background commands keep a Claude session working.** When a turn ends while a Bash command it started is still running, such as a background build or a wait on a training run, the session now shows Working ("Working in background") instead of Idle until the command exits. Agent Trail sees this from the session process's children: Claude runs each Bash command in its own process group, while MCP servers stay in Claude's. It reads only parent, group, and start time, never arguments. `AgentTrailInspect --live` reports `backgroundSince`.

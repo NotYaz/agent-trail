@@ -83,6 +83,22 @@ final class ActivityHistoryTests: XCTestCase {
         }
     }
 
+    /// Copies for long-list measurements leave the first five projects exactly as rendered.
+    func testSampleCopiesKeepTheOriginalsAndAddNumberedProjects() {
+        let now = DemoData.referenceDate(calendar: Self.gmtPlus3)
+        let single = DemoData.result(now: now, calendar: Self.gmtPlus3)
+        let copied = DemoData.result(now: now, calendar: Self.gmtPlus3, copies: 3)
+        XCTAssertEqual(copied.projects.count, single.projects.count * 3)
+        for project in single.projects {
+            XCTAssertEqual(copied.projects.first { $0.path == project.path }, project)
+            let second = copied.projects.first { $0.path == project.path + "-2" }
+            XCTAssertNotNil(second)
+            XCTAssertNotEqual(second?.activities.map(\.editMoments), project.activities.map(\.editMoments))
+        }
+        XCTAssertEqual(DemoData.copyPath("/Demo/Projects/orbit", 0), "/Demo/Projects/orbit")
+        XCTAssertEqual(DemoData.copyPath("/Demo/Projects/orbit", 2), "/Demo/Projects/orbit-3")
+    }
+
     /// A fixed zone east of UTC, so local activity days and UTC days disagree.
     private static let gmtPlus3: Calendar = {
         var calendar = Calendar(identifier: .gregorian)

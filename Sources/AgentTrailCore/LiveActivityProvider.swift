@@ -64,7 +64,7 @@ public struct LiveSessionDetails: Hashable, Sendable {
     public static let none = LiveSessionDetails()
 }
 
-public struct LiveAgentSession: Identifiable, Sendable {
+public struct LiveAgentSession: Identifiable, Equatable, Sendable {
     public var id: String { "\(sourceID):\(sessionID):\(pid)" }
     public let sourceID: String
     public let projectPath: String

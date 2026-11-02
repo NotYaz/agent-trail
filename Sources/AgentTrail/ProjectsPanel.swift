@@ -80,6 +80,7 @@ struct AgentTrailPanel: View {
     @Binding private var focusSearch: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.rendersStill) private var rendersStill
+    @Environment(\.referenceNow) private var referenceNow
     @AppStorage("projectSort") private var storedSort: ProjectSort = .attention
     @State private var search = ""
     @State private var sharedOnly = false
@@ -87,6 +88,8 @@ struct AgentTrailPanel: View {
     @State private var waitingOnly = false
     @State private var showNotices = false
     @State private var toolbarPinned = false
+    /// One clock for every card's relative ages, instead of a timeline per card.
+    @State private var clock = Date()
     @FocusState private var searchFocused: Bool
 
     /// `focusSearch` is a token: each change focuses the search field (⌘F).
@@ -114,17 +117,36 @@ struct AgentTrailPanel: View {
         .coordinateSpace(NamedCoordinateSpace.named(AgentTrailPanel.scrollSpace))
         .scrollIndicators(.automatic)
         .onChange(of: focusSearch) { _, _ in focusSearchField() }
+        .task(id: clockInterval) { await runClock(every: clockInterval) }
+    }
+
+    // MARK: Clock
+
+    private var cardsAreActive: Bool { isActive && store.isPanelVisible }
+
+    /// Relative ages refresh every 30 s while the tab is in front and rarely otherwise.
+    private var clockInterval: TimeInterval { cardsAreActive ? 30 : 300 }
+
+    /// Ticks at once, so ages catch up when the tab comes back to the front.
+    private func runClock(every interval: TimeInterval) async {
+        clock = Date()
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(interval))
+            guard !Task.isCancelled else { return }
+            clock = Date()
+        }
     }
 
     // MARK: Pulse
 
     private var pulseStrip: some View {
-        PulseStrip(pulse: store.pulse, live: store.liveSummary, lastLiveScan: store.lastLiveScan,
+        PulseStrip(pulse: store.pulse, live: store.liveSummary, hasLiveScan: store.lastLiveScan != nil,
                    isFirstIndex: store.lastScan == nil && store.isScanning,
                    onLive: { applyLiveFilter() },
                    onOpenGrowth: { (period: StatsPeriod?, anchor: GrowthAnchor) in
                        store.showGrowth(projectPath: nil, period: period, anchor: anchor)
                    })
+            .equatable()
             .padding(.horizontal, Theme.Space.gutter)
             .padding(.top, Theme.Space.s)
     }
@@ -154,10 +176,15 @@ struct AgentTrailPanel: View {
         if !notices.isEmpty { noticesRow(notices) }
     }
 
+    /// Cards are equatable, so each input decides when a card redraws. Scanning
+    /// only rewords a card without a recorded edit, so a routine refresh leaves
+    /// every other card alone.
     private func card(_ project: ProjectOverview) -> some View {
         ProjectCard(project: project, trend: store.trends[project.path], sources: store.sources,
-                    runningSourceIDs: store.runningSourceIDs, isScanning: store.isScanning,
-                    lastLiveScan: store.lastLiveScan, isActive: isActive && store.isPanelVisible,
+                    runningSourceIDs: store.runningSourceIDs,
+                    isScanning: store.isScanning && project.history?.latestEdit == nil,
+                    hasLiveScan: store.lastLiveScan != nil, liveIsFresh: store.liveIsFresh,
+                    now: referenceNow ?? clock, isActive: cardsAreActive,
                     demoMode: store.demoMode, location: store.location(for: project.path),
                     missingFolder: store.missingFolder(for: project.path),
                     isUnavailable: store.unavailableProjects.contains(project.path),
@@ -170,6 +197,7 @@ struct AgentTrailPanel: View {
                     locate: { (missing: MissingFolder?) in store.locateMovedFolder(projectPath: project.path, missing: missing) },
                     forget: { store.forgetPreviousLocations(of: project.path) },
                     showInGrowth: { store.showGrowth(projectPath: project.path, period: nil, anchor: .chart) })
+            .equatable()
             .padding(.horizontal, Theme.Space.gutter)
     }
 

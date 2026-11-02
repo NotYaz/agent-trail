@@ -8,7 +8,8 @@ import AgentTrailCore
 struct ProjectLiveStatusView: View {
     private let activity: ProjectLiveActivity
     private let sources: [AgentSource]
-    private let lastScan: Date?
+    /// Live reports are still arriving (AppStore.liveIsFresh); a stalled reader stops the pulse.
+    private let isFresh: Bool
     private let isActive: Bool
     private let demoMode: Bool
     private let focus: (AgentSource) -> Void
@@ -24,12 +25,12 @@ struct ProjectLiveStatusView: View {
     @State private var waitingBounce = 0
 
     /// `isActive` is true only while the tab is in front and the panel is visible; it gates the pulse.
-    init(activity: ProjectLiveActivity, sources: [AgentSource], lastScan: Date?, isActive: Bool = true,
+    init(activity: ProjectLiveActivity, sources: [AgentSource], isFresh: Bool, isActive: Bool = true,
          demoMode: Bool = false, focus: @escaping (AgentSource) -> Void,
          jump: ((LiveAgentSession) -> Void)? = nil) {
         self.activity = activity
         self.sources = sources
-        self.lastScan = lastScan
+        self.isFresh = isFresh
         self.isActive = isActive
         self.demoMode = demoMode
         self.focus = focus
@@ -103,15 +104,8 @@ struct ProjectLiveStatusView: View {
         }
     }
 
-    /// The 3 s clock exists only while a pulse is possible; it re-checks scan freshness.
-    @ViewBuilder private var workingGlyph: some View {
-        if canPulse {
-            TimelineView(.periodic(from: .now, by: 3)) { context in
-                StatusGlyph(kind: .working, size: 11, animates: isFreshScan(now: context.date))
-            }
-        } else {
-            StatusGlyph(kind: .working, size: 11)
-        }
+    private var workingGlyph: some View {
+        StatusGlyph(kind: .working, size: 11, animates: canPulse && isFresh)
     }
 
     private var canPulse: Bool { isActive && !reduceMotion && !rendersStill }
@@ -364,12 +358,6 @@ struct ProjectLiveStatusView: View {
         case .idle: return 2
         case .unknown: return 3
         }
-    }
-
-    private func isFreshScan(now: Date) -> Bool {
-        guard let lastScan else { return false }
-        let age = now.timeIntervalSince(lastScan)
-        return age >= -5 && age <= 10
     }
 
     private func sourceName(_ id: String) -> String {

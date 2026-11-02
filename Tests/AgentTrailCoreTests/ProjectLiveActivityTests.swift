@@ -292,6 +292,43 @@ final class ProjectLiveActivityTests: XCTestCase {
         XCTAssertEqual(moved.live?.sessions.first?.details, sampleDetails)
     }
 
+    /// The app folds history once and joins every live tick to it; each tick must
+    /// match a full merge, including copies, live-only projects and re-homing.
+    func testHistoryIndexJoinsEachLiveSnapshotLikeAFullMerge() {
+        let projects = [history(path: "/Demo/Repository", activity: 100, edits: 3),
+                        history(path: "/Demo/Repository", source: "second", activity: 90, edits: 1),
+                        history(path: "/Demo/Other", activity: 80, edits: 2),
+                        history(path: "/Demo/Other", activity: 80, edits: 2)]
+        let association = SessionProjectAssociation(sourceID: "main", sessionID: "launched",
+            recordedWorkspace: "/Demo/Launch", projectPath: "/Demo/Repository")
+        let index = ProjectHistoryIndex(projects: projects)
+        let ticks: [[LiveAgentSession]] = [
+            [],
+            [session(project: "/Demo/Launch", id: "launched", status: .working)],
+            [session(project: "/Demo/Launch", id: "launched", status: .waiting, updated: 103),
+             session(source: "second", project: "/Demo/Other", id: "other", pid: 11, status: .idle),
+             session(project: "/Demo/LiveOnly", id: "fresh", pid: 12, status: .unknown)]
+        ]
+        for sessions in ticks {
+            let joined = ProjectOverview.merge(history: index, sessions: sessions, sessionProjects: [association])
+            let full = ProjectOverview.merge(projects: projects, sessions: sessions, sessionProjects: [association])
+            XCTAssertEqual(joined, full)
+        }
+        let homed = ProjectOverview.merge(history: index, sessions: ticks[1], sessionProjects: [association])
+        XCTAssertEqual(homed.first { $0.path == "/Demo/Repository" }?.live?.sessions.map(\.sessionID), ["launched"])
+    }
+
+    /// Re-homing needs saved activity from the same profile in the target project.
+    func testHistoryIndexDoesNotRehomeIntoAProjectWithoutThatProfile() {
+        let index = ProjectHistoryIndex(projects: [history(path: "/Demo/Repository", source: "second", activity: 100)])
+        let association = SessionProjectAssociation(sourceID: "main", sessionID: "launched",
+            recordedWorkspace: "/Demo/Launch", projectPath: "/Demo/Repository")
+        let result = ProjectOverview.merge(history: index, sessions: [session(project: "/Demo/Launch", id: "launched")],
+                                           sessionProjects: [association])
+        XCTAssertEqual(result.first { $0.path == "/Demo/Launch" }?.live?.sessions.count, 1)
+        XCTAssertNil(result.first { $0.path == "/Demo/Repository" }?.live)
+    }
+
     /// Synthetic values only.
     private var sampleDetails: LiveSessionDetails {
         LiveSessionDetails(title: "Tighten sync retries", desktopSessionID: "local_demo-1",

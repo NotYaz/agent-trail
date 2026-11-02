@@ -23,6 +23,7 @@ enum GrowthAnchor: Hashable {
 final class AppStore: ObservableObject {
     @Published var projects: [ProjectSummary] = [] {
         didSet {
+            historyIndex = ProjectHistoryIndex(projects: projects)
             rebuildProjectOverviews()
             scheduleStatistics()
         }
@@ -41,7 +42,12 @@ final class AppStore: ObservableObject {
         didSet { rebuildProjectOverviews() }
     }
     @Published var liveNotices: [String] = []
-    @Published var lastLiveScan: Date?
+    /// When the live reader last answered. Not published, so a tick that changes
+    /// nothing else redraws nothing: views only ask whether it has answered, and
+    /// its first answer always publishes `liveSessions`.
+    private(set) var lastLiveScan: Date?
+    /// True while live reports keep arriving, so working glyphs may pulse.
+    @Published private(set) var liveIsFresh = false
     /// Where each re-homed session was started, and the project it worked in.
     @Published private(set) var sessionProjects: [SessionProjectAssociation] = []
     /// Learned earlier locations of moved checkouts.
@@ -70,6 +76,10 @@ final class AppStore: ObservableObject {
     /// False while the popover is closed, so continuous effects can stop.
     @Published var isPanelVisible = true
     let demoMode: Bool
+    /// Numbered copies of the sample projects, for measuring long lists.
+    private let demoCopies: Int
+    /// False keeps the refresh and live timers off, for steady measurements.
+    private let refreshesPeriodically: Bool
     /// A fixed clock for deterministic renders; nil follows the system clock.
     let pinnedNow: Date?
     var now: Date { pinnedNow ?? Date() }
@@ -98,24 +108,53 @@ final class AppStore: ObservableObject {
     /// Not published: views fill it while rendering, which must not schedule another update.
     private var statisticsCache: [StatisticsKey: ActivityStatistics] = [:]
     private var timeZoneObserver: NSObjectProtocol?
+    /// History folded by canonical folder, rebuilt with `projects` so live ticks only join sessions to it.
+    private var historyIndex = ProjectHistoryIndex.empty
 
     private func rebuildProjectOverviews() {
         let locations = projectLocations
-        projectOverviews = ProjectOverview.merge(projects: projects, sessions: liveSessions,
+        let overviews = ProjectOverview.merge(history: historyIndex, sessions: liveSessions,
             sessionProjects: sessionProjects,
             relocate: locations.locations.isEmpty ? nil : { locations.relocatedPath($0) })
+        if overviews != projectOverviews { projectOverviews = overviews }
         let summary = LiveSummary.make(projectOverviews)
         // The menu-bar tint subscribes to this; an unchanged snapshot stays quiet.
         if summary != liveSummary { liveSummary = summary }
     }
 
     /// Identity state must be in place before `projects` changes, because that
-    /// assignment rebuilds the overview.
-    private func applyIdentity(_ result: ScanResult) {
-        sessionProjects = result.sessionProjects
-        projectLocations = result.projectLocations
-        missingFolders = result.missingFolders
-        unavailableProjects = result.unavailableProjects
+    /// assignment rebuilds the overview. Returns whether the overview's identity
+    /// inputs changed. Unchanged values are not reassigned, so they publish nothing.
+    @discardableResult
+    private func applyIdentity(_ result: ScanResult) -> Bool {
+        var changed = false
+        if sessionProjects != result.sessionProjects {
+            sessionProjects = result.sessionProjects
+            changed = true
+        }
+        if projectLocations != result.projectLocations {
+            projectLocations = result.projectLocations
+            changed = true
+        }
+        if missingFolders != result.missingFolders { missingFolders = result.missingFolders }
+        if unavailableProjects != result.unavailableProjects { unavailableProjects = result.unavailableProjects }
+        return changed
+    }
+
+    /// A refresh usually finds the history it already has; reassigning it would
+    /// redraw every card and rebuild the overview for nothing.
+    private func applyHistory(_ result: ScanResult) {
+        let identityChanged = applyIdentity(result)
+        if projects != result.projects {
+            projects = result.projects
+        } else if identityChanged {
+            rebuildProjectOverviews()
+        }
+    }
+
+    private func updateRunningSources() {
+        let running = Set(InstanceController.runningInstances(sources: sources).keys)
+        if running != runningSourceIDs { runningSourceIDs = running }
     }
 
     func location(for path: String) -> ProjectLocation? {
@@ -127,8 +166,11 @@ final class AppStore: ObservableObject {
         missingFolders.filter { $0.projectPath == path }.max { $0.editCount < $1.editCount }
     }
 
-    init(demoMode: Bool = CommandLine.arguments.contains("--demo"), now: Date? = nil) {
+    init(demoMode: Bool = CommandLine.arguments.contains("--demo"), now: Date? = nil, demoCopies: Int = 1,
+         refreshesPeriodically: Bool = true) {
         self.demoMode = demoMode
+        self.demoCopies = max(demoCopies, 1)
+        self.refreshesPeriodically = refreshesPeriodically
         pinnedNow = now
         AppSettings.registerDefaults()
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -146,6 +188,7 @@ final class AppStore: ObservableObject {
     }
 
     private func scheduleRefresh() {
+        guard refreshesPeriodically else { return }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -206,7 +249,7 @@ final class AppStore: ObservableObject {
 
     func refresh() {
         if demoMode {
-            let result = DemoData.result(now: now, calendar: .current)
+            let result = DemoData.result(now: now, calendar: .current, copies: demoCopies)
             applyIdentity(result)
             projects = result.projects
             lastScan = result.scannedAt
@@ -216,7 +259,7 @@ final class AppStore: ObservableObject {
         guard configurationIsValid else { return }
         guard !isScanning else { return }
         isScanning = true
-        runningSourceIDs = Set(InstanceController.runningInstances(sources: sources).keys)
+        updateRunningSources()
         let currentSources = sources
         let targetCache = cacheURL
         let currentGeneration = generation
@@ -240,9 +283,8 @@ final class AppStore: ObservableObject {
         }, completion: { [weak self] result in
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration else { return }
-                self.applyIdentity(result)
-                self.projects = result.projects
-                self.notices = result.notices
+                self.applyHistory(result)
+                if self.notices != result.notices { self.notices = result.notices }
                 self.lastScan = result.scannedAt
                 self.isScanning = false
                 self.scanProgress = nil
@@ -253,7 +295,7 @@ final class AppStore: ObservableObject {
     func focus(_ source: AgentSource) {
         guard !demoMode else { return }
         errorMessage = InstanceController.focus(source: source)
-        runningSourceIDs = Set(InstanceController.runningInstances(sources: sources).keys)
+        updateRunningSources()
     }
 
     // MARK: Jump
@@ -309,7 +351,7 @@ final class AppStore: ObservableObject {
     }
 
     private func applyJump(_ outcome: JumpOutcome) {
-        runningSourceIDs = Set(InstanceController.runningInstances(sources: sources).keys)
+        updateRunningSources()
         switch outcome {
         case .done:
             errorMessage = nil
@@ -363,18 +405,23 @@ final class AppStore: ObservableObject {
 
     private func resetLive() {
         isLiveScanning = false
+        lastLiveScan = nil
         liveSessions = []
         liveNotices = []
-        lastLiveScan = nil
+        updateLiveFreshness()
     }
 
     func refreshLive() {
-        // The 3 s tick doubles as the day-rollover clock; it never rebuilds otherwise.
+        // The 3 s tick doubles as the day-rollover and live-freshness clock.
         checkDayRollover()
+        updateLiveFreshness()
         if demoMode {
             let now = self.now
-            liveSessions = Self.demoLiveSessions(sources: sources, now: now)
             lastLiveScan = now
+            liveSessions = (0..<demoCopies).flatMap { (copy: Int) -> [LiveAgentSession] in
+                Self.demoLiveSessions(sources: sources, now: now).map { Self.demoCopy($0, copy) }
+            }
+            updateLiveFreshness()
             return
         }
         guard configurationIsValid, !isLiveScanning else { return }
@@ -383,13 +430,24 @@ final class AppStore: ObservableObject {
         liveReader.scan(sources: sources) { [weak self] snapshot in
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration else { return }
-                self.liveSessions = snapshot.sessions
-                self.liveNotices = snapshot.notices
+                let firstAnswer = self.lastLiveScan == nil
                 self.lastLiveScan = snapshot.scannedAt
+                // Most ticks report what the last one did. The first answer always
+                // publishes, so views and the menu bar learn that live status was checked.
+                if firstAnswer || snapshot.sessions != self.liveSessions { self.liveSessions = snapshot.sessions }
+                if snapshot.notices != self.liveNotices { self.liveNotices = snapshot.notices }
                 self.isLiveScanning = false
-                self.runningSourceIDs = Set(InstanceController.runningInstances(sources: self.sources).keys)
+                self.updateRunningSources()
+                self.updateLiveFreshness()
             }
         }
+    }
+
+    /// A report from the last 10 s, allowing 5 s of clock skew, as the working
+    /// pulse has always required. A stalled reader stops the pulse.
+    private func updateLiveFreshness() {
+        let fresh = lastLiveScan.map { (-5...10).contains(now.timeIntervalSince($0)) } ?? false
+        if fresh != liveIsFresh { liveIsFresh = fresh }
     }
 
     /// Ask where a moved folder is now, check it against the recorded evidence,
@@ -509,6 +567,15 @@ final class AppStore: ObservableObject {
                                          sessionID: "sample-grok-idle", status: .idle,
                                          updatedAt: now.addingTimeInterval(-70), pid: 4106, details: grokIdle))
         return sessions
+    }
+
+    private static func demoCopy(_ session: LiveAgentSession, _ copy: Int) -> LiveAgentSession {
+        guard copy > 0 else { return session }
+        let project = DemoData.copyPath(session.projectPath, copy)
+        return LiveAgentSession(sourceID: session.sourceID, projectPath: project,
+                                workspacePath: session.workspacePath.replacingOccurrences(of: session.projectPath, with: project),
+                                sessionID: "\(session.sessionID)-\(copy + 1)", status: session.status,
+                                updatedAt: session.updatedAt, pid: session.pid + Int32(copy * 100), details: session.details)
     }
 
     func reveal(path: String) {

@@ -16,6 +16,12 @@ enum AgentTrailApp {
 
     @MainActor static func main() {
         let application = NSApplication.shared
+        if CommandLine.arguments.contains("--benchmark-scroll") {
+            application.setActivationPolicy(.accessory)
+            ScrollBenchmark.start(arguments: CommandLine.arguments)
+            application.run()
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(where: { renderFlags.contains($0) }) {
             application.setActivationPolicy(.prohibited)
             guard index + 1 < CommandLine.arguments.count else {
