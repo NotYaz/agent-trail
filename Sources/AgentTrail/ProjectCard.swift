@@ -6,13 +6,20 @@ import AgentTrailCore
 /// trend, row B the location, row C the profile mix, row D the live block and
 /// row E the latest edit with the Jump control. Every number comes from the
 /// cached `ProjectTrend`; live state comes only from the live snapshot.
-struct ProjectCard: View {
+/// Equatable without its closures, so a store change that leaves this project
+/// alone does not redraw or re-measure the card.
+struct ProjectCard: View, Equatable {
     private let project: ProjectOverview
     private let trend: ProjectTrend?
     private let sources: [AgentSource]
     private let runningSourceIDs: Set<String>
     private let isScanning: Bool
-    private let lastLiveScan: Date?
+    /// Whether the live reader has answered yet.
+    private let hasLiveScan: Bool
+    /// Live reports are still arriving, so a working glyph may pulse.
+    private let liveIsFresh: Bool
+    /// The panel's clock for relative ages.
+    private let now: Date
     private let isActive: Bool
     private let demoMode: Bool
     private let location: ProjectLocation?
@@ -30,15 +37,15 @@ struct ProjectCard: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.rendersStill) private var rendersStill
-    @Environment(\.referenceNow) private var referenceNow
     @AppStorage(AppSettings.Key.showSessionTitles) private var showSessionTitles = true
     @State private var confirmForget = false
+    @State private var menuAnchor = MenuAnchorBox()
 
     /// `open` brings a profile's app forward, `jump` opens one live session and
     /// `perform` runs a folder action; all three come from the store.
     init(project: ProjectOverview, trend: ProjectTrend?, sources: [AgentSource], runningSourceIDs: Set<String>,
-         isScanning: Bool, lastLiveScan: Date?, isActive: Bool, demoMode: Bool, location: ProjectLocation?,
-         missingFolder: MissingFolder?, isUnavailable: Bool, isLinking: Bool,
+         isScanning: Bool, hasLiveScan: Bool, liveIsFresh: Bool, now: Date, isActive: Bool, demoMode: Bool,
+         location: ProjectLocation?, missingFolder: MissingFolder?, isUnavailable: Bool, isLinking: Bool,
          open: @escaping (AgentSource) -> Void, jump: @escaping (LiveAgentSession) -> Void,
          perform: @escaping (WorkspaceAction) -> Void, reveal: @escaping () -> Void,
          copyPath: @escaping (String) -> Void, locate: @escaping (MissingFolder?) -> Void,
@@ -48,7 +55,9 @@ struct ProjectCard: View {
         self.sources = sources
         self.runningSourceIDs = runningSourceIDs
         self.isScanning = isScanning
-        self.lastLiveScan = lastLiveScan
+        self.hasLiveScan = hasLiveScan
+        self.liveIsFresh = liveIsFresh
+        self.now = now
         self.isActive = isActive
         self.demoMode = demoMode
         self.location = location
@@ -65,21 +74,28 @@ struct ProjectCard: View {
         self.showInGrowth = showInGrowth
     }
 
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: clockInterval)) { context in
-            card(now: referenceNow ?? context.date)
+    /// Every input but the closures, which only reach the store for this project.
+    static func == (lhs: ProjectCard, rhs: ProjectCard) -> Bool {
+        guard lhs.project == rhs.project, lhs.trend == rhs.trend, lhs.now == rhs.now else { return false }
+        guard lhs.sources == rhs.sources, lhs.runningSourceIDs == rhs.runningSourceIDs else { return false }
+        guard lhs.isScanning == rhs.isScanning, lhs.hasLiveScan == rhs.hasLiveScan,
+              lhs.liveIsFresh == rhs.liveIsFresh, lhs.isActive == rhs.isActive else { return false }
+        guard lhs.demoMode == rhs.demoMode, lhs.location == rhs.location, lhs.missingFolder == rhs.missingFolder else {
+            return false
         }
-        .contextMenu { projectActions }
-        .alert(forgetTitle, isPresented: $confirmForget) {
-            Button("Forget", role: .destructive) { forget() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Session logs that mention those paths stop counting toward this project. A link still at an earlier path is learned again. Nothing on disk changes.")
-        }
+        return lhs.isUnavailable == rhs.isUnavailable && lhs.isLinking == rhs.isLinking
     }
 
-    /// Relative ages refresh every 30 s while the tab is in front and rarely otherwise.
-    private var clockInterval: TimeInterval { isActive ? 30 : 300 }
+    var body: some View {
+        card(now: now)
+            .contextMenu { projectActions }
+            .alert(forgetTitle, isPresented: $confirmForget) {
+                Button("Forget", role: .destructive) { forget() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Session logs that mention those paths stop counting toward this project. A link still at an earlier path is learned again. Nothing on disk changes.")
+            }
+    }
 
     private func card(now: Date) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -148,19 +164,20 @@ struct ProjectCard: View {
         }
     }
 
+    /// A plain button that builds its menu on click: a SwiftUI Menu would put an
+    /// AppKit pop-up button in every card, which made each card slow to appear.
+    /// The face matches that pop-up's: the same 14 × 5 pt symbol image, label-colored
+    /// on whole points in a 20 × 14 pt box.
     private var actionsMenu: some View {
-        Menu {
-            projectActions
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, height: 22)
+        Button(action: showActionsMenu) {
+            Image(nsImage: Self.ellipsis)
+                .renderingMode(.template)
+                .foregroundStyle(.primary)
+                .frame(width: 20, height: 14)
                 .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .buttonStyle(ProjectCardPressStyle())
+        .background(MenuAnchor(box: menuAnchor))
         .help("Project actions")
         .accessibilityLabel("Actions for \(displayName)")
     }
@@ -283,7 +300,7 @@ struct ProjectCard: View {
 
     @ViewBuilder private var liveRow: some View {
         if let live = project.live {
-            ProjectLiveStatusView(activity: live, sources: sources, lastScan: lastLiveScan,
+            ProjectLiveStatusView(activity: live, sources: sources, isFresh: liveIsFresh,
                                   isActive: isActive, demoMode: demoMode, focus: open, jump: jump)
         } else {
             Text(noReportText)
@@ -294,36 +311,28 @@ struct ProjectCard: View {
     }
 
     private var noReportText: String {
-        lastLiveScan == nil ? "Checking live status…" : "No live sessions reported"
+        hasLiveScan ? "No live sessions reported" : "Checking live status…"
     }
 
     // MARK: Row E: last edit and the Jump control
 
     /// The Jump control wins the space: when both do not fit at full width,
     /// the edit summary shortens to "Edited ● 5 min. ago" first, keeping the
-    /// workspace chip while it fits, so a worktree edit stays visible.
+    /// workspace chip while it fits, so a worktree edit stays visible. When even
+    /// that does not fit, the control drops detail instead. The control is built
+    /// once; only the summaries are alternatives.
     private func lastEditRow(now: Date) -> some View {
-        let control = jumpControl(now: now)
-        return ViewThatFits(in: .horizontal) {
-            lastEditLayout(now: now, style: .full, control: control)
-            lastEditLayout(now: now, style: .compactWithChip, control: control)
-            lastEditLayout(now: now, style: .compact, control: control)
-        }
-    }
-
-    private enum EditSummaryStyle {
-        case full, compactWithChip, compact
-    }
-
-    private func lastEditLayout(now: Date, style: EditSummaryStyle, control: JumpControl) -> some View {
-        HStack(spacing: 6) {
-            switch style {
-            case .full: editSummary(now: now)
-            case .compactWithChip: compactEditSummary(now: now, showChip: true)
-            case .compact: compactEditSummary(now: now, showChip: false)
+        LastEditRowLayout(spacing: 6, minimumGap: Theme.Space.xs) {
+            ViewThatFits(in: .horizontal) {
+                editSummary(now: now)
+                compactEditSummary(now: now, showChip: true)
+                compactEditSummary(now: now, showChip: false)
             }
-            Spacer(minLength: Theme.Space.xs)
-            control
+            // Measures the shortest summary; never drawn, hit or read aloud.
+            compactEditSummary(now: now, showChip: false)
+                .hidden()
+                .accessibilityHidden(true)
+            jumpControl(now: now)
         }
     }
 
@@ -527,37 +536,96 @@ struct ProjectCard: View {
 
     // MARK: Actions
 
-    @ViewBuilder private var projectActions: some View {
-        Button("Show in Growth", systemImage: "chart.line.uptrend.xyaxis") { showInGrowth() }
-            .disabled(trend == nil)
-        Divider()
-        Button("Reveal in Finder", systemImage: "folder") { reveal() }
-            .disabled(isUnavailable)
-        Button("Copy project path", systemImage: "doc.on.doc") { copyPath(project.path) }
-        earlierPathActions
+    private static let ellipsis = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)) ?? NSImage()
+
+    /// One entry of the project menu; the ⋯ button and the context menu list the same entries.
+    private enum MenuEntry {
+        case action(String, symbol: String? = nil, enabled: Bool = true, destructive: Bool = false, run: () -> Void)
+        case submenu(String, [(title: String, run: () -> Void)])
+        case divider
+    }
+
+    private var menuEntries: [MenuEntry] {
+        var entries: [MenuEntry] = [
+            .action("Show in Growth", symbol: "chart.line.uptrend.xyaxis", enabled: trend != nil, run: showInGrowth),
+            .divider,
+            .action("Reveal in Finder", symbol: "folder", enabled: !isUnavailable, run: reveal),
+            .action("Copy project path", symbol: "doc.on.doc", run: { copyPath(project.path) })
+        ]
+        if let location, !location.previousLocations.isEmpty {
+            if location.previousLocations.count == 1, let earlier = location.previousPaths.first {
+                entries.append(.action("Copy earlier path", symbol: "clock.arrow.circlepath", run: { copyPath(earlier) }))
+            } else {
+                entries.append(.submenu("Copy earlier path", location.previousPaths.map { (earlier: String) in
+                    (title: PathFormat.abbreviate(earlier), run: { copyPath(earlier) })
+                }))
+            }
+        }
         if canLocateFolder || missingFolder != nil {
-            Divider()
-            Button("Locate moved folder…", systemImage: "questionmark.folder") { locate(locateTarget) }
-                .disabled(demoMode || isLinking)
+            entries += [.divider, .action("Locate moved folder…", symbol: "questionmark.folder",
+                                          enabled: !(demoMode || isLinking), run: { locate(locateTarget) })]
         }
         if hasPreviousLocations {
-            Divider()
-            Button("Forget earlier locations…", role: .destructive) { confirmForget = true }
-                .disabled(demoMode)
+            entries += [.divider, .action("Forget earlier locations…", enabled: !demoMode, destructive: true,
+                                          run: { confirmForget = true })]
+        }
+        return entries
+    }
+
+    @ViewBuilder private var projectActions: some View {
+        ForEach(Array(menuEntries.enumerated()), id: \.offset) { (_, entry: MenuEntry) in
+            switch entry {
+            case .action(let title, let symbol, let enabled, let destructive, let run):
+                let role: ButtonRole? = destructive ? .destructive : nil
+                Group {
+                    if let symbol {
+                        Button(title, systemImage: symbol, role: role, action: run)
+                    } else {
+                        Button(title, role: role, action: run)
+                    }
+                }
+                .disabled(!enabled)
+            case .submenu(let title, let children):
+                Menu(title) {
+                    ForEach(Array(children.enumerated()), id: \.offset) { (_, child: (title: String, run: () -> Void)) in
+                        Button(child.title, action: child.run)
+                    }
+                }
+            case .divider:
+                Divider()
+            }
         }
     }
 
-    @ViewBuilder private var earlierPathActions: some View {
-        if let location, !location.previousLocations.isEmpty {
-            if location.previousLocations.count == 1, let earlier = location.previousPaths.first {
-                Button("Copy earlier path", systemImage: "clock.arrow.circlepath") { copyPath(earlier) }
-            } else {
-                Menu("Copy earlier path") {
-                    ForEach(location.previousPaths, id: \.self) { (earlier: String) in
-                        Button(PathFormat.abbreviate(earlier)) { copyPath(earlier) }
-                    }
-                }
+    /// The same entries as an AppKit menu, under the ⋯ button like a pull-down.
+    /// Titles only, as SwiftUI's own menus show them.
+    private func showActionsMenu() {
+        guard let view = menuAnchor.view, view.window != nil else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for entry in menuEntries {
+            menu.addItem(Self.menuItem(entry))
+        }
+        AnchoredMenu.present(menu, under: view, alignment: .leading)
+    }
+
+    private static func menuItem(_ entry: MenuEntry) -> NSMenuItem {
+        switch entry {
+        case .action(let title, _, let enabled, _, let run):
+            let item = ActionMenuItem(title: title, handler: run)
+            item.isEnabled = enabled
+            return item
+        case .submenu(let title, let children):
+            let submenu = NSMenu()
+            for child in children {
+                submenu.addItem(ActionMenuItem(title: child.title, handler: child.run))
             }
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.submenu = submenu
+            return item
+        case .divider:
+            return .separator()
         }
     }
 
@@ -734,6 +802,47 @@ struct ProjectCard: View {
 
     private static func plural(_ count: Int, _ noun: String) -> String {
         "\(count.formatted()) \(count == 1 ? noun : noun + "s")"
+    }
+}
+
+/// Row E as an HStack of summary, Spacer and Jump control, choosing the summary
+/// as a ViewThatFits over three such rows did: the first summary that fits
+/// beside the control at full detail, or else the shortest one, with the
+/// control taking the rest. Subviews: the summaries' ViewThatFits, a hidden
+/// copy of the shortest summary for measuring, then the control.
+private struct LastEditRowLayout: Layout {
+    let spacing: CGFloat
+    /// The Spacer's minimum length between the summary and the control.
+    let minimumGap: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let widths = self.widths(for: proposal.width, subviews: subviews)
+        let summary = subviews[0].sizeThatFits(ProposedViewSize(width: widths.summary, height: proposal.height))
+        let control = subviews[2].sizeThatFits(ProposedViewSize(width: widths.control, height: proposal.height))
+        return CGSize(width: proposal.width ?? summary.width + gap + control.width,
+                      height: max(summary.height, control.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let widths = self.widths(for: bounds.width, subviews: subviews)
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading,
+                          proposal: ProposedViewSize(width: widths.summary, height: proposal.height))
+        subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+        subviews[2].place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing,
+                          proposal: ProposedViewSize(width: widths.control, height: proposal.height))
+    }
+
+    /// The two spacings around a Spacer at its minimum.
+    private var gap: CGFloat { spacing * 2 + minimumGap }
+
+    /// Widths to propose; nil for both asks for the ideal row.
+    private func widths(for width: CGFloat?, subviews: Subviews) -> (summary: CGFloat?, control: CGFloat?) {
+        guard let width else { return (nil, nil) }
+        let control = subviews[2].sizeThatFits(.unspecified).width
+        let shortest = subviews[1].sizeThatFits(.unspecified).width
+        let room = width - gap - control
+        if shortest <= room { return (room, control) }
+        return (shortest, max(0, width - gap - shortest))
     }
 }
 

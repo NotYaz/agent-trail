@@ -118,7 +118,7 @@ public struct EditMoment: Hashable, Sendable {
     }
 }
 
-public struct ProjectActivity: Sendable {
+public struct ProjectActivity: Equatable, Sendable {
     public var sourceID: String
     public var projectPath: String
     public var latestActivity: Date
@@ -147,7 +147,7 @@ public struct ProjectActivity: Sendable {
     }
 }
 
-public struct ProjectSummary: Identifiable, Sendable {
+public struct ProjectSummary: Identifiable, Equatable, Sendable {
     public var id: String { path }
     public var path: String
     public var activities: [ProjectActivity]

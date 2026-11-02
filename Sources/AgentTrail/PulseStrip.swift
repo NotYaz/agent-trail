@@ -4,12 +4,12 @@ import AgentTrailCore
 /// Four glanceable tiles above the project list: live sessions now, edits over
 /// the last 7 local days, projects touched this week, and the day streak. Every
 /// value is read from AppStore's precomputed `pulse` and `liveSummary`.
-struct PulseStrip: View {
+struct PulseStrip: View, Equatable {
     static let tileHeight: CGFloat = 74
 
     private let pulse: PulseSummary
     private let live: LiveSummary
-    private let lastLiveScan: Date?
+    private let hasLiveScan: Bool
     private let isFirstIndex: Bool
     private let onLive: () -> Void
     private let onOpenGrowth: (StatsPeriod?, GrowthAnchor) -> Void
@@ -18,14 +18,20 @@ struct PulseStrip: View {
 
     /// `onLive` turns on a live filter; `onOpenGrowth` opens Growth at a period
     /// (nil keeps the current one) and scrolls to an anchor.
-    init(pulse: PulseSummary, live: LiveSummary, lastLiveScan: Date?, isFirstIndex: Bool,
+    init(pulse: PulseSummary, live: LiveSummary, hasLiveScan: Bool, isFirstIndex: Bool,
          onLive: @escaping () -> Void, onOpenGrowth: @escaping (StatsPeriod?, GrowthAnchor) -> Void) {
         self.pulse = pulse
         self.live = live
-        self.lastLiveScan = lastLiveScan
+        self.hasLiveScan = hasLiveScan
         self.isFirstIndex = isFirstIndex
         self.onLive = onLive
         self.onOpenGrowth = onOpenGrowth
+    }
+
+    /// The closures are excluded; they only reach the store.
+    static func == (lhs: PulseStrip, rhs: PulseStrip) -> Bool {
+        lhs.pulse == rhs.pulse && lhs.live == rhs.live && lhs.hasLiveScan == rhs.hasLiveScan
+            && lhs.isFirstIndex == rhs.isFirstIndex
     }
 
     /// History tiles wait for the first index instead of showing zeros.
@@ -54,17 +60,17 @@ struct PulseStrip: View {
 
     private var liveTile: some View {
         PulseStripTile(sentence: liveSentence, help: liveHelp, action: liveAction) {
-            PulseStripLiveFace(live: live, hasScanned: lastLiveScan != nil)
+            PulseStripLiveFace(live: live, hasScanned: hasLiveScan)
         }
     }
 
     private var liveAction: (() -> Void)? {
-        guard lastLiveScan != nil, live.waiting + live.working > 0 else { return nil }
+        guard hasLiveScan, live.waiting + live.working > 0 else { return nil }
         return onLive
     }
 
     private var liveSentence: String {
-        guard lastLiveScan != nil else { return "Live now, checking live status." }
+        guard hasLiveScan else { return "Live now, checking live status." }
         guard live.reportingProjects > 0 else { return "Live now, no live reports." }
         let waiting = live.waiting == 1 ? "1 session needs input" : "\(live.waiting) sessions need input"
         let projects = live.reportingProjects == 1 ? "1 project reporting" : "\(live.reportingProjects) projects reporting"

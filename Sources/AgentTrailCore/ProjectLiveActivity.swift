@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SourceLiveActivity: Identifiable, Sendable {
+public struct SourceLiveActivity: Identifiable, Equatable, Sendable {
     public var id: String { sourceID }
     public let sourceID: String
     public let sessions: [LiveAgentSession]
@@ -14,7 +14,7 @@ public struct SourceLiveActivity: Identifiable, Sendable {
 /// Live evidence for one canonical origin project. An absent group means no live
 /// report, never idle. Status and checkout context come only from supplied live
 /// sessions, without consulting historical activity or edit timestamps.
-public struct ProjectLiveActivity: Identifiable, Sendable {
+public struct ProjectLiveActivity: Identifiable, Equatable, Sendable {
     public var id: String { projectPath }
     public let projectPath: String
     public let sessions: [LiveAgentSession]
@@ -63,7 +63,7 @@ public struct ProjectLiveActivity: Identifiable, Sendable {
 
 /// Joins the current live snapshot to historical projects without manufacturing
 /// history for live-only projects or a live state for historical-only projects.
-public struct ProjectOverview: Identifiable, Sendable {
+public struct ProjectOverview: Identifiable, Equatable, Sendable {
     public var id: String { path }
     public let path: String
     public let history: ProjectSummary?
@@ -80,6 +80,15 @@ public struct ProjectOverview: Identifiable, Sendable {
     public static func merge(projects: [ProjectSummary], sessions: [LiveAgentSession],
                              sessionProjects: [SessionProjectAssociation] = [],
                              relocate: ((String) -> String)? = nil) -> [ProjectOverview] {
+        merge(history: ProjectHistoryIndex(projects: projects), sessions: sessions,
+              sessionProjects: sessionProjects, relocate: relocate)
+    }
+
+    /// The live half of `merge(projects:…)`: history is already folded, so a
+    /// live tick only groups and re-homes sessions.
+    public static func merge(history: ProjectHistoryIndex, sessions: [LiveAgentSession],
+                             sessionProjects: [SessionProjectAssociation] = [],
+                             relocate: ((String) -> String)? = nil) -> [ProjectOverview] {
         // Association changes only identity. Status, PID, report time, details
         // and recorded workspace still come from the independent live reader.
         let associated = sessions.map { session -> LiveAgentSession in
@@ -90,8 +99,7 @@ public struct ProjectOverview: Identifiable, Sendable {
             }
             let paths = Set(candidates.compactMap { liveCanonicalPath($0.projectPath) })
             guard paths.count == 1, let path = paths.first,
-                  projects.contains(where: { liveCanonicalPath($0.path) == path
-                      && $0.activities.contains(where: { $0.sourceID == session.sourceID }) }) else {
+                  history.sourceIDs[path]?.contains(session.sourceID) == true else {
                 guard let relocate, candidates.isEmpty else { return session }
                 let moved = relocate(session.projectPath)
                 guard moved != session.projectPath else { return session }
@@ -100,43 +108,9 @@ public struct ProjectOverview: Identifiable, Sendable {
             return session.relocated(projectPath: path, workspacePath: session.workspacePath)
         }
         let live = ProjectLiveActivity.group(associated)
-        var historical: [String: [ProjectSummary]] = [:]
-        for project in projects {
-            guard let path = liveCanonicalPath(project.path) else { continue }
-            historical[path, default: []].append(project)
-        }
         var joined: [ProjectOverview] = []
-        for path in Set(historical.keys).union(live.keys) {
-            let history: ProjectSummary?
-            if let snapshots = historical[path] {
-                // Input summaries are snapshots, not additional session events.
-                // Canonical aliases/repeated copies must not multiply statistics.
-                var bySource: [String: ProjectActivity] = [:]
-                var editLeaders: [String: ProjectActivity] = [:]
-                for var activity in snapshots.flatMap(\.activities) {
-                    activity.projectPath = path
-                    if activity.latestEdit != nil {
-                        if let current = editLeaders[activity.sourceID] {
-                            if preferEdit(activity, over: current) { editLeaders[activity.sourceID] = activity }
-                        } else {
-                            editLeaders[activity.sourceID] = activity
-                        }
-                    }
-                    if let current = bySource[activity.sourceID], !preferHistory(activity, over: current) { continue }
-                    bySource[activity.sourceID] = activity
-                }
-                // Activity/history snapshots and edit evidence have independent
-                // leaders. A newer metadata-only snapshot must not erase an edit.
-                for (sourceID, leader) in editLeaders {
-                    bySource[sourceID]?.latestEdit = leader.latestEdit
-                    bySource[sourceID]?.latestEditWorkspacePath = leader.latestEditWorkspacePath ?? leader.workspacePath
-                }
-                history = ProjectSummary.merge(Array(bySource.values)).first
-                    ?? ProjectSummary(path: path, activities: [])
-            } else {
-                history = nil
-            }
-            joined.append(ProjectOverview(path: path, history: history, live: live[path]))
+        for path in Set(history.summaries.keys).union(live.keys) {
+            joined.append(ProjectOverview(path: path, history: history.summaries[path], live: live[path]))
         }
         return joined.sorted {
             let leftPriority = overviewAttentionRank($0), rightPriority = overviewAttentionRank($1)
@@ -145,6 +119,58 @@ public struct ProjectOverview: Identifiable, Sendable {
             if leftDate != rightDate { return leftDate > rightDate }
             return $0.path < $1.path
         }
+    }
+}
+
+/// Saved history folded by canonical project folder. Building it resolves every
+/// project path and merges every alias, so it is built when history changes and
+/// reused by each live tick.
+public struct ProjectHistoryIndex: Sendable {
+    /// One summary per canonical folder; aliases and repeated copies are folded.
+    let summaries: [String: ProjectSummary]
+    /// Profiles with saved activity under each canonical folder, for re-homing sessions.
+    let sourceIDs: [String: Set<String>]
+
+    public static let empty = ProjectHistoryIndex(projects: [])
+
+    public init(projects: [ProjectSummary]) {
+        var historical: [String: [ProjectSummary]] = [:]
+        var sources: [String: Set<String>] = [:]
+        for project in projects {
+            guard let path = liveCanonicalPath(project.path) else { continue }
+            historical[path, default: []].append(project)
+            sources[path, default: []].formUnion(project.activities.map(\.sourceID))
+        }
+        summaries = Dictionary(uniqueKeysWithValues: historical.map { path, snapshots in
+            (path, Self.fold(snapshots, path: path))
+        })
+        sourceIDs = sources
+    }
+
+    /// Input summaries are snapshots, not additional session events.
+    /// Canonical aliases/repeated copies must not multiply statistics.
+    private static func fold(_ snapshots: [ProjectSummary], path: String) -> ProjectSummary {
+        var bySource: [String: ProjectActivity] = [:]
+        var editLeaders: [String: ProjectActivity] = [:]
+        for var activity in snapshots.flatMap(\.activities) {
+            activity.projectPath = path
+            if activity.latestEdit != nil {
+                if let current = editLeaders[activity.sourceID] {
+                    if preferEdit(activity, over: current) { editLeaders[activity.sourceID] = activity }
+                } else {
+                    editLeaders[activity.sourceID] = activity
+                }
+            }
+            if let current = bySource[activity.sourceID], !preferHistory(activity, over: current) { continue }
+            bySource[activity.sourceID] = activity
+        }
+        // Activity/history snapshots and edit evidence have independent
+        // leaders. A newer metadata-only snapshot must not erase an edit.
+        for (sourceID, leader) in editLeaders {
+            bySource[sourceID]?.latestEdit = leader.latestEdit
+            bySource[sourceID]?.latestEditWorkspacePath = leader.latestEditWorkspacePath ?? leader.workspacePath
+        }
+        return ProjectSummary.merge(Array(bySource.values)).first ?? ProjectSummary(path: path, activities: [])
     }
 }
 

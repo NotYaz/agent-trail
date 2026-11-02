@@ -55,11 +55,6 @@ struct JumpControl: View {
         }
     }
 
-    /// ViewThatFits drops detail in this order.
-    private enum Density {
-        case full, monogram, noTime, verbOnly
-    }
-
     /// Added above and below each 22 pt face, so hit areas are 44 pt tall. The
     /// chevron, at least 22 pt wide, also gets it on both sides, so it is 44 pt wide too.
     private static let hitSlop: CGFloat = 11
@@ -134,42 +129,48 @@ struct JumpControl: View {
     }
 
     private func primaryFace(_ target: Entry) -> some View {
-        ViewThatFits(in: .horizontal) {
-            primaryLabel(target, density: .full)
-            primaryLabel(target, density: .monogram)
-            primaryLabel(target, density: .noTime)
-            primaryLabel(target, density: .verbOnly)
-        }
-        .padding(.leading, 7)
-        .padding(.trailing, 6)
-        .frame(height: 22)
-        .background(target.tint.opacity(isHovered ? 0.18 : 0.10), in: leadingShape)
-        .padding(.vertical, Self.hitSlop)
-        .contentShape(Rectangle())
+        primaryLabel(target)
+            .padding(.leading, 7)
+            .padding(.trailing, 6)
+            .frame(height: 22)
+            .background(target.tint.opacity(isHovered ? 0.18 : 0.10), in: leadingShape)
+            .padding(.vertical, Self.hitSlop)
+            .contentShape(Rectangle())
     }
 
-    private func primaryLabel(_ entry: Entry, density: Density) -> some View {
-        HStack(spacing: 5) {
-            profileTag(entry, monogram: density != .full)
+    /// Every part of every density, once; JumpLabelLayout shows the densest that fits.
+    private func primaryLabel(_ entry: Entry) -> some View {
+        JumpLabelLayout(spacing: 5) {
+            profileTag(entry, monogram: false)
+                .layoutValue(key: JumpLabelPart.self, value: .tag)
+            profileTag(entry, monogram: true)
+                .layoutValue(key: JumpLabelPart.self, value: .monogram)
             StatusGlyph(kind: entry.kind, size: 10, bounceValue: entry.kind == .needsInput ? waitingCount : nil)
             Text(SessionLabel.verb(entry.session.status))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Self.verbColor(entry.kind))
-            if density != .verbOnly {
+                .layoutValue(key: JumpLabelPart.self, value: .verb)
+            separator
+                .layoutValue(key: JumpLabelPart.self, value: .titleSeparator)
+            titleText(entry, limit: 34)
+                .layoutValue(key: JumpLabelPart.self, value: .title)
+            titleText(entry, limit: 22)
+                .layoutValue(key: JumpLabelPart.self, value: .shortTitle)
+            if let age = entry.age {
                 separator
-                titleText(entry, limit: density == .noTime ? 22 : 34)
-            }
-            if density == .full || density == .monogram, let age = entry.age {
-                separator
+                    .layoutValue(key: JumpLabelPart.self, value: .ageSeparator)
                 Text(age)
                     .font(.system(size: 10.5, weight: .medium).monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .layoutValue(key: JumpLabelPart.self, value: .age)
             }
             Image(systemName: "arrow.up.right")
                 .font(.system(size: 8.5, weight: .bold))
                 .foregroundStyle(.secondary)
         }
         .lineLimit(1)
+        // Parts a density leaves out are placed outside the label; the clip keeps them unseen.
+        .clipShape(JumpLabelClip())
     }
 
     private func profileTag(_ entry: Entry, monogram: Bool) -> some View {
@@ -183,7 +184,7 @@ struct JumpControl: View {
         }
     }
 
-    /// The character cap keeps the ideal width honest for ViewThatFits; the
+    /// The character cap keeps the ideal width honest for JumpLabelLayout; the
     /// middle truncation mode covers any squeeze left after that.
     private func titleText(_ entry: Entry, limit: Int) -> some View {
         Text(Self.middleTruncated(entry.label, limit: limit))
@@ -271,7 +272,7 @@ struct JumpControl: View {
         let content = JumpMenuContent(entries: entries, folder: folder, projectPath: projectPath,
                                       pullRequests: requests, profiles: profiles,
                                       jump: jump, perform: perform, focus: focus)
-        JumpMenu.present(content.makeMenu(), under: view)
+        AnchoredMenu.present(content.makeMenu(), under: view)
     }
 
     // MARK: Wording
@@ -347,6 +348,87 @@ struct JumpControl: View {
         let start = String(text.prefix(head)).trimmingCharacters(in: .whitespaces)
         let end = String(text.suffix(tail)).trimmingCharacters(in: .whitespaces)
         return start + "…" + end
+    }
+}
+
+// MARK: - Label layout
+
+/// What a part of the primary label is. Parts without a key are always shown.
+private enum JumpLabelPart: LayoutValueKey {
+    case always, tag, monogram, verb, titleSeparator, title, shortTitle, ageSeparator, age
+
+    static let defaultValue = JumpLabelPart.always
+
+    /// Densities from most to least detail, as the parts each one shows.
+    static let densities: [Set<JumpLabelPart>] = [
+        [.always, .tag, .verb, .titleSeparator, .title, .ageSeparator, .age],
+        [.always, .monogram, .verb, .titleSeparator, .title, .ageSeparator, .age],
+        [.always, .monogram, .verb, .titleSeparator, .shortTitle],
+        [.always, .monogram, .verb]
+    ]
+}
+
+/// One row of the primary label at the first density whose ideal width fits,
+/// like a ViewThatFits over four labels and with its result, but each part is
+/// built and measured once. Shown parts sit in an HStack-like row, centred
+/// vertically; the rest go far outside the label, where its clip hides them.
+private struct JumpLabelLayout: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let row = self.row(for: proposal.width, subviews: subviews)
+        let height = row.map { subviews[$0.index].sizeThatFits(.unspecified).height }.max() ?? 0
+        return CGSize(width: row.reduce(0) { $0 + $1.width } + gaps(row.count), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let row = self.row(for: proposal.width, subviews: subviews)
+        var x = bounds.minX
+        for part in row {
+            let height = subviews[part.index].sizeThatFits(.unspecified).height
+            subviews[part.index].place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading,
+                                       proposal: ProposedViewSize(width: part.width, height: height))
+            x += part.width + spacing
+        }
+        let shown = Set(row.map(\.index))
+        for index in subviews.indices where !shown.contains(index) {
+            subviews[index].place(at: CGPoint(x: bounds.minX - 10_000, y: bounds.midY), anchor: .leading,
+                                  proposal: .unspecified)
+        }
+    }
+
+    /// The first density whose ideal width fits, at ideal widths; the last when
+    /// none does, with the verb and then the profile tag truncating to fit.
+    private func row(for width: CGFloat?, subviews: Subviews) -> [(index: Int, width: CGFloat)] {
+        var row: [(index: Int, width: CGFloat)] = []
+        for density in JumpLabelPart.densities {
+            row = subviews.indices.filter { density.contains(subviews[$0][JumpLabelPart.self]) }.map {
+                (index: $0, width: subviews[$0].sizeThatFits(.unspecified).width)
+            }
+            guard let width else { return row }
+            if row.reduce(0, { $0 + $1.width }) + gaps(row.count) <= width { return row }
+        }
+        guard let width else { return row }
+        var excess = row.reduce(0) { $0 + $1.width } + gaps(row.count) - width
+        for flexible in [JumpLabelPart.verb, .monogram] {
+            guard excess > 0, let position = row.firstIndex(where: { subviews[$0.index][JumpLabelPart.self] == flexible })
+            else { continue }
+            let cut = min(excess, row[position].width)
+            row[position].width -= cut
+            excess -= cut
+        }
+        return row
+    }
+
+    private func gaps(_ count: Int) -> CGFloat {
+        spacing * CGFloat(max(count - 1, 0))
+    }
+}
+
+/// Clips sideways only, so a bouncing glyph keeps its full height.
+private struct JumpLabelClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(rect.insetBy(dx: 0, dy: -rect.height))
     }
 }
 
@@ -516,15 +598,15 @@ private struct JumpMenuContent {
     }
 }
 
-/// Pops a menu under a view, right-aligned with it.
+/// Pops a menu under a view, aligned with its trailing or leading edge.
 @MainActor
-private enum JumpMenu {
+enum AnchoredMenu {
     /// Kept until the next menu, so no item outlives the menu that sends its action.
     private static var current: NSMenu?
 
-    static func present(_ menu: NSMenu, under view: NSView) {
+    static func present(_ menu: NSMenu, under view: NSView, alignment: HorizontalEdge = .trailing) {
         current = menu
-        let x = view.bounds.width - menu.size.width
+        let x = alignment == .trailing ? view.bounds.width - menu.size.width : 0
         let y: CGFloat = view.isFlipped ? view.bounds.height + 4 : -4
         menu.popUp(positioning: nil, at: NSPoint(x: x, y: y), in: view)
     }
@@ -621,7 +703,7 @@ final class MenuAnchorBox {
     weak var view: NSView?
 }
 
-private struct MenuAnchor: NSViewRepresentable {
+struct MenuAnchor: NSViewRepresentable {
     let box: MenuAnchorBox
 
     func makeNSView(context: Context) -> NSView {
