@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Trail · Which agent touched this project last?</title>
+  <meta name="description" content="A native macOS menu-bar app that puts your coding projects and live Claude, Codex, and Grok sessions in one panel. Local-only, free, and open source.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+  <link rel="canonical" href="https://notyaz.github.io/agent-trail/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Agent Trail">
+  <meta property="og:description" content="Your coding projects and live Claude, Codex, and Grok sessions in one macOS menu-bar panel. Local-only, free, and open source.">
+  <meta property="og:url" content="https://notyaz.github.io/agent-trail/">
+  <meta property="og:image" content="https://notyaz.github.io/agent-trail/assets/og.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Agent Trail activity portrait with synthetic sample data: 1,035 edits by 4 agents">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <svg width="0" height="0" class="defs" aria-hidden="true" focusable="false">
+    <defs>
+      <!-- The menu-bar trail: three nodes joined by dotted edges. -->
+      <symbol id="trail-dots" viewBox="0 0 28 24">
+        <g fill="currentColor">
+          <circle cx="11.2" cy="6" r="1.15"/><circle cx="14" cy="6" r="1.15"/><circle cx="16.8" cy="6" r="1.15"/>
+          <circle cx="9.3" cy="11.1" r="1.15"/><circle cx="10.7" cy="13.4" r="1.15"/>
+          <circle cx="18.7" cy="11.1" r="1.15"/><circle cx="17.3" cy="13.4" r="1.15"/>
+        </g>
+      </symbol>
+      <symbol id="trail" viewBox="0 0 28 24">
+        <use href="#trail-dots"/>
+        <g fill="none" stroke="currentColor" stroke-width="2.3">
+          <circle cx="6" cy="6" r="3.4"/><circle cx="22" cy="6" r="3.4"/><circle cx="14" cy="18.5" r="3.4"/>
+        </g>
+      </symbol>
+      <symbol id="trail-filled" viewBox="0 0 28 24">
+        <use href="#trail-dots"/>
+        <g fill="currentColor">
+          <circle cx="6" cy="6" r="4.6"/><circle cx="22" cy="6" r="4.6"/><circle cx="14" cy="18.5" r="4.6"/>
+        </g>
+      </symbol>
+      <symbol id="i-github" viewBox="0 0 16 16">
+        <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 20 20">
+        <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 3v10m0 0l-4-4m4 4l4-4M4 16h12"/>
+      </symbol>
+      <symbol id="i-arrow" viewBox="0 0 20 20">
+        <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 10h11m0 0l-4.5-4.5M15 10l-4.5 4.5"/>
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 20 20">
+        <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="7" y="7" width="9.5" height="9.5" rx="2"/><path d="M13 4.5V4.4A1.9 1.9 0 0011.1 2.5H4.4A1.9 1.9 0 002.5 4.4v6.7a1.9 1.9 0 001.9 1.9h.1"/></g>
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 20 20">
+        <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5l3.5 3.5 7.5-8"/>
+      </symbol>
+      <symbol id="i-hand" viewBox="0 0 20 20">
+        <path fill="currentColor" d="M9 2.2c.66 0 1.2.54 1.2 1.2V9h.6V4.2a1.2 1.2 0 012.4 0V9.6h.6V6a1.2 1.2 0 012.4 0v6.2c0 3.2-2.4 5.8-5.6 5.8-2.06 0-3.53-.88-4.6-2.55L3.9 12.6a1.18 1.18 0 011.86-1.44l1.44 1.5V4.6a1.2 1.2 0 012.4 0V9h.2V3.4c0-.66.54-1.2 1.2-1.2z" transform="translate(-1 0)"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top" aria-label="Agent Trail home">
+        <img src="assets/icon-64.png" width="28" height="28" alt="">
+        <span>Agent Trail</span>
+      </a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#background">Background work</a>
+        <a href="#features">Features</a>
+        <a href="#privacy">Privacy</a>
+        <a href="#install">Install</a>
+        <a href="#support">Support</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="icon-link" href="https://github.com/NotYaz/agent-trail" aria-label="Agent Trail on GitHub">
+          <svg width="20" height="20" aria-hidden="true"><use href="#i-github"/></svg>
+        </a>
+        <a class="btn btn-small btn-primary" href="#install">Get it</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Hero -->
+    <section class="hero" id="top">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <a class="pill" href="#background">
+            <span class="pill-tag">New</span>
+            <span>Long jobs keep their session Working</span>
+            <svg width="16" height="16" aria-hidden="true"><use href="#i-arrow"/></svg>
+          </a>
+          <h1>Which agent touched this project last?</h1>
+          <p class="lead">
+            Agent Trail is a native macOS menu-bar app that puts your coding projects and live
+            <strong>Claude</strong>, <strong>Codex</strong>, and <strong>Grok</strong> sessions in one panel.
+            See recorded edits and trends, who is working or waiting, and jump back to the session.
+          </p>
+          <div class="cta">
+            <!-- Update with each release, along with the version in the meta line below. -->
+            <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.9">
+              <svg width="18" height="18" aria-hidden="true"><use href="#i-download"/></svg>
+              Download 0.1.0-alpha.9
+            </a>
+            <a class="btn btn-ghost" href="#install">Build from source</a>
+          </div>
+          <ul class="meta" aria-label="Release facts">
+            <li>Public alpha</li>
+            <li>macOS 14+</li>
+            <li>Free · MIT</li>
+            <li>No account, no telemetry</li>
+          </ul>
+        </div>
+
+        <figure class="hero-visual">
+          <div class="menubar" aria-hidden="true">
+            <span class="mb-apple"></span>
+            <span class="mb-spacer"></span>
+            <span class="mb-item mb-trail is-active">
+              <svg class="glyph" viewBox="0 0 28 24" width="22" height="19">
+                <use href="#trail"/>
+                <circle class="runner" r="2.4" fill="currentColor">
+                  <animateMotion dur="2.4s" repeatCount="indefinite" path="M6 6 L22 6 L14 18.5 Z" keyPoints="0;0.33;0.33;0.66;0.66;1;1" keyTimes="0;0.25;0.33;0.58;0.66;0.91;1" calcMode="linear"/>
+                </circle>
+              </svg>
+            </span>
+            <span class="mb-item mb-bar"></span>
+            <span class="mb-item mb-bar short"></span>
+            <span class="mb-clock">Fri 6:40 PM</span>
+          </div>
+          <div class="popover">
+            <picture>
+              <source srcset="assets/projects-dark.webp" media="(prefers-color-scheme: dark)">
+              <img src="assets/projects-light.webp" width="1200" height="1360" fetchpriority="high"
+                   alt="Agent Trail Projects panel with synthetic projects: a Pulse strip with live sessions, 7-day edits, active projects and day streak; project cards with 30-day sparklines, profile mix bars, live needs-input, working and idle counts, and a Jump button.">
+            </picture>
+          </div>
+          <figcaption>Sample data. Every project, path, and count in these screenshots is synthetic.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- Background work -->
+    <section class="section feature-bg" id="background" aria-labelledby="bg-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow"><span class="dot dot-working"></span>New in 0.1.0-alpha.9 · For training runs and other long jobs</p>
+          <h2 id="bg-title">The turn ended. The training run didn’t.</h2>
+          <p class="section-lead">
+            Start a training run, a long build, or a loop that waits on a job, and let Claude’s turn end.
+            Agent Trail keeps that session <strong class="t-working">Working</strong> and labels it
+            <strong class="t-working">Working in background</strong> until the command exits, instead of calling it Idle.
+          </p>
+        </div>
+
+        <figure class="timeline" aria-labelledby="tl-caption">
+          <div class="tl-grid">
+            <div class="tl-marks" aria-hidden="true">
+              <span class="tl-mark" style="--at: 0%">Turn starts</span>
+              <span class="tl-mark" style="--at: 40%">Turn ends</span>
+              <span class="tl-mark" style="--at: 86%">Command exits</span>
+            </div>
+
+            <div class="tl-row">
+              <div class="tl-label">Claude turn</div>
+              <div class="tl-track">
+                <span class="bar bar-turn" style="--from: 0%; --to: 40%">Turn</span>
+              </div>
+            </div>
+            <div class="tl-row">
+              <div class="tl-label">Bash command it started<small>its own process group</small></div>
+              <div class="tl-track">
+                <span class="bar bar-cmd" style="--from: 14%; --to: 86%">training run, build, wait loop</span>
+              </div>
+            </div>
+            <div class="tl-row tl-before">
+              <div class="tl-label">Before alpha.9</div>
+              <div class="tl-track">
+                <span class="bar s-working" style="--from: 0%; --to: 40%">Working</span>
+                <span class="bar s-idle" style="--from: 40%; --to: 100%">Idle</span>
+              </div>
+            </div>
+            <div class="tl-row tl-now">
+              <div class="tl-label">Agent Trail now</div>
+              <div class="tl-track">
+                <span class="bar s-working" style="--from: 0%; --to: 40%">Working</span>
+                <span class="bar s-background" style="--from: 40%; --to: 86%">Working in background</span>
+                <span class="bar s-idle" style="--from: 86%; --to: 100%">Idle</span>
+              </div>
+            </div>
+            <div class="tl-guides" aria-hidden="true">
+              <span style="--at: 40%"></span>
+              <span style="--at: 86%"></span>
+            </div>
+          </div>
+          <figcaption id="tl-caption" class="visually-hidden">
+            Timeline: a Claude turn starts a Bash command and then ends while the command keeps running.
+            Before alpha.9 the session showed Idle as soon as the turn ended. Now it shows Working in background
+            until the command exits, and then Idle.
+          </figcaption>
+        </figure>
+
+        <div class="bg-cards">
+          <article class="card">
+            <h3>What you see</h3>
+            <p>Menus, Jump entries, and the card tooltip say <strong>Working in background</strong>. The tooltip names when the command started:</p>
+            <blockquote class="tooltip-mock">
+              Claude · Main finished its turn, but a command it started at 2:14 PM is still running in the background.
+            </blockquote>
+            <p>The menu-bar dot keeps moving while the job runs. When the command exits the session goes Idle, and if nothing else is working or waiting, the icon shows a checkmark for a few seconds.</p>
+          </article>
+
+          <article class="card">
+            <h3>How it knows</h3>
+            <p>Claude runs each Bash command in its own process group, while MCP servers stay in Claude’s. Agent Trail lists the session process’s children and counts only those that lead their own group and started before the turn ended.</p>
+            <ul class="ptree" aria-label="Example children of a Claude session process">
+              <li class="ptree-root"><span>Claude session process</span></li>
+              <li class="no"><span class="pname">MCP server</span><span class="why">stays in Claude’s group</span><span class="verdict">ignored</span></li>
+              <li class="yes"><span class="pname">Bash command</span><span class="why">own group, started during the turn</span><span class="verdict">counts</span></li>
+              <li class="no"><span class="pname">Hook</span><span class="why">started after the turn ended</span><span class="verdict">ignored</span></li>
+            </ul>
+          </article>
+
+          <article class="card">
+            <h3>What it reads, and the limits</h3>
+            <p>Only each child’s <strong>parent, process group, and start time</strong>, through libproc. No arguments, no environment, and no extra processes started.</p>
+            <ul class="fine-list">
+              <li>A command that never exits keeps its session Working until it ends or the session closes.</li>
+              <li>A job that fully detaches, with no command still waiting on it, cannot be tied to a session. Keep a command waiting on it, such as a loop that polls for the job to finish.</li>
+              <li>Claude sessions only. Codex and Grok status is unchanged.</li>
+              <li><code>AgentTrailInspect --live</code> reports <code>backgroundSince</code>.</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section class="section" id="features" aria-labelledby="features-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">What’s in the panel</p>
+          <h2 id="features-title">Every project once. Every agent on it.</h2>
+          <p class="section-lead">Two assistants, the same repository, different worktrees and conversations. Agent Trail brings recorded history and reported live status together on one card per project, so getting back to work starts with the right window.</p>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-copy">
+            <h3>One card per project, live status on each</h3>
+            <p>A project is the Git checkout where an assistant’s confirmed edits actually landed. Claude, Codex, and Grok working in the same repository share one card, even when they were started in different folders, and the card shows what each of them is doing now.</p>
+            <ul class="checks">
+              <li>A 30-day sparkline, recorded edits with the change from the previous 30 days, and a profile mix bar.</li>
+              <li>The Pulse strip: live sessions, edits in the last 7 days, active projects, and your day streak.</li>
+              <li>Search, Needs input and Working filters, Shared projects, and sorting by edits, trend, or name.</li>
+              <li>Move a repository and its history follows. Earlier locations are remembered.</li>
+            </ul>
+          </div>
+          <div class="feature-media live-media">
+            <div class="status-board" role="list" aria-label="Live status per project">
+              <div class="status-chip" role="listitem"><svg width="16" height="16" class="c-needs" aria-hidden="true"><use href="#i-hand"/></svg><b class="t-needs">Needs input</b><span>Claude asked, or Grok has a permission request</span></div>
+              <div class="status-chip" role="listitem"><span class="dot dot-working"></span><b class="t-working">Working</b><span>An active turn, or a command it started still running</span></div>
+              <div class="status-chip" role="listitem"><span class="dot dot-idle"></span><b>Idle</b><span>The turn ended. It doesn’t mean you need to reply</span></div>
+              <div class="status-chip" role="listitem"><span class="dot dot-unknown"></span><b>Unknown</b><span>No verified status. Never guessed from edits</span></div>
+            </div>
+            <p class="media-note">Each card counts its sessions in every state, in total and by profile. Projects needing input sort first, then working ones.</p>
+          </div>
+        </div>
+
+        <div class="feature-row reverse">
+          <div class="feature-copy">
+            <h3>Jump back to the session</h3>
+            <p>Each card’s main button opens the session that most needs you, with its profile, title, and time in that state. The ⌄ menu lists every live session and opens the worktree in your editor, terminal, or Finder.</p>
+            <ul class="checks">
+              <li><strong>Claude Code</strong> sessions open through Claude’s session link, and with several Claude instances the session’s own instance comes forward first.</li>
+              <li><strong>Codex</strong> threads open through <code>codex://threads</code> when the Codex app owns them.</li>
+              <li><strong>Grok</strong> brings forward the terminal it runs in.</li>
+            </ul>
+            <p class="fine">Agent Trail acts only when you click, and only on apps already running. It never launches, quits, or restarts an assistant, and needs no Automation or Accessibility permission.</p>
+          </div>
+          <div class="feature-media">
+            <div class="jump-stack" aria-label="Jump button priority">
+              <div class="jump jump-needs">
+                <span class="dot dot-p1"></span><span class="jp">Main</span>
+                <svg width="15" height="15" aria-hidden="true"><use href="#i-hand"/></svg>
+                <b>Answer</b><span class="sep">·</span><span class="jt">Run the sync migration</span><span class="ja">4m ↗</span>
+              </div>
+              <div class="jump jump-working">
+                <span class="dot dot-p3"></span><span class="jp">Codex</span>
+                <span class="dot dot-working"></span>
+                <b>Open</b><span class="sep">·</span><span class="jt">Refactor parser tests</span><span class="ja">12m ↗</span>
+              </div>
+              <div class="jump jump-idle">
+                <span class="dot dot-p2"></span><span class="jp">Second</span>
+                <span class="dot dot-idle"></span>
+                <b>Resume</b><span class="sep">·</span><span class="jt">Design token cleanup</span><span class="ja">2h ↗</span>
+              </div>
+              <p class="jump-legend">Needs input first, then working, then idle.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-copy">
+            <h3>A menu-bar icon that tells you</h3>
+            <p>See the state without opening anything. Right-click the icon for live sessions grouped by state, and pick one to jump to it.</p>
+            <p class="fine">Animation runs in Core Animation and stops for Reduce Motion, Low Power Mode, and sleeping displays.</p>
+          </div>
+          <div class="feature-media">
+            <ul class="icon-states">
+              <li>
+                <span class="mbar" aria-hidden="true"><svg viewBox="0 0 28 24" width="26" height="22"><use href="#trail"/></svg></span>
+                <b>Plain trail</b><span>Nothing is working or waiting.</span>
+              </li>
+              <li>
+                <span class="mbar" aria-hidden="true">
+                  <svg viewBox="0 0 28 24" width="26" height="22">
+                    <use href="#trail"/>
+                    <circle class="runner" r="2.4" fill="currentColor">
+                      <animateMotion dur="2.4s" repeatCount="indefinite" path="M6 6 L22 6 L14 18.5 Z" keyPoints="0;0.33;0.33;0.66;0.66;1;1" keyTimes="0;0.25;0.33;0.58;0.66;0.91;1" calcMode="linear"/>
+                    </circle>
+                  </svg>
+                </span>
+                <b>A dot travels the trail</b><span>At least one session is working.</span>
+              </li>
+              <li>
+                <span class="mbar mbar-needs" aria-hidden="true"><svg viewBox="0 0 28 24" width="26" height="22"><use href="#trail-filled"/></svg><span class="count">2</span></span>
+                <b>Amber, with a count</b><span>A session needs input.</span>
+              </li>
+              <li>
+                <span class="mbar" aria-hidden="true"><svg viewBox="0 0 20 20" width="22" height="22"><circle cx="10" cy="10" r="8.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6.3 10.3l2.5 2.5 4.9-5.4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                <b>Checkmark</b><span>Work just finished and nothing else runs.</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-row reverse">
+          <div class="feature-copy">
+            <h3>Growth statistics</h3>
+            <p>Recorded edits per day with a 7-day average and peak, a 26-week Trail calendar, when your edits land by hour and weekday, each profile’s share with delegated edits, and where edits landed.</p>
+            <ul class="checks">
+              <li>Local activity days start at 05:00, so late-night work counts toward the evening it began.</li>
+              <li>Changes are shown only when saved history covers the previous period.</li>
+              <li>Counts are confirmed tool edits, not lines of code, quality, or productivity.</li>
+            </ul>
+          </div>
+          <div class="feature-media">
+            <div class="shot">
+              <picture>
+                <source srcset="assets/growth-dark.webp" media="(prefers-color-scheme: dark)">
+                <img src="assets/growth-light.webp" width="1200" height="1360" loading="lazy" decoding="async"
+                     alt="Agent Trail Growth tab with synthetic data: KPI tiles for recorded edits, active days, saved sessions and busiest day; a stacked recorded-edits chart by profile with a 7-day average; and the Trail calendar.">
+              </picture>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-wide">
+          <div class="feature-copy">
+            <h3>An activity portrait to share</h3>
+            <p>Preview a card for any project and period, then export a PNG to your Mac. Project and profile names are hidden by default. Folder paths and your hour-of-day rhythm are never included, and nothing is posted or uploaded.</p>
+          </div>
+          <div class="shot shot-wide">
+            <img src="assets/portrait.webp" width="1400" height="980" loading="lazy" decoding="async"
+                 alt="Sample exported activity portrait: 1,035 edits by 4 agents across 5 projects in 30 days, a mini calendar, a branching activity tree per anonymized agent, and totals for recorded edits, active days, longest streak, and agents.">
+          </div>
+        </div>
+
+        <div class="assistants" aria-labelledby="assistants-title">
+          <h3 id="assistants-title">Supported assistants</h3>
+          <div class="assistant-grid">
+            <article class="assistant">
+              <h4><span class="dot dot-p1"></span>Claude Desktop</h4>
+              <dl>
+                <dt>Edits</dt><dd>A successful <code>Edit</code> or <code>Write</code></dd>
+                <dt>Live</dt><dd>Needs input, Working (including background commands), Idle</dd>
+                <dt>Jump</dt><dd>Opens the Code session</dd>
+              </dl>
+            </article>
+            <article class="assistant">
+              <h4><span class="dot dot-p3"></span>Codex</h4>
+              <dl>
+                <dt>Edits</dt><dd>A completed <code>FileChange</code></dd>
+                <dt>Live</dt><dd>Working and Idle on loaded threads; input requests are not yet distinguished</dd>
+                <dt>Jump</dt><dd>Opens the thread in the Codex app</dd>
+              </dl>
+            </article>
+            <article class="assistant">
+              <h4><span class="dot dot-p4"></span>Grok</h4>
+              <dl>
+                <dt>Edits</dt><dd>A completed <code>write</code> or <code>search_replace</code></dd>
+                <dt>Live</dt><dd>Needs input for permission requests, Working, Idle</dd>
+                <dt>Jump</dt><dd>Brings its terminal forward</dd>
+              </dl>
+            </article>
+          </div>
+          <p class="fine">Gemini CLI, OpenCode, and Cursor are not supported yet. Shell commands and external editors are not attributed: this is a record of supported agent activity, not a complete audit of file changes.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Privacy -->
+    <section class="section section-tint" id="privacy" aria-labelledby="privacy-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Privacy</p>
+          <h2 id="privacy-title">Everything stays on your Mac.</h2>
+          <p class="section-lead">No account, no telemetry, no cloud, and no automatic update checks. Agent Trail indexes locally and sends your records nowhere.</p>
+        </div>
+        <div class="privacy-grid">
+          <article class="card">
+            <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 9V7a3.5 3.5 0 017 0v2"/><rect x="4.5" y="9" width="11" height="8" rx="2"/></svg></span>
+            <h3>Read-only</h3>
+            <p>It reads the assistants’ private on-disk formats and never writes them. No hooks, no injected code, and no edits to assistant data. Codex turn metadata is opened read-only.</p>
+          </article>
+          <article class="card">
+            <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="10" height="10" rx="2"/><path d="M8 2.5v2.5M12 2.5v2.5M8 15v2.5M12 15v2.5M2.5 8h2.5M2.5 12h2.5M15 8h2.5M15 12h2.5"/></svg></span>
+            <h3>Titles in memory only</h3>
+            <p>Session titles and Claude’s “needs you to…” sentence are read live and kept in memory. They are never cached, exported, or included in renders.</p>
+          </article>
+          <article class="card">
+            <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="10" cy="5.5" rx="6" ry="2.5"/><path d="M4 5.5v9c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5v-9M4 10c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5"/></svg></span>
+            <h3>Caches without content</h3>
+            <p>Incremental caches keep file positions, tool IDs, dates, and paths. Never prompts, commands, patches, diffs, or conversation text. Paths can still be sensitive, so keep them private.</p>
+          </article>
+          <article class="card">
+            <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 13l4-3.5 3 2.5 3-3 4 3.5"/><circle cx="7.5" cy="7.8" r="1.2"/></svg></span>
+            <h3>Exports you control</h3>
+            <p>Portraits are saved where you choose, with names hidden by default and folder paths never included. Dates, totals, and patterns stay visible, so review a card before sharing it.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Install -->
+    <section class="section" id="install" aria-labelledby="install-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Install</p>
+          <h2 id="install-title">Build it yourself, or grab the alpha.</h2>
+          <p class="section-lead">Agent Trail needs macOS 14 or later. It has no third-party dependencies and no developer account is required to build it.</p>
+        </div>
+        <div class="install-grid">
+          <article class="card install-card">
+            <div class="install-head">
+              <h3>Build from source</h3>
+              <span class="badge">Recommended</span>
+            </div>
+            <p>The supported starting point for this alpha. Needs Swift 6 or later, from Xcode or the Command Line Tools.</p>
+            <div class="code">
+              <button class="copy" type="button" data-copy-target="build-cmds" aria-label="Copy build commands">
+                <svg width="16" height="16" aria-hidden="true"><use href="#i-copy"/></svg>
+              </button>
+<pre id="build-cmds"><code>git clone https://github.com/NotYaz/agent-trail.git
+cd agent-trail
+swift test
+./scripts/build-app.sh
+open "dist/Agent Trail.app"</code></pre>
+            </div>
+            <p class="fine">The panel opens right away and a trail icon stays in the menu bar, with no Dock icon. To install, copy <code>dist/Agent Trail.app</code> to Applications.</p>
+          </article>
+
+          <article class="card install-card">
+            <div class="install-head">
+              <h3>Download the alpha</h3>
+              <span class="badge badge-muted">0.1.0-alpha.9</span>
+            </div>
+            <p>A universal ZIP for Apple Silicon and Intel Macs, with a SHA-256 checksum.</p>
+            <p class="warn">Builds are ad-hoc signed and <strong>not notarized</strong>, so Gatekeeper may block a downloaded copy. See Apple’s <a href="https://support.apple.com/en-us/102445">guidance for opening apps safely</a>.</p>
+            <div class="cta">
+              <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.9">
+                <svg width="18" height="18" aria-hidden="true"><use href="#i-download"/></svg>
+                Latest release
+              </a>
+              <a class="btn btn-ghost" href="https://github.com/NotYaz/agent-trail/releases">All releases</a>
+            </div>
+          </article>
+
+          <article class="card install-card">
+            <div class="install-head">
+              <h3>Just looking?</h3>
+            </div>
+            <p>Demo mode shows synthetic projects and live states. It reads none of your assistant history or settings.</p>
+            <div class="code">
+              <button class="copy" type="button" data-copy-target="demo-cmd" aria-label="Copy demo command">
+                <svg width="16" height="16" aria-hidden="true"><use href="#i-copy"/></svg>
+              </button>
+<pre id="demo-cmd"><code>swift run AgentTrail --demo</code></pre>
+            </div>
+            <p class="fine">Read the <a href="https://github.com/NotYaz/agent-trail#readme">README</a> for profiles, live-status details, and what every number means.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Support -->
+    <section class="section section-tint" id="support" aria-labelledby="support-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Support</p>
+          <h2 id="support-title">Free and open source. Support is optional.</h2>
+          <p class="section-lead">Every feature stays available without payment. If Agent Trail saves you time, you can help keep it going.</p>
+        </div>
+
+        <div class="support-links">
+          <a class="support-link" href="https://github.com/sponsors/NotYaz">
+            <span class="sl-title">GitHub Sponsors</span>
+            <span class="sl-sub">NotYaz, when sponsorship is available on the account</span>
+          </a>
+          <a class="support-link" href="https://buymeacoffee.com/lltod">
+            <span class="sl-title">Buy Me a Coffee</span>
+            <span class="sl-sub">buymeacoffee.com/lltod</span>
+          </a>
+          <a class="support-link" href="https://github.com/NotYaz/agent-trail/issues">
+            <span class="sl-title">Report an issue</span>
+            <span class="sl-sub">Reproducible bugs and compatibility reports help the alpha mature</span>
+          </a>
+        </div>
+
+        <details class="crypto">
+          <summary>
+            <span>Crypto addresses</span>
+            <span class="summary-sub">Bitcoin · ETH, USDC, USDT on Ethereum, Base, or Arbitrum One · USDT on TRON</span>
+          </summary>
+          <p class="warn">Send only the assets listed here, and only on the networks shown. Coins sent on any other network are usually lost. The canonical list is <a href="https://github.com/NotYaz/agent-trail/blob/main/docs/SUPPORT.md#crypto">docs/SUPPORT.md</a> in the NotYaz/agent-trail repository; copies of this page can show different addresses. Compare the whole address your wallet shows with that page, not only its first and last characters.</p>
+          <div class="crypto-grid">
+            <article class="wallet">
+              <img src="assets/donate-btc.png" width="156" height="156" loading="lazy" alt="QR code for the Bitcoin address">
+              <h3>BTC <span>on Bitcoin</span></h3>
+              <div class="addr">
+                <code id="addr-btc">bc1qq3jl4wnymxq85xne0sgvx3ykkhp80qzq43hxt0</code>
+                <button class="copy" type="button" data-copy-target="addr-btc" aria-label="Copy Bitcoin address">
+                  <svg width="16" height="16" aria-hidden="true"><use href="#i-copy"/></svg>
+                </button>
+              </div>
+            </article>
+            <article class="wallet">
+              <img src="assets/donate-evm.png" width="156" height="156" loading="lazy" alt="QR code for the ETH, USDC, and USDT address">
+              <h3>ETH, USDC, USDT <span>on Ethereum, Base, or Arbitrum One</span></h3>
+              <div class="addr">
+                <code id="addr-evm">0xffEbCb8D2c5e294436C69d004449654fc5eC84d5</code>
+                <button class="copy" type="button" data-copy-target="addr-evm" aria-label="Copy Ethereum, Base, or Arbitrum One address">
+                  <svg width="16" height="16" aria-hidden="true"><use href="#i-copy"/></svg>
+                </button>
+              </div>
+            </article>
+            <article class="wallet">
+              <img src="assets/donate-tron.png" width="156" height="156" loading="lazy" alt="QR code for the TRON address">
+              <h3>USDT <span>on TRON (TRC-20)</span></h3>
+              <div class="addr">
+                <code id="addr-tron">TUiJVSBHLgRMuZptXBNwYtEXagACujifDj</code>
+                <button class="copy" type="button" data-copy-target="addr-tron" aria-label="Copy TRON address">
+                  <svg width="16" height="16" aria-hidden="true"><use href="#i-copy"/></svg>
+                </button>
+              </div>
+            </article>
+          </div>
+          <p class="fine">Each QR code holds only the address. Agent Trail does not process payments or need access to a wallet.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div class="footer-brand">
+        <img src="assets/icon-64.png" width="32" height="32" alt="">
+        <div>
+          <strong>Agent Trail</strong>
+          <span>MIT license · Screenshots use synthetic sample data</span>
+        </div>
+      </div>
+      <nav class="footer-links" aria-label="Project links">
+        <a href="https://github.com/NotYaz/agent-trail">GitHub</a>
+        <a href="https://github.com/NotYaz/agent-trail/releases">Releases</a>
+        <a href="https://github.com/NotYaz/agent-trail/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/NotYaz/agent-trail/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/NotYaz/agent-trail/blob/main/CONTRIBUTING.md">Contributing</a>
+      </nav>
+      <p class="footer-note">An independent project, not affiliated with Anthropic, OpenAI, xAI, or other assistant vendors.</p>
+    </div>
+  </footer>
+</body>
+</html>
