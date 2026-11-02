@@ -385,7 +385,13 @@ struct ProjectLiveStatusView: View {
         let explanation: String
         switch session.status {
         case .waiting: explanation = Self.waitingExplanation
-        case .working: explanation = "\(sourceName(session.sourceID)) has an active turn or reports working. This does not claim a file is being written."
+        case .working:
+            if let since = session.details.backgroundSince {
+                let time = since.formatted(date: .omitted, time: .shortened)
+                explanation = "\(sourceName(session.sourceID)) finished its turn, but a command it started at \(time) is still running in the background."
+            } else {
+                explanation = "\(sourceName(session.sourceID)) has an active turn or reports working. This does not claim a file is being written."
+            }
         case .idle: explanation = "\(sourceName(session.sourceID)) reported a finished turn or idle state, with no explicit request for input."
         case .unknown: explanation = "No recognized or verified runtime status is available. Recent edits alone do not establish a live state."
         }

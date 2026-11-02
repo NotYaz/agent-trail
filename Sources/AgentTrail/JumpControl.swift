@@ -25,6 +25,8 @@ struct JumpControl: View {
 
         var id: String { session.id }
         var kind: StatusGlyph.Kind { StatusGlyph.Kind(session.status) }
+        /// The kind's title, or "Working in background".
+        var state: String { SessionLabel.state(session, word: kind.title) }
 
         init(session: LiveAgentSession, label: String, title: String?, needsAction: String?,
              profileName: String, tint: Color, age: String?, spokenAge: String?) {
@@ -294,8 +296,8 @@ struct JumpControl: View {
     }
 
     private func primaryAccessibilityValue(_ entry: Entry) -> String {
-        guard let spoken = entry.spokenAge else { return entry.kind.title }
-        return "\(entry.kind.title) for \(spoken)"
+        guard let spoken = entry.spokenAge else { return entry.state }
+        return "\(entry.state) for \(spoken)"
     }
 
     /// Waiting sessions lead with the needs-action sentence.
@@ -304,7 +306,7 @@ struct JumpControl: View {
         if entry.kind == .needsInput { lines.append(entry.needsAction ?? "Needs input") }
         lines.append(entry.title ?? entry.label)
         lines.append(PathFormat.abbreviate(entry.session.workspacePath))
-        var status = "\(entry.kind.title) · \(entry.profileName)"
+        var status = "\(entry.state) · \(entry.profileName)"
         if let spoken = entry.spokenAge { status += " · for \(spoken)" }
         lines.append(status)
         return lines.joined(separator: "\n")
@@ -392,13 +394,13 @@ private struct JumpMenuContent {
         let item = ActionMenuItem(title: entry.label) { jump(session) }
         // The status is in words as well as the glyph: VoiceOver reads the title, not the image.
         item.attributedTitle = MenuText.title(JumpControl.middleTruncated(entry.label, limit: 60),
-                                              detail: "\(entry.kind.title) · \(entry.profileName)")
+                                              detail: "\(entry.state) · \(entry.profileName)")
         item.image = MenuGlyph.status(entry.kind)
         if let age = entry.age { item.badge = NSMenuItemBadge(string: age) }
         // Spoken age, so "4m" is not read as metres.
-        item.setAccessibilityLabel("\(entry.kind.title), \(entry.label), \(entry.profileName)"
+        item.setAccessibilityLabel("\(entry.state), \(entry.label), \(entry.profileName)"
                                    + (entry.spokenAge.map { ", for \($0)" } ?? ""))
-        item.toolTip = "\(entry.profileName) · \(entry.kind.title)\n"
+        item.toolTip = "\(entry.profileName) · \(entry.state)\n"
             + (entry.needsAction ?? PathFormat.abbreviate(session.workspacePath))
         return item
     }

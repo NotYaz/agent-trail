@@ -228,4 +228,43 @@ final class ProcessIdentityTests: XCTestCase {
         XCTAssertNil(ProcessIdentity.readTerminalHints(pid: 0))
         XCTAssertNil(ProcessIdentity.readTerminalHints(pid: Int32.max))
     }
+
+    func testGroupLeaderChildStartsSkipChildrenInTheParentsGroupAndZombies() throws {
+        func spawnSleep(ownGroup: Bool) throws -> pid_t {
+            var attributes: posix_spawnattr_t?
+            posix_spawnattr_init(&attributes)
+            defer { posix_spawnattr_destroy(&attributes) }
+            if ownGroup {
+                posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
+                posix_spawnattr_setpgroup(&attributes, 0)
+            }
+            let arguments: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/sleep"), strdup("30"), nil]
+            defer { arguments.forEach { free($0) } }
+            var pid: pid_t = 0
+            let status = posix_spawn(&pid, "/bin/sleep", nil, &attributes, arguments, environ)
+            guard status == 0 else { throw POSIXError(POSIXErrorCode(rawValue: status) ?? .EPERM) }
+            return pid
+        }
+        let before = Date().addingTimeInterval(-1)
+        let leader = try spawnSleep(ownGroup: true)
+        let member = try spawnSleep(ownGroup: false)
+        defer {
+            for pid in [leader, member] {
+                kill(pid, SIGKILL)
+                var status: Int32 = 0
+                waitpid(pid, &status, 0)
+            }
+        }
+        func recentStarts() -> [Date] {
+            ProcessIdentity.groupLeaderChildStarts(of: getpid()).filter { $0 >= before && $0 <= Date().addingTimeInterval(1) }
+        }
+        XCTAssertEqual(recentStarts().count, 1)
+        // Killed but not yet reaped: a zombie runs nothing.
+        kill(leader, SIGKILL)
+        let deadline = Date().addingTimeInterval(2)
+        while !recentStarts().isEmpty && Date() < deadline { usleep(20_000) }
+        XCTAssertTrue(recentStarts().isEmpty)
+        XCTAssertTrue(ProcessIdentity.groupLeaderChildStarts(of: 0).isEmpty)
+        XCTAssertTrue(ProcessIdentity.groupLeaderChildStarts(of: Int32.max).isEmpty)
+    }
 }

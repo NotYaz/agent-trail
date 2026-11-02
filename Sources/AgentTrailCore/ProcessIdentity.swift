@@ -199,6 +199,26 @@ public struct ProcessIdentity: Sendable {
         return parent > 1 ? parent : nil
     }
 
+    /// Start times of a live process's children that lead their own process group.
+    /// Claude starts every Bash command that way, background ones included, while
+    /// its MCP servers stay in Claude's group. Reads no arguments or environment.
+    public static func groupLeaderChildStarts(of pid: Int32) -> [Date] {
+        guard pid > 0 else { return [] }
+        var children = [pid_t](repeating: 0, count: 512)
+        // Returns a count of PIDs, not bytes, unlike proc_listpids.
+        let count = proc_listchildpids(pid, &children, Int32(children.count * MemoryLayout<pid_t>.size))
+        guard count > 0 else { return [] }
+        return children.prefix(min(Int(count), children.count)).compactMap { child -> Date? in
+            var information = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            guard child > 0, proc_pidinfo(child, PROC_PIDTBSDINFO, 0, &information, size) == size,
+                  information.pbi_ppid == UInt32(pid), information.pbi_pgid == UInt32(child),
+                  information.pbi_status != UInt32(SZOMB) else { return nil }
+            return Date(timeIntervalSince1970: TimeInterval(information.pbi_start_tvsec)
+                + TimeInterval(information.pbi_start_tvusec) / 1_000_000)
+        }
+    }
+
     /// The executable the kernel is running for a live process, without reading
     /// its arguments or environment.
     public static func executablePath(of pid: Int32) -> String? {

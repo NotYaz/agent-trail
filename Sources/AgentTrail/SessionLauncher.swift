@@ -39,6 +39,12 @@ enum SessionLabel {
         title(session, showTitles: showTitles, limit: limit) ?? branch(session) ?? folder(session)
     }
 
+    /// `word` for the status, or "Working in background" while a command from a
+    /// finished turn still runs.
+    static func state(_ session: LiveAgentSession, word: String) -> String {
+        session.status == .working && session.details.backgroundSince != nil ? "Working in background" : word
+    }
+
     /// The action word on the Jump button.
     static func verb(_ status: LiveStatus) -> String {
         switch status {

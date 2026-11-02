@@ -34,10 +34,14 @@ if arguments.contains("--live") {
         "elapsedSeconds": Date().timeIntervalSince(started),
         "notices": snapshot.notices,
         "sessions": snapshot.sessions.map { session -> [String: Any] in
-            ["sourceID": session.sourceID, "project": session.projectPath,
+            var entry: [String: Any] = ["sourceID": session.sourceID, "project": session.projectPath,
              "workspace": session.workspacePath, "sessionID": session.sessionID,
              "status": session.status.rawValue, "pid": session.pid,
              "updatedAt": ISO8601DateFormatter().string(from: session.updatedAt)]
+            if let since = session.details.backgroundSince {
+                entry["backgroundSince"] = ISO8601DateFormatter().string(from: since)
+            }
+            return entry
         }
     ]
     let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
