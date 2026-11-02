@@ -400,7 +400,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// Profile and state, then the needs-action sentence (waiting) or the title,
     /// then the folder. Conversation text is left out while titles are hidden.
     private func sessionHelp(_ session: LiveAgentSession, profile: String, showTitles: Bool) -> String {
-        var lines = ["\(profile) · \(StatusMenuSection.word(for: session.status))"]
+        var lines = ["\(profile) · \(SessionLabel.state(session, word: StatusMenuSection.word(for: session.status)))"]
         // SessionLabel strips control and bidi characters and hides both while titles are off.
         let detail = SessionLabel.needsAction(session, showTitles: showTitles)
             ?? SessionLabel.title(session, showTitles: showTitles)

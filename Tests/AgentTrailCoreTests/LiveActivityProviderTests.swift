@@ -388,6 +388,44 @@ final class LiveActivityProviderTests: XCTestCase {
         XCTAssertNil(byID["stale"]?.details.stateSince)
     }
 
+    func testIdleSessionWithACommandFromItsTurnIsWorkingInBackground() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        for id in ["background", "after-turn", "quiet", "busy", "waiting", "stale"] { try fixture.desktop(id) }
+        let start = "Fri Oct 30 10:02:00 2026"
+        try fixture.live("background", pid: 101, status: "idle", secondsAgo: 600, procStart: start)
+        try fixture.live("after-turn", pid: 102, status: "idle", secondsAgo: 600, procStart: start)
+        try fixture.live("quiet", pid: 103, status: "idle", secondsAgo: 600, procStart: start)
+        try fixture.live("busy", pid: 104, status: "busy", secondsAgo: 10)
+        try fixture.live("waiting", pid: 105, status: "waiting", secondsAgo: 10)
+        try fixture.live("stale", pid: 106, status: "idle", secondsAgo: 600)
+        let commands: [Int32: [Date]] = [
+            101: [fixture.now.addingTimeInterval(-1200), fixture.now.addingTimeInterval(-3600)],
+            // Started after the turn ended, like a hook: not the turn's work.
+            102: [fixture.now.addingTimeInterval(-300)]]
+        var asked: [Int32] = []
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true },
+            processStartTimes: { _ in [101: start, 102: start, 103: start] },
+            commandStarts: { asked.append($0); return commands[$0] ?? [] })
+        let result = provider.scan(sources: [fixture.source], now: fixture.now)
+        let byID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.sessionID, $0) })
+        let background = try XCTUnwrap(byID["background"])
+        XCTAssertEqual(background.status, .working)
+        XCTAssertEqual(background.details.backgroundSince, fixture.now.addingTimeInterval(-3600))
+        // The turn's end stays the state's recorded start.
+        XCTAssertEqual(background.details.stateSince, fixture.now.addingTimeInterval(-600))
+        XCTAssertEqual(byID["after-turn"]?.status, .idle)
+        XCTAssertNil(byID["after-turn"]?.details.backgroundSince)
+        XCTAssertEqual(byID["quiet"]?.status, .idle)
+        XCTAssertEqual(byID["busy"]?.status, .working)
+        XCTAssertNil(byID["busy"]?.details.backgroundSince)
+        XCTAssertEqual(byID["waiting"]?.status, .waiting)
+        // An unverified old idle flag stays unknown whatever its PID runs.
+        XCTAssertEqual(byID["stale"]?.status, .unknown)
+        XCTAssertEqual(Set(asked), [101, 102, 103])
+        XCTAssertEqual(result.sessions.first?.sessionID, "waiting")
+    }
+
     func testDesktopSessionIDShapeMatchesClaudesLinkHandler() {
         XCTAssertTrue(LiveActivityProvider.isDesktopSessionID("local_0f8a-B2c"))
         XCTAssertTrue(LiveActivityProvider.isDesktopSessionID("local_" + String(repeating: "a", count: 64)))

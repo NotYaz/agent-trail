@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0-alpha.9 — 2026-11-02
+
+- **Background commands keep a Claude session working.** When a turn ends while a Bash command it started is still running, such as a background build or a wait on a training run, the session now shows Working ("Working in background") instead of Idle until the command exits. Agent Trail sees this from the session process's children: Claude runs each Bash command in its own process group, while MCP servers stay in Claude's. It reads only parent, group, and start time, never arguments. `AgentTrailInspect --live` reports `backgroundSince`.
+
 ## 0.1.0-alpha.8 — 2026-11-01
 
 - **Jump to the work.** Each project card's main button now opens the most urgent live session (Answer, Open, or Resume) with its title and time in state, instead of one button per Claude instance. Claude Code sessions open through Claude's session link, also with several Claude instances: the session's own instance comes forward first and receives the link, with a hint as the fallback. Codex threads open through `codex://threads`, and Grok brings its terminal forward. A ⌄ menu lists every live session and opens the worktree in your editor, terminal, or Finder. Details rows get their own ↗.

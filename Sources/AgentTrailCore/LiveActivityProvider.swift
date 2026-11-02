@@ -43,10 +43,13 @@ public struct LiveSessionDetails: Hashable, Sendable {
     public var hostBundleID: String?
     /// Codex subagent thread's parent thread id.
     public var parentThreadID: String?
+    /// Set when the turn ended but a command it started still runs: the oldest
+    /// such command's start. The session then reports `working`.
+    public var backgroundSince: Date?
 
     public init(title: String? = nil, desktopSessionID: String? = nil, needsAction: String? = nil,
                 stateSince: Date? = nil, branch: String? = nil, pullRequests: [LivePullRequest] = [],
-                hostBundleID: String? = nil, parentThreadID: String? = nil) {
+                hostBundleID: String? = nil, parentThreadID: String? = nil, backgroundSince: Date? = nil) {
         self.title = title
         self.desktopSessionID = desktopSessionID
         self.needsAction = needsAction
@@ -55,6 +58,7 @@ public struct LiveSessionDetails: Hashable, Sendable {
         self.pullRequests = pullRequests
         self.hostBundleID = hostBundleID
         self.parentThreadID = parentThreadID
+        self.backgroundSince = backgroundSince
     }
 
     public static let none = LiveSessionDetails()
@@ -114,17 +118,23 @@ public struct LiveSnapshot: Sendable {
 /// reported state while that process exists. Otherwise the short freshness TTL
 /// applies. A reused PID is omitted. Recent project activity, CPU usage and file
 /// mtimes never establish a working status; updatedAt exposes the report's age.
+/// One process fact does: an idle flag ends a turn, not the commands it started,
+/// so a Bash command still running from before that flag keeps the session working.
 public final class LiveActivityProvider {
     public let freshnessTTL: TimeInterval
     private let isProcessAlive: (Int32) -> Bool
     private let processStartTimes: (Set<Int32>) -> [Int32: String]
+    private let commandStarts: (Int32) -> [Date]
     private let files = FileManager.default
 
+    /// `commandStarts` lists when each live Bash command of a session process began.
     public init(freshnessTTL: TimeInterval = 90, isProcessAlive: ((Int32) -> Bool)? = nil,
-                processStartTimes: ((Set<Int32>) -> [Int32: String])? = nil) {
+                processStartTimes: ((Set<Int32>) -> [Int32: String])? = nil,
+                commandStarts: ((Int32) -> [Date])? = nil) {
         self.freshnessTTL = freshnessTTL.isFinite && freshnessTTL > 0 ? freshnessTTL : 90
         self.isProcessAlive = isProcessAlive ?? { pid in pid > 0 && getpgid(pid) >= 0 }
         self.processStartTimes = processStartTimes ?? Self.readProcessStartTimes
+        self.commandStarts = commandStarts ?? ProcessIdentity.groupLeaderChildStarts
     }
 
     /// Suitable for a small background poll every 2–3 seconds. No files are written,
@@ -208,7 +218,7 @@ public final class LiveActivityProvider {
             // Verified transition-based flags do not expire during long jobs.
             // Future-dated reports and unverified old reports remain unknown.
             let authoritative = age >= -5 && (identityVerified || age <= freshnessTTL)
-            let status: LiveStatus
+            var status: LiveStatus
             if authoritative {
                 switch candidate.status {
                 case "waiting": status = .waiting
@@ -224,6 +234,14 @@ public final class LiveActivityProvider {
             // Only a recognized, trusted flag has a known start. An unknown state
             // did not begin at the old report's time.
             details.stateSince = status == .unknown ? nil : candidate.stateSince
+            // A command started after the idle flag is not the turn's (a hook, say).
+            if status == .idle {
+                let turnEnded = candidate.stateSince ?? candidate.updatedAt
+                if let oldest = commandStarts(candidate.pid).filter({ $0 < turnEnded }).min() {
+                    status = .working
+                    details.backgroundSince = oldest
+                }
+            }
             let item = LiveAgentSession(sourceID: candidate.source.id, projectPath: candidate.projectPath,
                 workspacePath: candidate.workspacePath, sessionID: candidate.sessionID, status: status,
                 updatedAt: candidate.updatedAt, pid: candidate.pid, details: details)
