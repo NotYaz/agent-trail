@@ -232,18 +232,20 @@ public struct ProcessIdentity: Sendable {
     }
 
     /// TERM_PROGRAM values each terminal sets, and the bundle ids that may
-    /// accompany them. VS Code and Cursor both report `vscode`.
+    /// accompany them. VS Code and Cursor both report `vscode`; Claude Desktop's
+    /// own terminal pane reports `claude-desktop`.
     static let terminalBundles: [String: [String]] = [
         "Apple_Terminal": ["com.apple.Terminal"],
         "iTerm.app": ["com.googlecode.iterm2"],
         "ghostty": ["com.mitchellh.ghostty"],
         "WarpTerminal": ["dev.warp.Warp-Stable"],
-        "vscode": ["com.microsoft.VSCode", "com.todesktop.230313mzl4w4u92"]
+        "vscode": ["com.microsoft.VSCode", "com.todesktop.230313mzl4w4u92"],
+        "claude-desktop": ["com.anthropic.claudefordesktop"]
     ]
 
-    /// Both hints are inherited, so either can be stale: a shell inside Claude
-    /// Desktop still carries TERM_PROGRAM=iTerm.app from the terminal that
-    /// launched Claude. Trust them only together, and only for a known terminal.
+    /// Both hints are inherited, so either can be stale: a process Claude Desktop
+    /// starts outside its terminal pane still carries TERM_PROGRAM=iTerm.app from
+    /// the terminal that launched Claude. Trust them only together, and only for a known terminal.
     /// Returns the table's spelling of the bundle id, or nil.
     public static func agreeingTerminalBundleIdentifier(termProgram: String?, bundleIdentifier: String?) -> String? {
         guard let termProgram, let bundleIdentifier, let accepted = terminalBundles[termProgram] else { return nil }

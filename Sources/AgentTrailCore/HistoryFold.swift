@@ -20,6 +20,9 @@ struct HistorySession {
     /// False when copies of this session disagree about where it started.
     /// Such a session is never moved to another project.
     var canMove = true
+    /// Edits first recorded by a subagent inside this same session, for an
+    /// assistant whose subagents are not sessions of their own (Claude).
+    var delegatedEdits: Set<String> = []
 }
 
 /// Folds sessions into project activity. A confirmed edit counts for the Git
@@ -77,8 +80,9 @@ enum HistoryFold {
             }
             for entry in item.edits {
                 let key = session.sourceID + "\u{0}" + entry.project + "\u{0}" + entry.id
+                let entryDelegated = isDelegated || session.delegatedEdits.contains(entry.id)
                 guard let old = edits[key] else {
-                    edits[key] = (session.sourceID, entry.project, entry.id, entry.edit, isDelegated)
+                    edits[key] = (session.sourceID, entry.project, entry.id, entry.edit, entryDelegated)
                     continue
                 }
                 // The same winner `earlier(than:)` keeps. A spawned thread's
@@ -86,7 +90,7 @@ enum HistoryFold {
                 let incomingWins = entry.edit.date < old.edit.date
                     || (entry.edit.date == old.edit.date && entry.edit.workspace < old.edit.workspace)
                 let identical = entry.edit.date == old.edit.date && entry.edit.workspace == old.edit.workspace
-                let delegated = incomingWins ? isDelegated : (identical ? (old.delegated && isDelegated) : old.delegated)
+                let delegated = incomingWins ? entryDelegated : (identical ? (old.delegated && entryDelegated) : old.delegated)
                 edits[key] = (session.sourceID, entry.project, entry.id, old.edit.earlier(than: entry.edit), delegated)
             }
             for (folder, directories) in item.missing {

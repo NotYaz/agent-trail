@@ -383,7 +383,8 @@ struct ProjectLiveStatusView: View {
         case .idle: explanation = "\(sourceName(session.sourceID)) reported a finished turn or idle state, with no explicit request for input."
         case .unknown: explanation = "No recognized or verified runtime status is available. Recent edits alone do not establish a live state."
         }
-        return "\(explanation)\nLast report: \(date)\nSession process: PID \(String(session.pid))"
+        let origin = session.details.startedInTerminal ? "\nStarted with claude in a terminal." : ""
+        return "\(explanation)\(origin)\nLast report: \(date)\nSession process: PID \(String(session.pid))"
     }
 
     private static func explanation(for kind: StatusGlyph.Kind) -> String {

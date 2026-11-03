@@ -196,7 +196,122 @@ final class LiveActivityProviderTests: XCTestCase {
         var checked: [Int32] = []
         let provider = LiveActivityProvider(isProcessAlive: { checked.append($0); return false })
         XCTAssertTrue(provider.scan(sources: [fixture.source], now: fixture.now).sessions.isEmpty)
-        XCTAssertEqual(checked, [101])
+        // A "cli" record is a terminal session; this one is dropped only because it is dead.
+        XCTAssertEqual(checked.sorted(), [101, 103])
+    }
+
+    func testTerminalSessionIsLiveAtItsFolderAndNamesItsVerifiedTerminal() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        // No Claude Desktop at all: terminal sessions still report, with no notice.
+        try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("desktop"))
+        let start = "Fri Oct 30 10:02:00 2026"
+        let elsewhere = fixture.root.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        try fixture.live("term", pid: 101, status: "busy", secondsAgo: 10, cwd: elsewhere, entrypoint: "cli", procStart: start)
+        try fixture.live("term-job", pid: 102, status: "shell", secondsAgo: 600, entrypoint: "cli", procStart: start)
+        try fixture.live("term-unverified", pid: 103, status: "busy", secondsAgo: 10, entrypoint: "cli")
+        var hinted: [Int32] = []
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true },
+            processStartTimes: { _ in [101: start, 102: start] },
+            commandStarts: { $0 == 102 ? [fixture.now.addingTimeInterval(-900)] : [] },
+            terminalHints: { pid in
+                hinted.append(pid)
+                return ProcessIdentity.TerminalHints(termProgram: "ghostty", bundleIdentifier: "com.mitchellh.ghostty")
+            })
+        let first = provider.scan(sources: [fixture.source], now: fixture.now)
+        XCTAssertTrue(first.notices.isEmpty, "\(first.notices)")
+        let second = provider.scan(sources: [fixture.source], now: fixture.now)
+        let byID = Dictionary(uniqueKeysWithValues: second.sessions.map { ($0.sessionID, $0) })
+        let term = try XCTUnwrap(byID["term"])
+        XCTAssertEqual(term.status, .working)
+        XCTAssertEqual(term.projectPath, elsewhere.path)
+        XCTAssertEqual(term.workspacePath, elsewhere.path)
+        XCTAssertTrue(term.details.startedInTerminal)
+        XCTAssertEqual(term.details.hostBundleID, "com.mitchellh.ghostty")
+        XCTAssertNil(term.details.desktopSessionID)
+        XCTAssertEqual(byID["term-job"]?.status, .working)
+        XCTAssertEqual(byID["term-job"]?.details.backgroundSince, fixture.now.addingTimeInterval(-900))
+        // An unverified process is listed, but its environment is never read.
+        XCTAssertEqual(byID["term-unverified"]?.status, .working)
+        XCTAssertNil(byID["term-unverified"]?.details.hostBundleID)
+        // One read per process, not one per poll.
+        XCTAssertEqual(hinted.sorted(), [101, 102])
+    }
+
+    func testBackgroundSpareAndParkedClaudeProcessesAreNotTerminalSessions() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let start = "Fri Oct 30 10:02:00 2026"
+        try fixture.live("tab", pid: 101, status: "busy", secondsAgo: 10, entrypoint: "cli", procStart: start,
+            extra: ["kind": "interactive"])
+        try fixture.live("background", pid: 102, status: "busy", secondsAgo: 10, entrypoint: "cli", procStart: start,
+            extra: ["kind": "bg", "jobId": "job-1"])
+        try fixture.live("spare", pid: 103, status: "idle", secondsAgo: 10, entrypoint: "cli", procStart: start,
+            extra: ["kind": "bg", "spare": true])
+        try fixture.live("parked", pid: 104, status: "idle", secondsAgo: 10, entrypoint: "cli", procStart: start,
+            extra: ["kind": "interactive", "parkedJobId": "job-2"])
+        try fixture.live("daemon", pid: 105, status: "busy", secondsAgo: 10, entrypoint: "cli", procStart: start,
+            extra: ["kind": "daemon"])
+        var hinted: [Int32] = []
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true },
+            processStartTimes: { pids in Dictionary(uniqueKeysWithValues: pids.map { ($0, start) }) },
+            terminalHints: { hinted.append($0); return nil })
+        let result = provider.scan(sources: [fixture.source], now: fixture.now)
+        XCTAssertEqual(result.sessions.map(\.sessionID), ["tab"])
+        XCTAssertTrue(result.notices.isEmpty, "\(result.notices)")
+        XCTAssertEqual(hinted, [101])
+    }
+
+    func testTerminalSessionInsideAClaudeWorktreeBelongsToItsCheckout() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let worktree = fixture.project.appendingPathComponent(".claude/worktrees/feat")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        try fixture.live("moved", pid: 101, status: "busy", secondsAgo: 10, cwd: worktree, entrypoint: "cli")
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true }, processStartTimes: { _ in [:] })
+        let session = try XCTUnwrap(provider.scan(sources: [fixture.source], now: fixture.now).sessions.first)
+        XCTAssertEqual(session.projectPath, fixture.project.path)
+        XCTAssertEqual(session.workspacePath, worktree.path)
+        XCTAssertTrue(session.details.startedInTerminal)
+    }
+
+    func testDesktopSessionResumedInATerminalKeepsItsDesktopProject() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let worktree = fixture.project.appendingPathComponent(".claude/worktrees/desk")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        // Desktop's summary of its own last turn, still current by its own record.
+        let summary: [String: Any] = ["needs_action": "Approve running the migration", "summarizes_uuid": "a1"]
+        try fixture.desktop("resumed", workspace: worktree, extra: ["title": "Fix the parser",
+            "postTurnSummary": summary, "lastAssistantUuid": "a1"])
+        try fixture.live("resumed", pid: 101, status: "waiting", secondsAgo: 10, cwd: worktree, entrypoint: "cli",
+            extra: ["hostSessionId": "local_resumed"])
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true }, processStartTimes: { _ in [:] })
+        let session = try XCTUnwrap(provider.scan(sources: [fixture.source], now: fixture.now).sessions.first)
+        XCTAssertEqual(session.projectPath, fixture.project.path)
+        XCTAssertEqual(session.workspacePath, worktree.path)
+        XCTAssertEqual(session.details.title, "Fix the parser")
+        XCTAssertTrue(session.details.startedInTerminal)
+        // Claude Desktop does not hold this process, so no Desktop link is offered,
+        // and its summary describes an older turn than the one now waiting.
+        XCTAssertNil(session.details.desktopSessionID)
+        XCTAssertEqual(session.status, .waiting)
+        XCTAssertNil(session.details.needsAction)
+
+        // The same record run by Claude Desktop keeps its summary.
+        try fixture.live("resumed", pid: 101, status: "waiting", secondsAgo: 10, cwd: worktree,
+            extra: ["hostSessionId": "local_resumed"])
+        let desktop = try XCTUnwrap(provider.scan(sources: [fixture.source], now: fixture.now).sessions.first)
+        XCTAssertFalse(desktop.details.startedInTerminal)
+        XCTAssertEqual(desktop.details.needsAction, "Approve running the migration")
+    }
+
+    func testClaudeWorktreeOwnerIsTheFolderAboveDotClaude() {
+        XCTAssertEqual(LiveActivityProvider.claudeWorktreeOwner("/repo/.claude/worktrees/feat"), "/repo")
+        XCTAssertEqual(LiveActivityProvider.claudeWorktreeOwner("/repo/.claude/worktrees/feat/src"), "/repo")
+        XCTAssertNil(LiveActivityProvider.claudeWorktreeOwner("/repo/.claude/worktrees"))
+        XCTAssertNil(LiveActivityProvider.claudeWorktreeOwner("/repo/src"))
     }
 
     func testOriginAndActualWorktreeStaySeparateIncludingPriorCLIIdentity() throws {

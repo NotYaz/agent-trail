@@ -41,6 +41,10 @@ if arguments.contains("--live") {
             if let since = session.details.backgroundSince {
                 entry["backgroundSince"] = ISO8601DateFormatter().string(from: since)
             }
+            if session.details.startedInTerminal {
+                entry["startedInTerminal"] = true
+                if let host = session.details.hostBundleID { entry["host"] = host }
+            }
             return entry
         }
     ]
