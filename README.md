@@ -162,7 +162,7 @@ The menu-bar icon shows the same at a glance:
 | Icon | Meaning |
 | --- | --- |
 | Plain trail | Nothing is working or waiting. |
-| A dot travelling along the trail, with a count | At least one session is working; the count says how many, including sessions working in background. With Reduce Motion or Low Power Mode, a still dot instead. |
+| A dot travelling along the trail, with a number inside | At least one session is working. The number in the triangle says how many, including sessions working in background, and + means ten or more. With Reduce Motion or Low Power Mode, a still dot instead. |
 | Amber and filled, with a count | A session needs input. It bounces once when a new request arrives. |
 | Checkmark, for a few seconds | Work just finished and nothing else is running. |
 
@@ -296,7 +296,7 @@ swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
 swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
 
-`--render-status-demo OUTPUT.png` draws the menu-bar icon states large, with the nodes the working animation follows marked in order. Add `--light` for the light appearance, or `--height N` to render a taller panel for review. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
+`--render-status-demo OUTPUT.png` draws the menu-bar icon states large and at real size (2x and 1x), with the nodes the working animation follows marked in order. Add `--light` for the light appearance, or `--height N` to render a taller panel for review. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
 
 ## Development
 
