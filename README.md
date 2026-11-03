@@ -8,7 +8,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
-**0.1.0-alpha.11 · Public alpha · macOS 14+ · MIT license · [Website](https://agent-trail.app/)**
+**0.1.0-alpha.12 · Public alpha · macOS 14+ · MIT license · [Website](https://agent-trail.app/)**
 
 > **Long jobs stay visible.** When Claude starts a training run, a long build, or an evaluation sweep in the background and ends its turn, Claude reports the session as idle. Agent Trail sees that the session's own command is still running and shows it as **Working in background** until the job ends, so a quiet window never hides a run in progress. [How it works](#long-running-jobs-and-background-commands)
 
