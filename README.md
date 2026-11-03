@@ -1,12 +1,14 @@
 # Agent Trail
 
-**Which agent touched this project last?**
+**Which agent touched this project last, and which one needs you now?**
 
-A small native macOS menu-bar app that brings your coding projects into one place. See recorded edits, trends, and reported live status together on each project, then jump back to the right running app. Projects and Growth share one compact floating panel.
+A read-only macOS menu-bar app. Each Git repository gets one card across Claude, Codex, and Grok: which agent edited it last, history from the logs already on your Mac, and which live session needs you. When Claude says a session is idle but a command it started is still running, the card says **Working in background**.
 
-**0.1.0-alpha.11 · Public alpha · macOS 14+ · Claude, Codex, and Grok · MIT license · [Website](https://agent-trail.app/)**
+**Works with** Claude Desktop's Code tab (not `claude` in the terminal yet), Codex, and Grok. A Codex thread waiting for approval shows as Working. **Not supported:** Cursor, Gemini CLI, OpenCode. It can't answer prompts for you.
 
-Agent Trail reads local history and live status from Claude Desktop, Codex, and Grok. One-click focus is available for identified Claude Desktop instances. Gemini CLI, OpenCode, and Cursor are not supported.
+**Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
+
+**0.1.0-alpha.11 · Public alpha · macOS 14+ · MIT license · [Website](https://agent-trail.app/)**
 
 > **Long jobs stay visible.** When Claude starts a training run, a long build, or an evaluation sweep in the background and ends its turn, Claude reports the session as idle. Agent Trail sees that the session's own command is still running and shows it as **Working in background** until the job ends, so a quiet window never hides a run in progress. [How it works](#long-running-jobs-and-background-commands)
 
@@ -17,6 +19,8 @@ Agent Trail reads local history and live status from Claude Desktop, Codex, and 
 ## Why it exists
 
 Two assistant instances. The same project open in both. Different worktrees, conversations, and changes. Returning to work should not begin with guessing which window has the latest context.
+
+Agent Trail leaves each agent in its own app. It doesn't start, wrap, or drive any assistant, and it never touches your sign-ins. Claude keeps running in Claude, Codex in Codex, and Grok in its terminal, each with its vendor's newest features. Agent Trail reads what they already record and takes you back to the right one. If Agent Trail stops working, your agents don't notice.
 
 Agent Trail shows each project once, bringing its reported live sessions together with the **last recorded edit** and **latest saved activity** where history is available. A project is the Git checkout where an assistant's confirmed edits actually landed, so Claude, Codex, and Grok working in the same repository share one card even when they were started in different folders. A Claude worktree stays connected to that original folder, and a repository you move keeps its history.
 
@@ -75,6 +79,10 @@ Open **Profiles…** from the panel's ⋯ menu to add or adjust profiles. When `
 | Grok | `grok` | `~/.grok` | none |
 
 Custom `CODEX_HOME` or `GROK_HOME` launch variables do not change history-scanning defaults; set each profile’s `configDirectory` to that custom home.
+
+### Two Claude accounts
+
+Many people keep a work and a personal Claude Desktop instance open side by side, each with its own user-data folder and Claude config folder. The default **Claude · Second** profile covers the common layout; add any other instance in **Profiles…**. Both accounts' Code sessions then appear on the same project cards. macOS hands `claude://` links to whichever Claude instance is in front, so **Jump** brings the session's own instance forward first and opens the session only once it is frontmost (see [Jump to the work](#jump-to-the-work)).
 
 A settings file that already exists is left as it is. Add Codex and Grok from **Profiles…**, or add the entries below and choose **Reload profiles**. Agent Trail does not merge new default profiles into a saved file.
 
@@ -177,7 +185,7 @@ A project can have a session needing input while another is working or idle, so 
 | Status | Meaning |
 | --- | --- |
 | **Needs input** | Claude reported `waiting`, or Grok reported an unresolved permission request. Codex input dialogs are not distinguished by the currently available state. |
-| **Working** | Claude reported `busy`, Codex has an `inProgress` turn on a loaded thread, or Grok has an active turn/working phase. Claude also counts while it reports `idle` but a command its last turn started is still running, shown as **Working in background** (see [Long-running jobs](#long-running-jobs-and-background-commands)). |
+| **Working** | Claude reported `busy`, Codex has an `inProgress` turn on a loaded thread, or Grok has an active turn/working phase. Claude also counts while it reports `idle` but a command its last turn started is still running, or reports `shell` for that state itself, shown as **Working in background** (see [Long-running jobs](#long-running-jobs-and-background-commands)). |
 | **Idle** | Claude reported `idle`, or a loaded Codex/Grok session explicitly ended its turn. It does not establish that you need to reply. |
 | **Unknown** | The status is unrecognized or cannot be verified under the applicable freshness checks. |
 
@@ -222,6 +230,8 @@ On every live check (every 3 seconds), for each Claude session reported idle, Ag
 
 If any remain, the session is Working in background, and the oldest one's start time is shown. Busy, waiting, and Unknown sessions are unchanged, and the same process checks as for every Claude status apply.
 
+Claude can also report this state itself, as `shell`: its turn has ended and a command it started keeps running. Agent Trail shows that as Working in background too and runs the same check. When the command is still one of the session's children, its start time is shown; otherwise the turn's end is, since the command began no later than that.
+
 Only each child's parent process ID, process group, start time, and run state are read, through macOS `libproc` (`proc_listchildpids` and `proc_pidinfo`). Agent Trail does not read command lines, arguments, environment variables, or output, starts no helper process for this check, and sends no signals.
 
 ### Make your long jobs visible
@@ -236,7 +246,7 @@ Agent Trail can see a job only while it is attached to the session. Two patterns
 ### Limits
 
 - A background command that never exits on its own, such as `tail -f` or a development server started as a background command, keeps its session Working in background until it stops or the session closes.
-- A job fully detached from the session, with no command waiting on it, is adopted by `launchd` and cannot be tied to any session.
+- A job fully detached from the session, with no command waiting on it, is adopted by `launchd` and cannot be tied to any session, unless Claude itself still reports the session as `shell`.
 - This applies to Claude Desktop sessions. Codex and Grok live status are unchanged.
 
 ## Explore project activity
@@ -327,8 +337,17 @@ CI runs tests and packages the app on Apple Silicon and Intel macOS runners. The
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance. New adapters should translate supported records into `ProjectActivity` through `ActivityProvider`, keeping recorded edits separate from general activity.
 
+## Alternatives, and when to use them
+
+- **Claude Code in the terminal only:** Claude's [agent view](https://code.claude.com/docs/en/agent-view) (`claude agents`) or [Muster](https://github.com/josefchen/muster).
+- **Usage limits and cost:** [CodexBar](https://github.com/steipete/CodexBar) or [ccusage](https://github.com/ryoppippi/ccusage). Both work fine next to Agent Trail.
+- **Starting and orchestrating agents:** [Conductor](https://www.conductor.build/), [Vibe Kanban](https://github.com/BloopAI/vibe-kanban), or [cmux](https://github.com/manaflow-ai/cmux).
+
+Agent Trail is for people who want one card per repository across Claude Desktop, Codex, and Grok, both Claude accounts in one place, and long jobs that stay visible after Claude goes idle.
+
 ## What's next
 
+- Claude Code sessions started with `claude` in the terminal.
 - Codex input/approval state when a reliable local signal becomes available.
 - Gemini CLI, OpenCode, and Cursor, once their local tool results can be confirmed. They are unsupported in this release.
 - More coverage of changes made through agent shell commands.

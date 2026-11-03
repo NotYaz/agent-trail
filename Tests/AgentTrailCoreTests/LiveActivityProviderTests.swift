@@ -426,6 +426,37 @@ final class LiveActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.sessions.first?.sessionID, "waiting")
     }
 
+    func testShellStatusIsWorkingInBackgroundAndKeepsTheCommandsStart() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        for id in ["seen", "detached", "after-turn", "stale"] { try fixture.desktop(id) }
+        let start = "Fri Oct 30 10:02:00 2026"
+        try fixture.live("seen", pid: 101, status: "shell", secondsAgo: 600, procStart: start)
+        try fixture.live("detached", pid: 102, status: "shell", secondsAgo: 600, procStart: start)
+        try fixture.live("after-turn", pid: 103, status: "shell", secondsAgo: 600, procStart: start)
+        try fixture.live("stale", pid: 104, status: "shell", secondsAgo: 600)
+        let commands: [Int32: [Date]] = [
+            101: [fixture.now.addingTimeInterval(-1200)],
+            103: [fixture.now.addingTimeInterval(-300)]]
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true },
+            processStartTimes: { _ in [101: start, 102: start, 103: start] },
+            commandStarts: { commands[$0] ?? [] })
+        let result = provider.scan(sources: [fixture.source], now: fixture.now)
+        let byID = Dictionary(uniqueKeysWithValues: result.sessions.map { ($0.sessionID, $0) })
+        XCTAssertEqual(byID["seen"]?.status, .working)
+        XCTAssertEqual(byID["seen"]?.details.backgroundSince, fixture.now.addingTimeInterval(-1200))
+        XCTAssertEqual(byID["seen"]?.details.stateSince, fixture.now.addingTimeInterval(-600))
+        // Claude still reports the command after it left the process tree.
+        XCTAssertEqual(byID["detached"]?.status, .working)
+        XCTAssertEqual(byID["detached"]?.details.backgroundSince, fixture.now.addingTimeInterval(-600))
+        // A later child (a hook) is not the reported command; the turn's end bounds it.
+        XCTAssertEqual(byID["after-turn"]?.status, .working)
+        XCTAssertEqual(byID["after-turn"]?.details.backgroundSince, fixture.now.addingTimeInterval(-600))
+        // An unverified old report stays unknown, as for every other flag.
+        XCTAssertEqual(byID["stale"]?.status, .unknown)
+        XCTAssertNil(byID["stale"]?.details.backgroundSince)
+    }
+
     func testDesktopSessionIDShapeMatchesClaudesLinkHandler() {
         XCTAssertTrue(LiveActivityProvider.isDesktopSessionID("local_0f8a-B2c"))
         XCTAssertTrue(LiveActivityProvider.isDesktopSessionID("local_" + String(repeating: "a", count: 64)))

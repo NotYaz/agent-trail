@@ -223,7 +223,8 @@ public final class LiveActivityProvider {
                 switch candidate.status {
                 case "waiting": status = .waiting
                 case "busy": status = .working
-                case "idle": status = .idle
+                // "shell" is Claude's own word for an ended turn whose command still runs.
+                case "idle", "shell": status = .idle
                 default: status = .unknown
                 }
             } else {
@@ -240,6 +241,11 @@ public final class LiveActivityProvider {
                 if let oldest = commandStarts(candidate.pid).filter({ $0 < turnEnded }).min() {
                     status = .working
                     details.backgroundSince = oldest
+                } else if candidate.status == "shell" {
+                    // Claude reports the command even when it is no longer our child;
+                    // it began no later than the turn's end.
+                    status = .working
+                    details.backgroundSince = turnEnded
                 }
             }
             let item = LiveAgentSession(sourceID: candidate.source.id, projectPath: candidate.projectPath,

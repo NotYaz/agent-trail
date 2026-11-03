@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Claude's own background status counts.** Claude Code now reports a session whose turn ended while a command it started keeps running as `shell`. Agent Trail used to show that as Unknown; it now shows Working in background, with the start time of the command it can see, or the turn's end when the command is no longer one of the session's children.
+- The README's first screen says what is supported and what is not (Claude Desktop's Code tab, not `claude` in the terminal yet), and what Agent Trail never does. "Why it exists" explains why it leaves each agent in its own app. New sections cover running two Claude accounts and the alternatives for setups Agent Trail does not serve.
+
 ## 0.1.0-alpha.11 — 2026-11-03
 
 - **Color themes.** Pick Classic, Gentle, Vivid, or Aurora from the panel's ⋯ menu. Gentle brightens the canvas and the indigo wash, draws sparklines in indigo, gives the Trail calendar a blue-slate tint, and brightens dark mode's Working green and needs-input amber. Vivid adds brighter profile colors that keep their families (blue, pink, violet, teal) and, unlike Classic's, pass color-vision checks for every pair in light and dark. Aurora adds an indigo Trail calendar and a three-color wash. Classic stays the default. Renders take `--theme NAME`.
