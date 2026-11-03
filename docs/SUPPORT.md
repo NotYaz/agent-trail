@@ -9,7 +9,7 @@ Agent Trail is free and open source under the [MIT license](../LICENSE). Support
 | GitHub Sponsors | [NotYaz](https://github.com/sponsors/NotYaz) |
 | Buy Me a Coffee | [buymeacoffee.com/lltod](https://buymeacoffee.com/lltod) |
 
-GitHub Sponsors uses the maintainer account [NotYaz](https://github.com/NotYaz). If sponsorship is not yet available there, use the Buy Me a Coffee link above.
+GitHub Sponsors uses the maintainer account [NotYaz](https://github.com/NotYaz).
 
 ## Crypto
 

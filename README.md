@@ -343,7 +343,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance. New adapters s
 
 Agent Trail is free. A donation is optional, and every feature stays available either way.
 
-- **GitHub Sponsors:** [NotYaz](https://github.com/sponsors/NotYaz), when sponsorship is available on the account.
+- **GitHub Sponsors:** [NotYaz](https://github.com/sponsors/NotYaz)
 - **Buy Me a Coffee:** [buymeacoffee.com/lltod](https://buymeacoffee.com/lltod)
 - **Crypto:** Bitcoin; ETH, USDC, and USDT on Ethereum, Base, or Arbitrum One (one shared address); and USDT on TRON (TRC-20). The addresses and QR codes are in [Support](docs/SUPPORT.md#crypto).
 
