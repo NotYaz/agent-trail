@@ -13,8 +13,8 @@ private enum StatusItemState: Equatable {
     case finished
 }
 
-/// The menu-bar item: a glyph for the live state, the optional needs-input
-/// count, a right-click menu of live sessions, and the anchor HintHUD shows
+/// The menu-bar item: a glyph for the live state, the optional needs-input or
+/// working count, a right-click menu of live sessions, and the anchor HintHUD shows
 /// under. It reacts only to the store's live snapshot. Its only clocks are the
 /// finished state's dismissal and the Core Animation trail, which runs only
 /// while something works and motion is allowed.
@@ -247,7 +247,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         let state = self.state
         let rendering = StatusRendering(state: state, waiting: summary.waiting, working: summary.working,
-                                        showsCount: settings.showsCount, overlay: overlayMode(for: state))
+                                        showsCount: settings.showsCount, showsWorkingCount: settings.showsWorkingCount,
+                                        overlay: overlayMode(for: state))
         guard rendering != rendered else { return }
         let previous = rendered
         rendered = rendering
@@ -259,7 +260,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // Only the trail draws its own glyph; the still badge sits on the button's system-drawn one.
         let image = StatusSymbols.buttonImage(for: rendering.state, overlayDrawsGlyph: rendering.overlay == .trail)
         if button.image !== image { button.image = image }
-        let count = rendering.state == .waiting && rendering.showsCount ? rendering.waiting : 0
+        // The trail animates in its own layers, so the title, and with it the
+        // item's width, changes only when the count does.
+        let count = rendering.count
         if count > 0 {
             button.font = StatusSymbols.countFont
             button.title = count.formatted()
@@ -467,16 +470,29 @@ private struct StatusRendering: Equatable {
     let waiting: Int
     let working: Int
     let showsCount: Bool
+    let showsWorkingCount: Bool
     let overlay: StatusOverlayMode
+
+    /// The number beside the glyph, or 0 for none. Needs input keeps its count
+    /// while any session waits; otherwise working shows how many sessions work.
+    var count: Int {
+        switch state {
+        case .waiting: return showsCount ? waiting : 0
+        case .working: return showsWorkingCount ? working : 0
+        case .idle, .finished: return 0
+        }
+    }
 }
 
-/// The two menu-bar switches. Both default to on, registered or not.
+/// The three menu-bar switches. All default to on, registered or not.
 private struct StatusSettings: Equatable {
     var animates: Bool
     var showsCount: Bool
+    var showsWorkingCount: Bool
 
     static func read() -> StatusSettings {
-        StatusSettings(animates: flag(AppSettings.Key.statusAnimates), showsCount: flag(AppSettings.Key.statusShowsCount))
+        StatusSettings(animates: flag(AppSettings.Key.statusAnimates), showsCount: flag(AppSettings.Key.statusShowsCount),
+                       showsWorkingCount: flag(AppSettings.Key.statusShowsWorkingCount))
     }
 
     static func flag(_ key: String) -> Bool {
@@ -1118,31 +1134,73 @@ private enum StatusGlyphNodes {
 
 /// Developer preview for `--render-status-demo`: the menu-bar states drawn large
 /// on a light and a dark bar (idle, idle with the trail's detected nodes marked
-/// in animation order, needs input, finished). It uses the live item's images
-/// and node detection, so a change that breaks the trail shows up here.
+/// in animation order, needs input, finished, and working with a count, its
+/// highlight resting on the first node). It uses the live item's images, count
+/// font and node detection, so a change that breaks the trail shows up here.
 @MainActor
 enum StatusIconPreview {
+    private static let workingCount = 3
+
     static func image() -> NSImage {
         let scale: CGFloat = 8
         let glyph = StatusSymbols.plain?.size ?? NSSize(width: 18, height: 16)
         let cell = NSSize(width: glyph.width * scale + 48, height: glyph.height * scale + 40)
         let images: [NSImage?] = [StatusSymbols.plain, StatusSymbols.plain, StatusSymbols.waiting, StatusSymbols.finished]
-        let size = NSSize(width: cell.width * CGFloat(images.count), height: cell.height * 2)
+        let count = workingCount.formatted() as NSString
+        let countFont = NSFont.monospacedDigitSystemFont(ofSize: StatusSymbols.countFont.pointSize * scale, weight: .medium)
+        let countSize = count.size(withAttributes: [.font: countFont])
+        let countGap = titleGap(count as String) * scale
+        let size = NSSize(width: cell.width * CGFloat(images.count + 1) + countGap + countSize.width, height: cell.height * 2)
         return NSImage(size: size, flipped: false) { _ in
             for (row, dark) in [false, true].enumerated() {
                 let y = CGFloat(1 - row) * cell.height
+                let ink: NSColor = dark ? .white : .black
                 (dark ? NSColor(white: 0.12, alpha: 1) : NSColor(white: 0.93, alpha: 1)).setFill()
                 NSRect(x: 0, y: y, width: size.width, height: cell.height).fill()
                 for (column, image) in images.enumerated() {
                     guard let image else { continue }
                     let rect = NSRect(x: CGFloat(column) * cell.width + 24, y: y + 20,
                                       width: glyph.width * scale, height: glyph.height * scale)
-                    draw(image, in: rect, ink: dark ? .white : .black)
+                    draw(image, in: rect, ink: ink)
                     if column == 1 { markNodes(in: rect, glyph: glyph) }
                 }
+                guard let plain = StatusSymbols.plain else { continue }
+                let rect = NSRect(x: CGFloat(images.count) * cell.width + 24, y: y + 20,
+                                  width: glyph.width * scale, height: glyph.height * scale)
+                draw(plain, in: rect, ink: ink)
+                drawHighlight(in: rect, glyph: glyph, ink: ink)
+                count.draw(at: NSPoint(x: rect.maxX + countGap, y: rect.midY - countSize.height / 2),
+                           withAttributes: [.font: countFont, .foregroundColor: ink])
             }
             return true
         }
+    }
+
+    /// The space a button cell set up like the status item's leaves between the glyph and `title`.
+    private static func titleGap(_ title: String) -> CGFloat {
+        guard let plain = StatusSymbols.plain else { return 0 }
+        let cell = NSButtonCell(textCell: title)
+        cell.image = plain
+        cell.font = StatusSymbols.countFont
+        cell.imagePosition = .imageLeading
+        cell.isBordered = false
+        // At its own fitting size, so nothing spreads the glyph and title apart.
+        let bounds = NSRect(origin: .zero, size: cell.cellSize)
+        return max(0, cell.titleRect(forBounds: bounds).minX - cell.imageRect(forBounds: bounds).maxX)
+    }
+
+    /// The trail's highlight at rest on the first node, sized as the overlay sizes
+    /// it. Without nodes the live item breathes its badge, and column two shows a cross.
+    private static func drawHighlight(in rect: NSRect, glyph: NSSize, ink: NSColor) {
+        guard let plain = StatusSymbols.plain,
+              let nodes = StatusGlyphNodes.nodes(for: plain, probe: StatusSymbols.filledProbe),
+              let first = nodes.first else { return }
+        let sx = rect.width / glyph.width
+        let sy = rect.height / glyph.height
+        let radius = ((nodes.map(\.diameter).max() ?? 0) + 0.6) * sx / 2
+        let center = NSPoint(x: rect.minX + first.center.x * sx, y: rect.maxY - first.center.y * sy)
+        ink.setFill()
+        NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)).fill()
     }
 
     private static func draw(_ image: NSImage, in rect: NSRect, ink: NSColor) {

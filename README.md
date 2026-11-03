@@ -162,11 +162,11 @@ The menu-bar icon shows the same at a glance:
 | Icon | Meaning |
 | --- | --- |
 | Plain trail | Nothing is working or waiting. |
-| A dot travelling along the trail | At least one session is working. With Reduce Motion or Low Power Mode, a still dot instead. |
+| A dot travelling along the trail, with a count | At least one session is working; the count says how many, including sessions working in background. With Reduce Motion or Low Power Mode, a still dot instead. |
 | Amber and filled, with a count | A session needs input. It bounces once when a new request arrives. |
 | Checkmark, for a few seconds | Work just finished and nothing else is running. |
 
-Right-click the icon for a list of live sessions grouped by state; choose one to jump to it. The panel's ⋯ menu has **Menu bar** settings (animation, the needs-input count) and **Show session titles**. Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
+Right-click the icon for a list of live sessions grouped by state; choose one to jump to it. The panel's ⋯ menu has **Menu bar** settings (animation, the working and needs-input counts) and **Show session titles**. Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
 
 Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. Claude requires a matching desktop session; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
 

@@ -11,18 +11,21 @@ enum AppSettings {
         static let statusAnimates = "statusAnimates"
         /// Show the needs-input count next to the menu-bar glyph.
         static let statusShowsCount = "statusShowsCount"
+        /// Show how many sessions work next to the menu-bar glyph while none needs input.
+        static let statusShowsWorkingCount = "statusShowsWorkingCount"
         /// The editor used by "Open in {editor}" and the Jump fallback.
         static let preferredEditorBundleID = "preferredEditorBundleID"
         /// The terminal used by "Open in {terminal}".
         static let preferredTerminalBundleID = "preferredTerminalBundleID"
     }
 
-    /// The three switches default to on. The preferred apps have no default:
+    /// The four switches default to on. The preferred apps have no default:
     /// the first installed app in the launcher's order is used until one is chosen.
     static let boolDefaults: [String: Bool] = [
         Key.showSessionTitles: true,
         Key.statusAnimates: true,
-        Key.statusShowsCount: true
+        Key.statusShowsCount: true,
+        Key.statusShowsWorkingCount: true
     ]
 
     /// Safe to call more than once; registered defaults never overwrite a stored choice.
@@ -33,6 +36,7 @@ enum AppSettings {
     static var showSessionTitles: Bool { bool(Key.showSessionTitles) }
     static var statusAnimates: Bool { bool(Key.statusAnimates) }
     static var statusShowsCount: Bool { bool(Key.statusShowsCount) }
+    static var statusShowsWorkingCount: Bool { bool(Key.statusShowsWorkingCount) }
 
     static var preferredEditorBundleID: String? {
         get { string(Key.preferredEditorBundleID) }

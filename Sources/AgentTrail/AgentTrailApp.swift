@@ -237,6 +237,7 @@ struct AgentTrailShell: View {
     /// The ⋯ menu's display switches. StatusItemController and the cards read the same keys.
     @AppStorage(AppSettings.Key.showSessionTitles) private var showSessionTitles = true
     @AppStorage(AppSettings.Key.statusAnimates) private var statusAnimates = true
+    @AppStorage(AppSettings.Key.statusShowsWorkingCount) private var statusShowsWorkingCount = true
     @AppStorage(AppSettings.Key.statusShowsCount) private var statusShowsCount = true
 
     /// `height` exists for `--height` renders; the live popover is always 680pt.
@@ -454,11 +455,12 @@ struct AgentTrailShell: View {
     }
 
     /// Titles affect cards, menus and hints, so that switch sits at the top
-    /// level; the two icon switches live under "Menu bar".
+    /// level; the three icon switches live under "Menu bar".
     @ViewBuilder private var displayMenuItems: some View {
         Toggle("Show session titles", isOn: $showSessionTitles)
         Menu("Menu bar") {
             Toggle("Animate while agents work", isOn: $statusAnimates)
+            Toggle("Show working count", isOn: $statusShowsWorkingCount)
             Toggle("Show needs-input count", isOn: $statusShowsCount)
             if reduceMotion {
                 Divider()

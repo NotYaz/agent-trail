@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A working count in the menu bar.** While sessions work and none needs input, the icon shows how many are working next to the trail, including Claude sessions working in background. It is drawn in the menu bar's own text color like the glyph, and the amber needs-input count still takes over while a session waits. **Show working count** in ⋯ › Menu bar turns it off.
+
 ## 0.1.0-alpha.10 — 2026-11-02
 
 - **A website.** Agent Trail now has a home page at https://notyaz.github.io/agent-trail/, published from `site/` with GitHub Pages. It covers the panel, live status, Jump, Growth, keeping long jobs visible, privacy, and installation.
