@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.11 — 2026-11-03
 
 - **Color themes.** Pick Classic, Gentle, Vivid, or Aurora from the panel's ⋯ menu. Gentle brightens the canvas and the indigo wash, draws sparklines in indigo, gives the Trail calendar a blue-slate tint, and brightens dark mode's Working green and needs-input amber. Vivid adds brighter profile colors that keep their families (blue, pink, violet, teal) and, unlike Classic's, pass color-vision checks for every pair in light and dark. Aurora adds an indigo Trail calendar and a three-color wash. Classic stays the default. Renders take `--theme NAME`.
 - The website has a matching theme picker under the hero screenshot; it recolors the page and swaps the screenshots.
