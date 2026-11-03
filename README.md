@@ -4,7 +4,7 @@
 
 A read-only macOS menu-bar app. Each Git repository gets one card across Claude, Codex, and Grok: which agent edited it last, history from the logs already on your Mac, and which live session needs you. When Claude says a session is idle but a command it started is still running, the card says **Working in background**.
 
-**Works with** Claude Desktop's Code tab (not `claude` in the terminal yet), Codex, and Grok. A Codex thread waiting for approval shows as Working. **Not supported:** Cursor, Gemini CLI, OpenCode. It can't answer prompts for you.
+**Works with** Claude Code in Claude Desktop's Code tab and `claude` in a terminal, Codex, and Grok. A Codex thread waiting for approval shows as Working. **Not supported:** Cursor, Gemini CLI, OpenCode. It can't answer prompts for you.
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
@@ -20,7 +20,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 Two assistant instances. The same project open in both. Different worktrees, conversations, and changes. Returning to work should not begin with guessing which window has the latest context.
 
-Agent Trail leaves each agent in its own app. It doesn't start, wrap, or drive any assistant, and it never touches your sign-ins. Claude keeps running in Claude, Codex in Codex, and Grok in its terminal, each with its vendor's newest features. Agent Trail reads what they already record and takes you back to the right one. If Agent Trail stops working, your agents don't notice.
+Agent Trail leaves each agent in its own app. It doesn't start, wrap, or drive any assistant, and it never touches your sign-ins. Claude keeps running in Claude Desktop or your terminal, Codex in Codex, and Grok in its terminal, each with its vendor's newest features. Agent Trail reads what they already record and takes you back to the right one. If Agent Trail stops working, your agents don't notice.
 
 Agent Trail shows each project once, bringing its reported live sessions together with the **last recorded edit** and **latest saved activity** where history is available. A project is the Git checkout where an assistant's confirmed edits actually landed, so Claude, Codex, and Grok working in the same repository share one card even when they were started in different folders. A Claude worktree stays connected to that original folder, and a repository you move keeps its history.
 
@@ -28,7 +28,7 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 - Filter to projects shared across profiles.
 - See worktree context alongside recorded edits, and where a session was started when that was outside the project.
 - Keep a project's history when you move its folder; earlier locations are remembered automatically.
-- Jump straight to the work: each card's main button opens the most urgent live session (needs input, then working, then idle) in Claude, Codex, or the terminal running Grok.
+- Jump straight to the work: each card's main button opens the most urgent live session (needs input, then working, then idle) in Claude, Codex, or the terminal running `claude` or Grok.
 - See live Needs input, Working, Idle, and Unknown counts inside each project card.
 - Keep long jobs in view: a Claude session whose background command is still running (a training run, a long build, a wait on another job) shows **Working in background**, not Idle.
 - Read the Pulse strip at a glance: live sessions, edits in the last 7 days, active projects, and your day streak.
@@ -61,8 +61,9 @@ To install, copy `dist/Agent Trail.app` to your Applications folder. The script 
 Each card's main button opens the session that most needs you: one waiting for input first (**Answer**), then a working one (**Open**), then an idle one (**Resume**). It shows the profile, the session title, and how long the session has been in that state when the assistant records it. The ⌄ menu next to it lists every live session, plus **Open in** your editor or terminal at that worktree, **Reveal in Finder**, **Copy path**, a recorded pull request, and **Bring {profile} forward**. Each session row in **Details** has its own ↗.
 
 - **Claude Desktop:** opens that Code session with Claude's `claude://code/continue` link. This link is not publicly documented and may change. With several Claude instances (for example Main and Second), macOS hands the link to the instance in front, so Agent Trail first brings the session's own instance forward and sends the link only once it is frontmost. If that instance does not come forward, or another one takes the link, it brings the right instance forward and shows a short hint naming the session to pick.
+- **Claude in a terminal:** brings forward the terminal app `claude` runs in, when the process environment identifies it, and names the folder of the tab to pick, since a terminal session has no title. In Claude Desktop's own terminal pane, that is the Claude instance holding the pane. It never sends a terminal session to a Claude Desktop Code session.
 - **Codex:** opens the thread with `codex://threads/<id>` when the Codex desktop app owns it; otherwise it brings the owning app forward.
-- **Grok:** brings forward the terminal app it runs in, when the process environment identifies it.
+- **Grok:** brings forward the terminal app it runs in, when the process environment identifies it, including Claude Desktop's terminal pane.
 - **Otherwise:** it brings the assistant's app forward, or shows the folder in your running editor or Finder.
 
 Agent Trail opens a session or brings an app forward only after you click, and only when that app is already running. It never launches, quits, kills, or restarts an assistant, and it needs no Automation or Accessibility permission. **Open in** menu items can open your editor or terminal.
@@ -143,6 +144,8 @@ Codex history is read from rollout JSONL files under `~/.codex/sessions` and `ar
 
 Grok history uses `summary.json` under `~/.grok/sessions` (or the custom home set in `configDirectory`). The session was started in `info.cwd`. The encoded session-directory name is not decoded into a path. Completed `write` and `search_replace` calls in the sibling `updates.jsonl` count as one edit each, and a positive `SearchReplace.EditsApplied` result must identify the files, which count for the project they landed in (see below). The edit time is the update timestamp: an ISO-8601 string, Unix seconds, or Unix milliseconds. A session with no `updates.jsonl` still appears, with a notice that its edit history is unavailable. The active-session registry alone does not establish a live state.
 
+Claude history comes from the session logs under each profile's `projects` folder. A Claude Desktop session is matched to its log through Desktop's session index and counts for the checkout Desktop recorded. A log with no Desktop session counts as `claude` started in a terminal only when the first record that names its entrypoint and folder says `cli`; runs started by the SDK or `claude -p`, and logs Desktop no longer lists, are not counted. A terminal session starts in the folder (`cwd`) that record names, and its edits count for the project they landed in (see below), the same as Codex's. It belongs to the profile whose folder holds its log, so `claude` with the default `~/.claude` counts as Claude · Main, under the same avatar as that account's Desktop sessions. Edits recorded by a subagent count as delegated edits of the session that started it. Claude Code deletes terminal session logs after 30 days by default (`cleanupPeriodDays` in its settings), and their history leaves Agent Trail with them.
+
 These on-disk formats are private implementation details and can change without notice. Missing or unreadable data appears as a profile notice. This alpha has not been tested against every assistant version or installation layout.
 
 ## When a project moves, or an assistant starts elsewhere
@@ -161,7 +164,7 @@ Search also matches earlier locations and launch folders. **Forget earlier locat
 
 ## Check live status on a project
 
-Live status is available for Claude Desktop, loaded Codex threads, and registered Grok sessions. Each adapter requires runtime presence and explicit status or turn events; recent edits and file timestamps do not establish a live state.
+Live status is available for Claude Desktop, `claude` in a terminal, loaded Codex threads, and registered Grok sessions. Each adapter requires runtime presence and explicit status or turn events; recent edits and file timestamps do not establish a live state.
 
 The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with a reported input request sort first, followed by projects with working sessions, under every sort. The Pulse strip shows needs-input and working counts. Use **Needs input** or **Working** to filter those projects. Selecting both includes projects with either state; search and **Shared** still apply.
 
@@ -176,7 +179,7 @@ The menu-bar icon shows the same at a glance:
 
 Right-click the icon for a list of live sessions grouped by state; choose one to jump to it. The panel's ⋯ menu has **Menu bar** settings (animation, the working and needs-input counts), **Show session titles**, and **Theme**: Classic, Gentle (brighter surfaces, indigo sparklines and calendar), Vivid (Gentle plus brighter profile colors that stay apart for color-blind readers), or Aurora (Vivid plus an indigo Trail calendar and a stronger wash). Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
 
-Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. Claude requires a matching desktop session; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
+Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. A Claude Desktop session requires a matching desktop session record, and `claude` in a terminal reports its own folder; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
 
 A session started outside a project joins the project its recorded edits landed in, so a Codex thread started in a parent folder appears on the repository's card. A Claude window still reporting a folder that has moved appears at the folder's current location.
 
@@ -212,7 +215,7 @@ Agent Trail tells them apart. While a command that a Claude session started duri
 
 ### How it works
 
-Each Claude Code session in Claude Desktop runs as one `claude` process. Every Bash command it starts, in the foreground or the background, is a child of that process and leads its own process group. MCP servers are children too, but they stay in Claude's process group.
+Each Claude Code session, in Claude Desktop or a terminal, runs as one `claude` process. Every Bash command it starts, in the foreground or the background, is a child of that process and leads its own process group. MCP servers are children too, but they stay in Claude's process group.
 
 ```text
 Claude Desktop
@@ -247,7 +250,7 @@ Agent Trail can see a job only while it is attached to the session. Two patterns
 
 - A background command that never exits on its own, such as `tail -f` or a development server started as a background command, keeps its session Working in background until it stops or the session closes.
 - A job fully detached from the session, with no command waiting on it, is adopted by `launchd` and cannot be tied to any session, unless Claude itself still reports the session as `shell`.
-- This applies to Claude Desktop sessions. Codex and Grok live status are unchanged.
+- This applies to Claude sessions, in Claude Desktop and in a terminal. Codex and Grok live status are unchanged.
 
 ## Explore project activity
 
@@ -282,9 +285,9 @@ Review a card before sharing it. Hiding names does not hide dates, counts, or pa
 
 ## Privacy
 
-Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs, Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records and, for each Claude session process, its children's parent, process group, start time, and run state (never their arguments), Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
+Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs (a log Desktop does not list is opened to read the entrypoint and folder of its opening records, which stay in memory), Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records and, for each Claude session process, its children's parent, process group, start time, and run state (never their arguments); for `claude` in a terminal, once its process start is verified, its `TERM_PROGRAM` and `__CFBundleIdentifier` values to name the terminal, as for Grok; Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. After you click Jump with several instances of the host app running, it reads the parent process IDs of the session's ancestors to find the instance it runs under. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
 
-Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches also keep the parent folders of edited files. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
+Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches, and the Claude cache for terminal sessions, also keep the parent folders of edited files. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
 
 `project-locations.json` (mode 0600) in the same folder remembers repositories Agent Trail attributed work to. It holds their current and earlier folder paths, which are learned from session evidence, plus a macOS bookmark and folder identity: device, inode, and creation date. It holds no prompts, commands, diffs, or conversation text, but the paths can still be sensitive; keep it private like the caches. An unreadable file is reported and never overwritten. With Agent Trail closed, deleting it forgets learned earlier locations; links still present are learned again.
 
@@ -339,15 +342,16 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance. New adapters s
 
 ## Alternatives, and when to use them
 
-- **Claude Code in the terminal only:** Claude's [agent view](https://code.claude.com/docs/en/agent-view) (`claude agents`) or [Muster](https://github.com/josefchen/muster).
+- **Answering prompts from the menu bar:** [Muster](https://github.com/josefchen/muster). Agent Trail only takes you to the session.
+- **Claude Code's own list of its background sessions:** Claude's [agent view](https://code.claude.com/docs/en/agent-view) (`claude agents`).
 - **Usage limits and cost:** [CodexBar](https://github.com/steipete/CodexBar) or [ccusage](https://github.com/ryoppippi/ccusage). Both work fine next to Agent Trail.
 - **Starting and orchestrating agents:** [Conductor](https://www.conductor.build/), [Vibe Kanban](https://github.com/BloopAI/vibe-kanban), or [cmux](https://github.com/manaflow-ai/cmux).
 
-Agent Trail is for people who want one card per repository across Claude Desktop, Codex, and Grok, both Claude accounts in one place, and long jobs that stay visible after Claude goes idle.
+Agent Trail is for people who want one card per repository across Claude (Desktop and terminal), Codex, and Grok, both Claude accounts in one place, and long jobs that stay visible after Claude goes idle.
 
 ## What's next
 
-- Claude Code sessions started with `claude` in the terminal.
+- Claude Code runs started by the SDK or with `claude -p`.
 - Codex input/approval state when a reliable local signal becomes available.
 - Gemini CLI, OpenCode, and Cursor, once their local tool results can be confirmed. They are unsupported in this release.
 - More coverage of changes made through agent shell commands.

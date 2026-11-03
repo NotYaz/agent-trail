@@ -17,3 +17,6 @@ support.json
 *.p12
 *.p8
 *.mobileprovision
+
+# Editor-generated launch configuration.
+.vscode/

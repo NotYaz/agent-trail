@@ -44,6 +44,154 @@ final class ClaudeActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.projects[0].recordedEditCount, 1)
     }
 
+    func testTerminalSessionsCountBesideDesktopOnesAndOnlyCLILogsQualify() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        // The Desktop session's own log may say "cli"; it still counts once, as Desktop.
+        try fixture.write([fixture.head("cli", seconds: 0), fixture.request("desktop", path: path),
+            fixture.response("desktop", seconds: 10, path: path)])
+        try fixture.write([fixture.head("cli", seconds: 20), fixture.request("terminal", path: path),
+            fixture.response("terminal", seconds: 30, path: path)],
+            to: fixture.projectLogs.appendingPathComponent("terminal-one.jsonl"))
+        try fixture.write([fixture.request("helper", name: "Write", path: path),
+            fixture.response("helper", seconds: 40, path: path)],
+            to: fixture.projectLogs.appendingPathComponent("terminal-one/subagents/agent-a.jsonl"))
+        // A log Desktop no longer lists, and a scripted run, are not terminal sessions.
+        for (name, entrypoint) in [("orphan", "claude-desktop"), ("scripted", "sdk-cli")] {
+            try fixture.write([fixture.head(entrypoint, seconds: 50), fixture.request(name, path: path),
+                fixture.response(name, seconds: 60, path: path)],
+                to: fixture.projectLogs.appendingPathComponent("\(name).jsonl"))
+        }
+        let provider = ClaudeActivityProvider(cacheURL: fixture.cache)
+        let metadata = provider.metadata(sources: [fixture.source])
+        XCTAssertEqual(metadata.projects.map(\.path), [fixture.project.path])
+        XCTAssertEqual(metadata.projects[0].activities.reduce(0) { $0 + $1.sessionCount }, 2)
+        XCTAssertNil(metadata.projects[0].latestEdit)
+        let result = provider.scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path), [fixture.project.path])
+        let project = result.projects[0]
+        XCTAssertEqual(project.recordedEditCount, 3)
+        XCTAssertEqual(project.activities.reduce(0) { $0 + $1.sessionCount }, 2)
+        XCTAssertEqual(project.latestEdit?.latestEdit, fixture.date(40))
+        XCTAssertEqual(moments(project).filter(\.delegated).map(\.date), [fixture.date(40)])
+        XCTAssertTrue(result.notices.isEmpty, "\(result.notices)")
+        assertMomentInvariants(result.projects)
+        let cacheText = try String(contentsOf: fixture.cache, encoding: .utf8)
+        XCTAssertFalse(cacheText.contains("PRIVATE_"))
+        // A second pass reuses the cache and reports the same.
+        XCTAssertEqual(ClaudeActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source]).projects[0].recordedEditCount, 3)
+    }
+
+    func testTerminalSessionStartedAboveARepositoryJoinsIt() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.git(fixture.project)
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        let above = fixture.root.path
+        try fixture.write([fixture.head("cli", seconds: 0, cwd: fixture.root),
+            fixture.request("landed", path: path, cwd: above), fixture.response("landed", seconds: 10, path: path, cwd: above)],
+            to: fixture.projectLogs.appendingPathComponent("terminal-above.jsonl"))
+        let result = ClaudeActivityProvider().scan(sources: [fixture.source])
+        let project = try XCTUnwrap(result.projects.first { $0.path == fixture.project.path })
+        XCTAssertEqual(project.recordedEditCount, 1)
+        XCTAssertEqual(project.activities.reduce(0) { $0 + $1.sessionCount }, 1)
+        XCTAssertEqual(result.sessionProjects, [SessionProjectAssociation(sourceID: "main", sessionID: "terminal-above",
+            recordedWorkspace: above, projectPath: fixture.project.path)])
+    }
+
+    func testTerminalEditAboveTheShellsFolderStillCountsInsideTheLaunchFolder() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        // Not a Git checkout, and Claude's shell has moved into a subfolder.
+        let drafts = fixture.project.appendingPathComponent("drafts").path
+        let path = fixture.project.appendingPathComponent("todo.md").path
+        try fixture.write([fixture.head("cli", seconds: 0), fixture.request("above", path: path, cwd: drafts),
+            fixture.response("above", seconds: 10, path: path, cwd: drafts)],
+            to: fixture.projectLogs.appendingPathComponent("terminal-cd.jsonl"))
+        let result = ClaudeActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path), [fixture.project.path])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+    }
+
+    func testTerminalEditsCountWhereverTheShellHasGone() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        // Started in one checkout; the shell has since moved into a sibling checkout.
+        try fixture.git(fixture.project)
+        let sibling = fixture.root.appendingPathComponent("sibling")
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+        try fixture.git(sibling)
+        let worktree = fixture.project.appendingPathComponent(".claude/worktrees/feat")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        let edits = [("home", fixture.project.appendingPathComponent("y.swift").path),
+                     ("sibling", sibling.appendingPathComponent("x.swift").path),
+                     // Outside every checkout and the launch folder: not attributed.
+                     ("loose", fixture.root.appendingPathComponent("loose/z.txt").path),
+                     ("worktree", worktree.appendingPathComponent("a.swift").path)]
+        var lines = [fixture.head("cli", seconds: 0)]
+        for (index, (id, path)) in edits.enumerated() {
+            lines += [fixture.request(id, path: path, cwd: sibling.path),
+                      fixture.response(id, seconds: 10 + index, path: path, cwd: sibling.path)]
+        }
+        try fixture.write(lines, to: fixture.projectLogs.appendingPathComponent("terminal-moved.jsonl"))
+        let result = ClaudeActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path).sorted(), [fixture.project.path, sibling.path].sorted())
+        let home = try XCTUnwrap(result.projects.first { $0.path == fixture.project.path })
+        XCTAssertEqual(home.recordedEditCount, 2)
+        XCTAssertEqual(result.projects.first { $0.path == sibling.path }?.recordedEditCount, 1)
+        // The latest edit landed in a Claude worktree, and the card names it.
+        XCTAssertTrue(home.activities.contains { $0.latestEditWorkspacePath == worktree.path })
+    }
+
+    func testTerminalSessionIsFoundPastAnOversizedOpeningPrompt() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        var opening = fixture.head("cli", seconds: 0)
+        opening["message"] = ["role": "user", "content": String(repeating: "A", count: 1_500_000)]
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        try fixture.write([opening,
+            ["type": "attachment", "entrypoint": "cli", "cwd": fixture.project.path, "timestamp": fixture.stamp(1)],
+            fixture.request("edit", path: path), fixture.response("edit", seconds: 10, path: path)],
+            to: fixture.projectLogs.appendingPathComponent("terminal-big.jsonl"))
+        let result = ClaudeActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.map(\.path), [fixture.project.path])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(result.projects.first?.activities.flatMap(\.sessionStarts), [fixture.date(1)])
+    }
+
+    func testMetadataKeepsATerminalSessionWhereItsLastScanPlacedIt() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.git(fixture.project)
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        let above = fixture.root.path
+        try fixture.write([fixture.head("cli", seconds: 0, cwd: fixture.root),
+            fixture.request("landed", path: path, cwd: above), fixture.response("landed", seconds: 10, path: path, cwd: above)],
+            to: fixture.projectLogs.appendingPathComponent("terminal-above.jsonl"))
+        _ = ClaudeActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source])
+        let metadata = ClaudeActivityProvider(cacheURL: fixture.cache).metadata(sources: [fixture.source])
+        XCTAssertEqual(metadata.projects.map(\.path), [fixture.project.path])
+        XCTAssertEqual(metadata.sessionProjects.map(\.projectPath), [fixture.project.path])
+    }
+
+    func testTerminalLogWithoutItsFirstRecordYetIsReadAgainOnceItGrows() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let log = fixture.projectLogs.appendingPathComponent("terminal-late.jsonl")
+        try fixture.write([["type": "queue-operation", "operation": "enqueue", "timestamp": fixture.stamp(0)]], to: log)
+        let provider = ClaudeActivityProvider()
+        XCTAssertTrue(provider.metadata(sources: [fixture.source]).projects.isEmpty)
+        let handle = try FileHandle(forWritingTo: log)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: fixture.line(fixture.head("cli", seconds: 5)))
+        try handle.close()
+        let projects = provider.metadata(sources: [fixture.source]).projects
+        XCTAssertEqual(projects.map(\.path), [fixture.project.path])
+        XCTAssertEqual(projects.first?.activities.first?.sessionStarts, [fixture.date(0)])
+    }
+
     func testReplayAndCopiedLogsCountEachToolOnceAcrossCacheAndAppend() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -376,6 +524,19 @@ final class ClaudeActivityProviderTests: XCTestCase {
                 "cwd": cwd.path, "originCwd": project.path, "createdAt": 1_000_000, "lastActivityAt": 1_000_000,
                 "gitAnchors": [["gitRoot": project.path], ["gitRoot": cwd.path]]]
             try JSONSerialization.data(withJSONObject: record).write(to: metadata)
+        }
+
+        /// The first record of a session's log, naming how it was started.
+        func head(_ entrypoint: String, seconds: Int, cwd: URL? = nil) -> [String: Any] {
+            ["type": "user", "entrypoint": entrypoint, "cwd": (cwd ?? project).path, "timestamp": stamp(seconds),
+             "message": ["role": "user", "content": "PRIVATE_PROMPT_MARKER"]]
+        }
+
+        func git(_ directory: URL) throws {
+            let metadata = directory.appendingPathComponent(".git", isDirectory: true)
+            try FileManager.default.createDirectory(at: metadata.appendingPathComponent("objects"), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: metadata.appendingPathComponent("refs"), withIntermediateDirectories: true)
+            try Data("ref: refs/heads/main\n".utf8).write(to: metadata.appendingPathComponent("HEAD"))
         }
 
         func request(_ id: String, name: String = "Edit", path: String, cwd: String? = nil) -> [String: Any] {

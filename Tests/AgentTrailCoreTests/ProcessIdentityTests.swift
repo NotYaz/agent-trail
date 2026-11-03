@@ -191,14 +191,16 @@ final class ProcessIdentityTests: XCTestCase {
         for (program, bundle) in [
             ("Apple_Terminal", "com.apple.Terminal"), ("iTerm.app", "com.googlecode.iterm2"),
             ("ghostty", "com.mitchellh.ghostty"), ("WarpTerminal", "dev.warp.Warp-Stable"),
-            ("vscode", "com.microsoft.VSCode"), ("vscode", "com.todesktop.230313mzl4w4u92")
+            ("vscode", "com.microsoft.VSCode"), ("vscode", "com.todesktop.230313mzl4w4u92"),
+            // Claude Desktop's own terminal pane.
+            ("claude-desktop", "com.anthropic.claudefordesktop")
         ] { XCTAssertEqual(host(program, bundle), bundle) }
         XCTAssertEqual(host("iTerm.app", "COM.googlecode.iTerm2"), "com.googlecode.iterm2")
         for (program, bundle) in [
             ("iTerm.app", "com.anthropic.claudefordesktop"), ("Apple_Terminal", "com.googlecode.iterm2"),
             ("vscode", "com.apple.Terminal"), ("ghostty", "com.mitchellh.ghostty.debug"),
             ("tmux", "com.apple.Terminal"), ("apple_terminal", "com.apple.Terminal"),
-            ("claude-desktop", "com.anthropic.claudefordesktop")
+            ("claude-desktop", "com.googlecode.iterm2")
         ] { XCTAssertNil(host(program, bundle), program) }
         XCTAssertNil(host(nil, "com.apple.Terminal"))
         XCTAssertNil(host("Apple_Terminal", nil))

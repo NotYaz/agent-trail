@@ -2,8 +2,9 @@
 
 ## Unreleased
 
+- **Claude Code in the terminal.** Sessions started with `claude` in a terminal now appear next to Claude Desktop's. Their edits count for the project they landed in, as Codex's do, so a session started above a repository joins it; subagent edits count as delegated. They get live status, Working in background, and a Jump that brings their terminal forward (Terminal, iTerm2, Ghostty, Warp, VS Code, or Cursor, when the process environment names it), never a Claude Desktop Code session. In Claude Desktop's own terminal pane, Jump brings forward the Claude instance holding the pane, for `claude` and Grok alike. Only logs whose first record naming an entrypoint and folder says `cli` count; SDK and `claude -p` runs do not, and a Desktop session's log is never counted twice. A Mac without Claude Desktop no longer gets Desktop notices. `AgentTrailInspect --live` marks these sessions `startedInTerminal`.
 - **Claude's own background status counts.** Claude Code now reports a session whose turn ended while a command it started keeps running as `shell`. Agent Trail used to show that as Unknown; it now shows Working in background, with the start time of the command it can see, or the turn's end when the command is no longer one of the session's children.
-- The README's first screen says what is supported and what is not (Claude Desktop's Code tab, not `claude` in the terminal yet), and what Agent Trail never does. "Why it exists" explains why it leaves each agent in its own app. New sections cover running two Claude accounts and the alternatives for setups Agent Trail does not serve.
+- The README's first screen says what is supported and what is not, and what Agent Trail never does. "Why it exists" explains why it leaves each agent in its own app. New sections cover running two Claude accounts and the alternatives for setups Agent Trail does not serve.
 
 ## 0.1.0-alpha.11 — 2026-11-03
 

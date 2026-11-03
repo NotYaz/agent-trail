@@ -46,10 +46,14 @@ public struct LiveSessionDetails: Hashable, Sendable {
     /// Set when the turn ended but a command it started still runs: the oldest
     /// such command's start. The session then reports `working`.
     public var backgroundSince: Date?
+    /// A Claude session started with `claude` in a terminal rather than in
+    /// Claude Desktop. Jump then goes to its terminal, never to Claude.
+    public var startedInTerminal: Bool
 
     public init(title: String? = nil, desktopSessionID: String? = nil, needsAction: String? = nil,
                 stateSince: Date? = nil, branch: String? = nil, pullRequests: [LivePullRequest] = [],
-                hostBundleID: String? = nil, parentThreadID: String? = nil, backgroundSince: Date? = nil) {
+                hostBundleID: String? = nil, parentThreadID: String? = nil, backgroundSince: Date? = nil,
+                startedInTerminal: Bool = false) {
         self.title = title
         self.desktopSessionID = desktopSessionID
         self.needsAction = needsAction
@@ -59,6 +63,7 @@ public struct LiveSessionDetails: Hashable, Sendable {
         self.hostBundleID = hostBundleID
         self.parentThreadID = parentThreadID
         self.backgroundSince = backgroundSince
+        self.startedInTerminal = startedInTerminal
     }
 
     public static let none = LiveSessionDetails()
@@ -125,20 +130,29 @@ public final class LiveActivityProvider {
     private let isProcessAlive: (Int32) -> Bool
     private let processStartTimes: (Set<Int32>) -> [Int32: String]
     private let commandStarts: (Int32) -> [Date]
+    private let terminalHints: (Int32) -> ProcessIdentity.TerminalHints?
     private let files = FileManager.default
+    /// A terminal session's host, by PID and start; a nil value is settled as unknown.
+    private var terminalHosts: [String: String?] = [:]
+    private var failedHostReads: Set<String> = []
 
     /// `commandStarts` lists when each live Bash command of a session process began.
+    /// `terminalHints` receives only terminal-session PIDs whose start time matched.
     public init(freshnessTTL: TimeInterval = 90, isProcessAlive: ((Int32) -> Bool)? = nil,
                 processStartTimes: ((Set<Int32>) -> [Int32: String])? = nil,
-                commandStarts: ((Int32) -> [Date])? = nil) {
+                commandStarts: ((Int32) -> [Date])? = nil,
+                terminalHints: ((Int32) -> ProcessIdentity.TerminalHints?)? = nil) {
         self.freshnessTTL = freshnessTTL.isFinite && freshnessTTL > 0 ? freshnessTTL : 90
         self.isProcessAlive = isProcessAlive ?? { pid in pid > 0 && getpgid(pid) >= 0 }
         self.processStartTimes = processStartTimes ?? Self.readProcessStartTimes
         self.commandStarts = commandStarts ?? ProcessIdentity.groupLeaderChildStarts
+        self.terminalHints = terminalHints ?? { ProcessIdentity.readTerminalHints(pid: $0) }
     }
 
     /// Suitable for a small background poll every 2–3 seconds. No files are written,
-    /// no signals are sent, and terminal-only/foreign-profile sessions are omitted.
+    /// no signals are sent, and foreign-profile sessions are omitted. Desktop
+    /// sessions must match a Desktop record; `claude` started in a terminal
+    /// reports its own folder.
     public func scan(sources: [AgentSource], now: Date = Date()) -> LiveSnapshot {
         var sessions: [String: LiveAgentSession] = [:]
         var notices: [String] = []
@@ -148,7 +162,6 @@ public final class LiveActivityProvider {
             // have separate runtime readers in CompositeLiveActivityProvider.
             guard source.assistant == .claude else { continue }
             let desktop = desktopSessions(source: source, notices: &notices)
-            guard !desktop.isEmpty else { continue }
             let root = URL(fileURLWithPath: (source.configDirectory as NSString).expandingTildeInPath)
                 .appendingPathComponent("sessions", isDirectory: true)
             let urls: [URL]
@@ -163,33 +176,50 @@ public final class LiveActivityProvider {
                 autoreleasepool {
                     do {
                         let record = try JSONDecoder().decode(ProcessRecord.self, from: Data(contentsOf: url))
-                        guard record.entrypoint == "claude-desktop",
+                        // "cli" is `claude` started in a terminal; Desktop sessions
+                        // must also match the Desktop record of their session.
+                        let terminal = record.entrypoint == "cli"
+                        guard terminal || record.entrypoint == "claude-desktop", record.isForegroundSession,
                               record.pidDomain == nil || record.pidDomain == "darwin",
-                              let cliID = record.sessionId, let project = desktop[cliID],
+                              let cliID = record.sessionId, terminal || desktop[cliID] != nil,
                               let rawPID = record.pid, rawPID > 0, rawPID <= Int(Int32.max),
                               url.deletingPathExtension().lastPathComponent == String(rawPID) else { return }
                         let pid = Int32(rawPID)
                         guard isProcessAlive(pid) else { return }
-                        guard let cwd = absolutePath(record.cwd),
-                              project.checkoutRoots.contains(where: { contains(root: $0, path: cwd) }) else {
+                        guard let cwd = absolutePath(record.cwd) else {
+                            if terminal { unreadable += 1 } else { unexpectedWorkspace += 1 }
+                            return
+                        }
+                        // A Desktop session resumed with `claude` in a terminal keeps
+                        // its Desktop project and details; Jump still goes to the terminal.
+                        let inDesktopCheckout = desktop[cliID].map { $0.checkoutRoots.contains(where: { contains(root: $0, path: cwd) }) } ?? false
+                        if !terminal && !inDesktopCheckout {
                             unexpectedWorkspace += 1
                             return
                         }
+                        let project = inDesktopCheckout ? desktop[cliID] : nil
                         guard let milliseconds = record.statusUpdatedAt ?? record.updatedAt,
                               milliseconds.isFinite, milliseconds > 0 else {
                             unreadable += 1
                             return
                         }
-                        var details = project.details
+                        var details = project?.details ?? LiveSessionDetails()
+                        details.startedInTerminal = terminal
+                        // Desktop's post-turn summary describes a turn of its own
+                        // process and is never updated while a terminal runs the session.
+                        if terminal { details.needsAction = nil }
                         // The registry names its Desktop host; a link is offered only
                         // when that host is the very record this session matched.
-                        if let host = record.hostSessionId?.value, host == project.linkableSessionID {
+                        if !terminal, let project, let host = record.hostSessionId?.value, host == project.linkableSessionID {
                             details.desktopSessionID = host
                         }
                         let stateSince = record.statusUpdatedAt.flatMap { value in
                             value.isFinite && value > 0 ? Date(timeIntervalSince1970: value / 1000) : nil
                         }
-                        candidates.append(Candidate(source: source, projectPath: project.projectPath, workspacePath: cwd,
+                        // Claude moves a terminal session's folder into a worktree it
+                        // enters; the session still belongs to that worktree's checkout.
+                        let projectPath = project?.projectPath ?? Self.claudeWorktreeOwner(cwd) ?? cwd
+                        candidates.append(Candidate(source: source, projectPath: projectPath, workspacePath: cwd,
                             sessionID: cliID, pid: pid, status: record.status, procStart: record.procStart,
                             updatedAt: Date(timeIntervalSince1970: milliseconds / 1000),
                             stateSince: stateSince, details: details))
@@ -205,6 +235,11 @@ public final class LiveActivityProvider {
         let starts = processStartTimes(Set(candidates.filter { $0.procStart?.isEmpty == false }.map(\.pid)))
         var staleBySource: [String: Int] = [:]
         var reusedBySource: [String: Int] = [:]
+        var seenHostKeys: Set<String> = []
+        defer {
+            terminalHosts = terminalHosts.filter { seenHostKeys.contains($0.key) }
+            failedHostReads.formIntersection(seenHostKeys)
+        }
         for candidate in candidates {
             var identityVerified = false
             if let recorded = candidate.procStart, !recorded.isEmpty, let current = starts[candidate.pid] {
@@ -235,6 +270,12 @@ public final class LiveActivityProvider {
             // Only a recognized, trusted flag has a known start. An unknown state
             // did not begin at the old report's time.
             details.stateSince = status == .unknown ? nil : candidate.stateSince
+            // A terminal session's host is read only from a verified process.
+            if details.startedInTerminal, identityVerified, let start = candidate.procStart {
+                let key = "\(candidate.pid)\u{0}\(normalizeStart(start))"
+                seenHostKeys.insert(key)
+                details.hostBundleID = terminalHost(pid: candidate.pid, key: key)
+            }
             // A command started after the idle flag is not the turn's (a hook, say).
             if status == .idle {
                 let turnEnded = candidate.stateSince ?? candidate.updatedAt
@@ -281,6 +322,17 @@ public final class LiveActivityProvider {
         let pidDomain: String?
         let procStart: String?
         let hostSessionId: Lenient<String>?
+        /// "interactive" for a session someone works in; background workers,
+        /// pre-started spares and parked jobs are Claude's own machinery.
+        let kind: Lenient<String>?
+        let spare: Lenient<Bool>?
+        let parkedJobId: Lenient<String>?
+
+        /// Claude lists only these records as sessions, and so does Agent Trail.
+        var isForegroundSession: Bool {
+            let interactive = kind == nil || kind?.value == "interactive"
+            return interactive && spare?.value != true && parkedJobId == nil
+        }
     }
 
     private struct Candidate {
@@ -365,6 +417,36 @@ public final class LiveActivityProvider {
         value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 
+    /// `<root>` for a path inside `<root>/.claude/worktrees/<name>`, the same
+    /// rule the history reader uses for Claude worktrees.
+    static func claudeWorktreeOwner(_ path: String) -> String? {
+        let parts = (path as NSString).pathComponents
+        guard parts.count >= 4 else { return nil }
+        for index in stride(from: parts.count - 3, through: 1, by: -1)
+        where parts[index] == ".claude" && parts[index + 1] == "worktrees" {
+            return NSString.path(withComponents: Array(parts[..<index]))
+        }
+        return nil
+    }
+
+    /// A process's launch environment does not change, so one read settles it.
+    /// A failed read is tried once more next poll, in case it raced the process.
+    private func terminalHost(pid: Int32, key: String) -> String? {
+        if let known = terminalHosts[key] { return known }
+        guard let hints = terminalHints(pid) else {
+            if failedHostReads.remove(key) != nil {
+                terminalHosts.updateValue(nil, forKey: key)
+            } else {
+                failedHostReads.insert(key)
+            }
+            return nil
+        }
+        failedHostReads.remove(key)
+        let host = hints.terminalBundleIdentifier
+        terminalHosts.updateValue(host, forKey: key)
+        return host
+    }
+
     private struct DesktopRecord: Decodable {
         let sessionId: String?
         let cliSessionId: String?
@@ -445,6 +527,8 @@ public final class LiveActivityProvider {
             return [:]
         }
         let root = URL(fileURLWithPath: desktopPath).appendingPathComponent("claude-code-sessions", isDirectory: true)
+        // Without Claude Desktop, only terminal sessions can be live.
+        guard files.fileExists(atPath: root.path) else { return [:] }
         var failed = false
         guard let enumerator = files.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles], errorHandler: { _, _ in failed = true; return true }) else {

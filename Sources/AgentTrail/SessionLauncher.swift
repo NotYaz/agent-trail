@@ -181,13 +181,16 @@ enum SessionLauncher {
 
     /// The launcher order: (1) a Claude Desktop link, sent to this profile's
     /// instance (directly when it is the only Claude, else once it is frontmost),
-    /// falling back to that instance plus a hint; (2) a Codex thread link
-    /// when the ChatGPT app owns the thread and runs; (3) the running host app;
+    /// falling back to that instance plus a hint; a Claude session started in a
+    /// terminal skips this and goes to its terminal; (2) a Codex thread link
+    /// when the ChatGPT app owns the thread and runs; (3) the running host app,
+    /// the instance the session runs under when several run;
     /// (4) the session's own app, else the folder in a running preferred
     /// editor, else Finder. `report` is called once, possibly later.
     static func jump(_ session: LiveAgentSession, source: AgentSource?, context: JumpContext,
                      report: @escaping (JumpOutcome) -> Void) {
-        if let source, source.assistant == .claude, !source.bundleIdentifier.isEmpty {
+        // `claude` in a terminal belongs to that terminal, not to Claude Desktop.
+        if let source, source.assistant == .claude, !source.bundleIdentifier.isEmpty, !session.details.startedInTerminal {
             jumpToClaude(session, source: source, context: context, report: report)
             return
         }
@@ -195,7 +198,7 @@ enum SessionLauncher {
            openCodexThread(session, context: context, report: report) {
             return
         }
-        if let outcome = activateHost(of: session, context: context) {
+        if let outcome = activateHost(of: session, source: source, context: context) {
             report(outcome)
             return
         }
@@ -319,20 +322,45 @@ enum SessionLauncher {
         return true
     }
 
-    /// Step 3: the app that owns the session (a terminal for Grok, an editor or
-    /// the ChatGPT app for Codex), when it is running.
-    private static func activateHost(of session: LiveAgentSession, context: JumpContext) -> JumpOutcome? {
-        guard let bundleID = session.details.hostBundleID, isBundleIdentifier(bundleID),
-              let app = preferredInstance(runningApplications(bundleID)) else { return nil }
-        return activateWithHint(app, context: context)
+    /// Step 3: the app that owns the session (a terminal for Grok or terminal Claude, Claude
+    /// Desktop when either runs in its terminal pane, an editor or the ChatGPT app for Codex),
+    /// when it is running.
+    private static func activateHost(of session: LiveAgentSession, source: AgentSource?,
+                                     context: JumpContext) -> JumpOutcome? {
+        guard let bundleID = session.details.hostBundleID, isBundleIdentifier(bundleID) else { return nil }
+        let running = runningApplications(bundleID)
+        guard let app = enclosingInstance(of: session.pid, among: running) ?? preferredInstance(running) else {
+            return nil
+        }
+        // These hosts were named by terminal hints, so the session sits in a
+        // terminal even when the host is an editor or Claude Desktop.
+        let inTerminal = session.details.startedInTerminal || source?.assistant == .grok
+        return activateWithHint(app, inTerminal: inTerminal, context: context)
     }
 
-    private static func activateWithHint(_ app: NSRunningApplication, context: JumpContext) -> JumpOutcome {
+    /// With several instances of the host running (two Claude profiles, each
+    /// with its own terminal pane), the one the session process runs under.
+    private static func enclosingInstance(of pid: pid_t, among apps: [NSRunningApplication]) -> NSRunningApplication? {
+        guard apps.count > 1, pid > 0 else { return nil }
+        var current = pid
+        // claude → shell → Claude Helper → Claude is three steps; 16 bounds a loop.
+        for _ in 0..<16 {
+            guard let parent = ProcessIdentity.parentProcessID(of: current) else { return nil }
+            if let app = apps.first(where: { $0.processIdentifier == parent }) { return app }
+            current = parent
+        }
+        return nil
+    }
+
+    private static func activateWithHint(_ app: NSRunningApplication, inTerminal: Bool = false,
+                                         context: JumpContext) -> JumpOutcome {
         let name = app.localizedName ?? "the app"
         guard activate(app) else { return .failed("macOS did not accept the request to bring \(name) forward.") }
         let isTerminal = app.bundleIdentifier.map { terminalBundleIDs.contains($0) } ?? false
-        let hint = pickHint(app: name, title: context.title, noun: isTerminal ? "tab" : "session", folder: context.folder)
-        return .hint(hint, symbol: isTerminal ? "terminal" : "macwindow")
+        // A terminal app's sessions are tabs; an editor's or Claude Desktop's are its terminal panes.
+        let noun = isTerminal ? "tab" : inTerminal ? "terminal" : "session"
+        let hint = pickHint(app: name, title: context.title, noun: noun, folder: context.folder)
+        return .hint(hint, symbol: isTerminal || inTerminal ? "terminal" : "macwindow")
     }
 
     /// Step 4a: the session process itself, when it is a regular app that was
