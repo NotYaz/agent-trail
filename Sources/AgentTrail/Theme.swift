@@ -50,9 +50,12 @@ enum Theme {
 
     /// Dynamic colors. Each resolves for light, dark and both Increase Contrast
     /// appearances, so the live panel and the render path's `view.appearance` agree.
+    /// Canvas, aurora, status, sparkline and heat colors follow `ColorTheme.current`.
     enum Palette {
+        private static var themed: ThemePalette { ColorTheme.current.palette }
+
         // Surfaces
-        static let canvas = Color(light: Theme.nsColor(hex: 0xF4F5F8), dark: Theme.nsColor(hex: 0x14161B))
+        static var canvas: Color { themed.canvas }
         static let surface = Color(light: NSColor(white: 1, alpha: 0.80), dark: NSColor(white: 1, alpha: 0.045),
                                    highContrastLight: NSColor(white: 1, alpha: 0.90),
                                    highContrastDark: NSColor(white: 1, alpha: 0.145))
@@ -77,45 +80,38 @@ enum Theme {
         static let surfaceShadow = Color(light: NSColor(white: 0, alpha: 0.05), dark: NSColor(white: 0, alpha: 0))
 
         // Status, reserved for live state. Always paired with a glyph and a word.
-        static let needsInput = Color(light: Theme.nsColor(hex: 0xFAB219), dark: Theme.nsColor(hex: 0xFAB219))
-        static let needsInputText = Color(light: Theme.nsColor(hex: 0x8A5300), dark: Theme.nsColor(hex: 0xFAB219),
-                                          highContrastLight: Theme.nsColor(hex: 0x6B4000))
-        static let working = Color(light: Theme.nsColor(hex: 0x0CA30C), dark: Theme.nsColor(hex: 0x0CA30C))
-        static let workingText = Color(light: Theme.nsColor(hex: 0x006300), dark: Theme.nsColor(hex: 0x3DDC6F),
-                                       highContrastLight: Theme.nsColor(hex: 0x004D00))
+        static var needsInput: Color { themed.needsInput }
+        static var needsInputText: Color { themed.needsInputText }
+        static var working: Color { themed.working }
+        static var workingText: Color { themed.workingText }
         static let unknown = Color(light: Theme.nsColor(hex: 0x8A93A6), dark: Theme.nsColor(hex: 0x8A93A6))
         static let error = Color(light: Theme.nsColor(hex: 0xD03B3B), dark: Theme.nsColor(hex: 0xD03B3B))
         /// Error wording; the fill alone is under 4.5:1 on dark window backgrounds.
         static let errorText = Color(light: Theme.nsColor(hex: 0xB3261E), dark: Theme.nsColor(hex: 0xFF6961))
 
         // Static aurora. It never animates and never reacts to live state.
-        static let auroraIndigo = Color(light: Theme.nsColor(hex: 0x4F6BED, alpha: 0.05),
-                                        dark: Theme.nsColor(hex: 0x4F6BED, alpha: 0.08))
-        static let auroraViolet = Color(light: Theme.nsColor(hex: 0xA178FF, alpha: 0.03),
-                                        dark: Theme.nsColor(hex: 0xA178FF, alpha: 0.05))
+        static var auroraIndigo: Color { themed.auroraIndigo }
+        static var auroraViolet: Color { themed.auroraViolet }
+        static var auroraPink: Color { themed.auroraPink }
 
-        /// Single-hue slate magnitude ramp: level 0 is empty, 1-4 are quartiles.
+        /// Sparkline stroke and area. Classic keeps the gray ink.
+        static var sparkline: Color { themed.sparkline }
+        static var sparklineFill: Color { themed.sparklineFill }
+
+        /// Single-hue magnitude ramp (slate, blue-slate or indigo by theme): level 0 is empty, 1-4 are quartiles.
         /// Level 0 is a translucent ink, about 1.2:1 over the card surface whether
         /// it sits on the opaque canvas or the live material, so empty days, dimmed
         /// days before history and undrawn future days stay apart. Increase Contrast
         /// dark keeps the solid, which reads as a darker hole on its brighter surface
         /// and stays below level 1.
-        static let heatRamp: [Color] = [
-            Color(light: Theme.nsColor(hex: 0x2B3140, alpha: 0.11), dark: NSColor(white: 1, alpha: 0.08),
-                  highContrastLight: Theme.nsColor(hex: 0x2B3140, alpha: 0.14),
-                  highContrastDark: Theme.nsColor(hex: 0x1F2430)),
-            Color(light: Theme.nsColor(hex: 0xC9CED8), dark: Theme.nsColor(hex: 0x39404F)),
-            Color(light: Theme.nsColor(hex: 0x9AA2B2), dark: Theme.nsColor(hex: 0x5F6879)),
-            Color(light: Theme.nsColor(hex: 0x646D80), dark: Theme.nsColor(hex: 0x98A0B1)),
-            Color(light: Theme.nsColor(hex: 0x2B3140), dark: Theme.nsColor(hex: 0xE3E6EC))
-        ]
+        static var heatRamp: [Color] { themed.heatRamp }
 
         static func heat(_ level: Int) -> Color {
             heatRamp[min(max(level, 0), heatRamp.count - 1)]
         }
 
         /// The menu-bar tint while a session needs input. AppKit needs an NSColor.
-        static let needsInputNSColor = Theme.nsColor(hex: 0xFAB219)
+        static var needsInputNSColor: NSColor { themed.needsInputNSColor }
 
         /// Fixed colors for the exported share card. ImageRenderer carries no
         /// NSAppearance, so nothing here is dynamic.
@@ -186,14 +182,21 @@ extension Color {
     /// A color that follows the effective appearance, including Increase Contrast.
     /// High-contrast variants fall back to the plain light or dark value.
     init(light: NSColor, dark: NSColor, highContrastLight: NSColor? = nil, highContrastDark: NSColor? = nil) {
-        let resolved = NSColor(name: nil) { appearance in
+        self.init(nsColor: NSColor(light: light, dark: dark, highContrastLight: highContrastLight,
+                                   highContrastDark: highContrastDark))
+    }
+}
+
+extension NSColor {
+    /// The AppKit form of `Color(light:dark:highContrastLight:highContrastDark:)`.
+    convenience init(light: NSColor, dark: NSColor, highContrastLight: NSColor? = nil, highContrastDark: NSColor? = nil) {
+        self.init(name: nil) { appearance in
             let match = appearance.bestMatch(from: Theme.appearanceNames)
             if match == NSAppearance.Name.darkAqua { return dark }
             if match == NSAppearance.Name.accessibilityHighContrastAqua { return highContrastLight ?? light }
             if match == NSAppearance.Name.accessibilityHighContrastDarkAqua { return highContrastDark ?? dark }
             return light
         }
-        self.init(nsColor: resolved)
     }
 }
 
@@ -354,6 +357,8 @@ struct PanelBackdrop: View {
                            center: .topLeading, startRadius: 0, endRadius: 340)
             RadialGradient(colors: [Theme.Palette.auroraViolet, Theme.Palette.auroraViolet.opacity(0)],
                            center: .bottomTrailing, startRadius: 0, endRadius: 300)
+            RadialGradient(colors: [Theme.Palette.auroraPink, Theme.Palette.auroraPink.opacity(0)],
+                           center: UnitPoint(x: 0.6, y: 1), startRadius: 0, endRadius: 260)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)

@@ -10,9 +10,9 @@ enum ProfileSlot: Equatable, Hashable {
 }
 
 /// A profile keeps the same visual identity in Projects, Growth, Settings and
-/// exports. The palette is validated for color-vision deficiency on white and
-/// on #161A22, keeps teal clear of Working green, and has no amber or red slot,
-/// so identity never reads as a status.
+/// exports. Slots keep their hue family in every theme (`ThemePalette.profileHex`);
+/// each set keeps teal clear of Working green and has no amber or red slot, so
+/// identity never reads as a status.
 enum ProfileColor {
     /// Default ids keep fixed slots, so their colors never move.
     static let defaultSlots: [String: Int] = ["claude-primary": 0, "claude-second": 1, "codex": 2, "grok": 3]
@@ -21,20 +21,8 @@ enum ProfileColor {
     static let otherSeriesID = "other"
     static let otherSeriesName = "Other profiles"
 
-    /// (light, dark) per slot: blue, magenta, violet, teal, plum, umber.
-    private static let slotHex: [(light: UInt32, dark: UInt32)] = [
-        (0x2A78D6, 0x3987E5),
-        (0xD4498C, 0xD55181),
-        (0x6250D6, 0x9085E9),
-        (0x1B9690, 0x33A397),
-        (0x793974, 0x7860A0),
-        (0x7D460B, 0xAD721C)
-    ]
     private static let slateHex: UInt32 = 0x8A93A6
 
-    private static let dynamicColors: [Color] = slotHex.map { pair in
-        Color(light: Theme.nsColor(hex: pair.light), dark: Theme.nsColor(hex: pair.dark))
-    }
     private static let slate = Color(light: Theme.nsColor(hex: slateHex), dark: Theme.nsColor(hex: slateHex))
 
     /// Custom profiles, in sources order, take the lowest slot not held by a
@@ -59,14 +47,17 @@ enum ProfileColor {
 
     static func color(for slot: ProfileSlot) -> Color {
         switch slot {
-        case .slot(let index) where dynamicColors.indices.contains(index): return dynamicColors[index]
-        case .slot, .other: return slate
+        case .slot(let index):
+            let colors = ColorTheme.current.palette.profileColors
+            return colors.indices.contains(index) ? colors[index] : slate
+        case .other: return slate
         }
     }
 
     /// A non-adaptive color for ImageRenderer output, which has no appearance.
     static func fixed(_ id: String, sources: [AgentSource], dark: Bool) -> Color {
         let hex: UInt32
+        let slotHex = ColorTheme.current.palette.profileHex
         switch slot(for: id, sources: sources) {
         case .slot(let index) where slotHex.indices.contains(index):
             hex = dark ? slotHex[index].dark : slotHex[index].light
