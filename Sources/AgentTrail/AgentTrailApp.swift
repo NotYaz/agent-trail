@@ -8,9 +8,10 @@ enum AgentTrailApp {
     private static let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo",
                                       "--render-status-demo"]
     private static let usage = """
-        Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo|--render-status-demo OUTPUT.png [--light] [--height N]
-          --light     render the light appearance (panels only; the share card is always dark)
-          --height N  panel render height in points, 200-4000 (default 680; the width stays 600)
+        Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo|--render-status-demo OUTPUT.png [--light] [--height N] [--theme NAME]
+          --light       render the light appearance (panels only; the share card is always dark)
+          --height N    panel render height in points, 200-4000 (default 680; the width stays 600)
+          --theme NAME  classic, gentle, vivid or aurora (default classic); the saved choice is not used or changed
 
         """
 
@@ -66,6 +67,7 @@ enum AgentTrailApp {
     /// Renders are deterministic: the clock is pinned, continuous effects stop
     /// and reveals jump to their final state.
     @MainActor private static func renderDemo(to output: URL, kind: String) throws {
+        ColorTheme.current = renderTheme()
         if kind == "--render-status-demo" {
             let preview = StatusIconPreview.image()
             guard let tiff = preview.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
@@ -114,6 +116,17 @@ enum AgentTrailApp {
             exit(2)
         }
         return CGFloat(value.rounded())
+    }
+
+    /// `--theme NAME` for renders. An unknown name is a usage error.
+    @MainActor private static func renderTheme() -> ColorTheme {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--theme") else { return .classic }
+        guard index + 1 < arguments.count, let theme = ColorTheme(rawValue: arguments[index + 1]) else {
+            fputs(usage, stderr)
+            exit(2)
+        }
+        return theme
     }
 
     private static func write(_ png: Data, to output: URL) throws {
@@ -238,6 +251,7 @@ struct AgentTrailShell: View {
     @AppStorage(AppSettings.Key.showSessionTitles) private var showSessionTitles = true
     @AppStorage(AppSettings.Key.statusAnimates) private var statusAnimates = true
     @AppStorage(AppSettings.Key.statusShowsCount) private var statusShowsCount = true
+    @AppStorage(AppSettings.Key.colorTheme) private var colorTheme: ColorTheme = .classic
 
     /// `height` exists for `--height` renders; the live popover is always 680pt.
     init(store: AppStore, animatesCharts: Bool = true, height: CGFloat = AgentTrailShell.panelHeight) {
@@ -254,6 +268,9 @@ struct AgentTrailShell: View {
         }
         .frame(width: AgentTrailShell.panelWidth, height: height)
         .panelBackground(opaque: !animatesCharts)
+        // Cards and charts skip redraws when their data is unchanged, so a new
+        // theme rebuilds the panel instead; scroll position and search reset.
+        .id(colorTheme)
         .background { shortcuts }
         .animation(tabAnimation, value: store.panelSection)
     }
@@ -454,9 +471,15 @@ struct AgentTrailShell: View {
     }
 
     /// Titles affect cards, menus and hints, so that switch sits at the top
-    /// level; the two icon switches live under "Menu bar".
+    /// level with the theme; the two icon switches live under "Menu bar".
     @ViewBuilder private var displayMenuItems: some View {
         Toggle("Show session titles", isOn: $showSessionTitles)
+        Picker("Theme", selection: themeSelection) {
+            ForEach(ColorTheme.allCases) { theme in
+                Text(theme.title).tag(theme)
+            }
+        }
+        .pickerStyle(.menu)
         Menu("Menu bar") {
             Toggle("Animate while agents work", isOn: $statusAnimates)
             Toggle("Show needs-input count", isOn: $statusShowsCount)
@@ -465,6 +488,14 @@ struct AgentTrailShell: View {
                 Text("Reduce Motion keeps the icon still")
             }
         }
+    }
+
+    /// Switches the drawing theme before the stored choice rebuilds the panel.
+    private var themeSelection: Binding<ColorTheme> {
+        Binding(get: { colorTheme }, set: { theme in
+            ColorTheme.current = theme
+            colorTheme = theme
+        })
     }
 
     // MARK: Toasts

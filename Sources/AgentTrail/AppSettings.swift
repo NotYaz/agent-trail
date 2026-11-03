@@ -15,6 +15,8 @@ enum AppSettings {
         static let preferredEditorBundleID = "preferredEditorBundleID"
         /// The terminal used by "Open in {terminal}".
         static let preferredTerminalBundleID = "preferredTerminalBundleID"
+        /// The `ColorTheme` raw value. Missing means Classic.
+        static let colorTheme = "colorTheme"
     }
 
     /// The three switches default to on. The preferred apps have no default:

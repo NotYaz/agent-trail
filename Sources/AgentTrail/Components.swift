@@ -82,8 +82,8 @@ struct Sparkline: View, Equatable {
         area.addLine(to: CGPoint(x: last.x, y: bottom))
         area.addLine(to: CGPoint(x: first.x, y: bottom))
         area.closeSubpath()
-        context.fill(area, with: .color(Color.primary.opacity(0.12 * opacity)))
-        context.stroke(line, with: .color(Color.secondary.opacity(opacity)),
+        context.fill(area, with: .color(Theme.Palette.sparklineFill.opacity(opacity)))
+        context.stroke(line, with: .color(Theme.Palette.sparkline.opacity(opacity)),
                        style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
     }
 

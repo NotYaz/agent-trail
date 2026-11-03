@@ -22,6 +22,13 @@
   <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
   <link rel="stylesheet" href="styles.css">
+  <!-- Apply a saved color theme before first paint; main.js handles the picker. -->
+  <script>
+    try {
+      const theme = localStorage.getItem("agent-trail-theme");
+      if (["gentle", "vivid", "aurora"].includes(theme)) document.documentElement.dataset.theme = theme;
+    } catch {}
+  </script>
   <script src="main.js" defer></script>
 </head>
 <body>
@@ -141,11 +148,18 @@
             <span class="mb-clock">Fri 6:40 PM</span>
           </div>
           <div class="popover">
-            <picture>
+            <picture data-shot="projects">
               <source srcset="assets/projects-dark.webp" media="(prefers-color-scheme: dark)">
               <img src="assets/projects-light.webp" width="1200" height="1360" fetchpriority="high"
                    alt="Agent Trail Projects panel with synthetic projects: a Pulse strip with live sessions, 7-day edits, active projects and day streak; project cards with 30-day sparklines, profile mix bars, live needs-input, working and idle counts, and a Jump button.">
             </picture>
+          </div>
+          <div class="theme-picker" role="group" aria-label="Color theme" hidden>
+            <span class="theme-label">Theme</span>
+            <button type="button" data-theme-choice="classic" aria-pressed="true"><span class="swatch sw-classic"></span>Classic</button>
+            <button type="button" data-theme-choice="gentle" aria-pressed="false"><span class="swatch sw-gentle"></span>Gentle</button>
+            <button type="button" data-theme-choice="vivid" aria-pressed="false"><span class="swatch sw-vivid"></span>Vivid</button>
+            <button type="button" data-theme-choice="aurora" aria-pressed="false"><span class="swatch sw-aurora"></span>Aurora</button>
           </div>
           <figcaption>Sample data. Every project, path, and count in these screenshots is synthetic.</figcaption>
         </figure>
@@ -358,7 +372,7 @@
           </div>
           <div class="feature-media">
             <div class="shot">
-              <picture>
+              <picture data-shot="growth">
                 <source srcset="assets/growth-dark.webp" media="(prefers-color-scheme: dark)">
                 <img src="assets/growth-light.webp" width="1200" height="1360" loading="lazy" decoding="async"
                      alt="Agent Trail Growth tab with synthetic data: KPI tiles for recorded edits, active days, saved sessions and busiest day; a stacked recorded-edits chart by profile with a 7-day average; and the Trail calendar.">

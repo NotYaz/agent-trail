@@ -1,4 +1,4 @@
-// Copy buttons, and a still trail for Reduce Motion. The page works without this script.
+// Copy buttons, a still trail for Reduce Motion, and the theme picker. The page works without this script.
 
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-copy-target]");
@@ -37,3 +37,35 @@ function applyMotionPreference() {
 }
 applyMotionPreference();
 reduceMotion.addEventListener("change", applyMotionPreference);
+
+// Color themes, matching the app's ⋯ › Theme menu. Classic is the page's base,
+// so it needs no attribute; screenshots switch to that theme's renders.
+const themeKey = "agent-trail-theme";
+const picker = document.querySelector(".theme-picker");
+function applyTheme(theme) {
+  if (theme === "classic") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  for (const button of picker.querySelectorAll("[data-theme-choice]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.themeChoice === theme));
+  }
+  const suffix = theme === "classic" ? "" : `-${theme}`;
+  for (const picture of document.querySelectorAll("picture[data-shot]")) {
+    const shot = picture.dataset.shot;
+    picture.querySelector("source").srcset = `assets/${shot}${suffix}-dark.webp`;
+    picture.querySelector("img").src = `assets/${shot}${suffix}-light.webp`;
+  }
+}
+if (picker) {
+  picker.hidden = false;
+  const saved = document.documentElement.dataset.theme;
+  if (saved) applyTheme(saved);
+  picker.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-theme-choice]");
+    if (!button) return;
+    const theme = button.dataset.themeChoice;
+    applyTheme(theme);
+    try {
+      localStorage.setItem(themeKey, theme);
+    } catch {}
+  });
+}

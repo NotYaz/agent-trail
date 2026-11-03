@@ -10,6 +10,8 @@ struct ProfileSettingsView: View {
     @State private var selectedID: String?
     @State private var draftInterval: Double
     @State private var validationMessage: String?
+    /// Redraws the swatches when the panel's menu changes the theme.
+    @AppStorage(AppSettings.Key.colorTheme) private var colorTheme: ColorTheme = .classic
     private let onClose: (() -> Void)?
 
     init(store: AppStore, onClose: (() -> Void)? = nil) {
@@ -131,6 +133,7 @@ struct ProfileSettingsView: View {
         Circle()
             .fill(ProfileColor.color(source.id, sources: draftSources))
             .frame(width: 8, height: 8)
+            .id(colorTheme)
             .accessibilityHidden(true)
         if ProfileColor.slot(for: source.id, sources: draftSources) == .other {
             Text(ProfileColor.monogram(source.name))

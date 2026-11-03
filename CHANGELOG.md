@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Color themes.** Pick Classic, Gentle, Vivid, or Aurora from the panel's ⋯ menu. Gentle brightens the canvas and the indigo wash, draws sparklines in indigo, gives the Trail calendar a blue-slate tint, and brightens dark mode's Working green and needs-input amber. Vivid adds brighter profile colors that keep their families (blue, pink, violet, teal) and, unlike Classic's, pass color-vision checks for every pair in light and dark. Aurora adds an indigo Trail calendar and a three-color wash. Classic stays the default. Renders take `--theme NAME`.
+- The website has a matching theme picker under the hero screenshot; it recolors the page and swaps the screenshots.
+
 ## 0.1.0-alpha.10 — 2026-11-02
 
 - **A website.** Agent Trail now has a home page at https://notyaz.github.io/agent-trail/, published from `site/` with GitHub Pages. It covers the panel, live status, Jump, Growth, keeping long jobs visible, privacy, and installation.

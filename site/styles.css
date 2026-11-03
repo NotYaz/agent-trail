@@ -65,6 +65,60 @@
   }
 }
 
+/* Color themes, matching the app's ⋯ › Theme menu. Classic is the base above;
+   each mode's overrides sit in that mode's query so they never leak across. */
+@media (prefers-color-scheme: light) {
+  :root[data-theme="gentle"], :root[data-theme="vivid"], :root[data-theme="aurora"] {
+    --bg: #f5f6fb;
+    --accent: #4a64ff;
+    --accent-text: #2f45d6;
+    --needs: #ffb31f;
+    --aurora-1: rgba(74, 100, 255, 0.17);
+    --aurora-2: rgba(161, 120, 255, 0.13);
+  }
+  :root[data-theme="vivid"], :root[data-theme="aurora"] {
+    --p1: #1d80fc;
+    --p2: #f43e98;
+    --p3: #5f31e7;
+    --p4: #0e8d81;
+  }
+  :root[data-theme="aurora"] {
+    --bg: #f4f5fd;
+    --aurora-1: rgba(74, 100, 255, 0.22);
+    --aurora-2: rgba(161, 120, 255, 0.18);
+    --aurora-3: rgba(244, 62, 152, 0.08);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="gentle"], :root[data-theme="vivid"], :root[data-theme="aurora"] {
+    --bg: #11131a;
+    --accent: #8798ff;
+    --accent-text: #aebbff;
+    --working: #2bc95a;
+    --working-text: #4be07d;
+    --needs: #ffba2e;
+    --needs-text: #ffba2e;
+    --aurora-1: rgba(79, 107, 237, 0.26);
+    --aurora-2: rgba(161, 120, 255, 0.16);
+  }
+  :root[data-theme="vivid"], :root[data-theme="aurora"] {
+    --p1: #458fdf;
+    --p2: #f0359a;
+    --p3: #6252f3;
+    --p4: #058c81;
+  }
+  :root[data-theme="aurora"] {
+    --bg: #10121c;
+    --aurora-1: rgba(91, 115, 255, 0.32);
+    --aurora-2: rgba(155, 107, 255, 0.22);
+    --aurora-3: rgba(240, 53, 154, 0.12);
+  }
+}
+
+/* Aurora's primary buttons carry the brand gradient; white text stays above 4.6:1. */
+:root[data-theme="aurora"] .btn-primary { background: linear-gradient(135deg, #4a64ff, #7a4cf0); color: #fff; }
+
 *, *::before, *::after { box-sizing: border-box; }
 
 html {
@@ -144,7 +198,8 @@ ul { margin: 0; padding: 0; }
   content: ""; position: absolute; inset: -60px 0 auto; height: 760px; z-index: -1; pointer-events: none;
   background:
     radial-gradient(48% 60% at 78% 30%, var(--aurora-1), transparent 70%),
-    radial-gradient(40% 50% at 12% 10%, var(--aurora-2), transparent 70%);
+    radial-gradient(40% 50% at 12% 10%, var(--aurora-2), transparent 70%),
+    radial-gradient(40% 40% at 60% 95%, var(--aurora-3, transparent), transparent 70%);
 }
 .hero-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 56px; align-items: center; }
 .hero h1 {
@@ -206,6 +261,23 @@ ul { margin: 0; padding: 0; }
 }
 .popover img { width: 100%; }
 .hero-visual figcaption, .media-note { margin-top: 14px; font-size: 13px; color: var(--text-3); text-align: center; }
+
+/* Theme picker under the hero shot. Hidden until main.js runs. */
+.theme-picker { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; margin-top: 16px; }
+.theme-picker[hidden] { display: none; }
+.theme-label { font-size: 13px; color: var(--text-3); margin-right: 4px; }
+.theme-picker button {
+  display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 12px 0 8px;
+  border-radius: 999px; border: 1px solid var(--hairline-strong); background: var(--surface);
+  color: var(--text-2); font: 500 13px/1 var(--font); cursor: pointer;
+}
+.theme-picker button:hover { color: var(--text); border-color: var(--accent); }
+.theme-picker button[aria-pressed="true"] { color: var(--text); background: var(--surface-strong); border-color: var(--accent); box-shadow: var(--shadow); }
+.swatch { width: 14px; height: 14px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); }
+.sw-classic { background: conic-gradient(#2a78d6 0 25%, #d4498c 0 50%, #6250d6 0 75%, #8a93a6 0); }
+.sw-gentle { background: conic-gradient(#2a78d6 0 25%, #d4498c 0 50%, #6250d6 0 75%, #7086f3 0); }
+.sw-vivid { background: conic-gradient(#1d80fc 0 25%, #f43e98 0 50%, #5f31e7 0 75%, #0e8d81 0); }
+.sw-aurora { background: linear-gradient(135deg, #4a64ff, #8b5cf6 55%, #f43e98); }
 
 /* Sections */
 .section { padding: 104px 0; position: relative; }
