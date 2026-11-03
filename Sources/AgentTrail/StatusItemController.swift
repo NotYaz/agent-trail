@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreText
 import QuartzCore
 import SwiftUI
 import AgentTrailCore
@@ -13,8 +14,8 @@ private enum StatusItemState: Equatable {
     case finished
 }
 
-/// The menu-bar item: a glyph for the live state, the optional needs-input
-/// count, a right-click menu of live sessions, and the anchor HintHUD shows
+/// The menu-bar item: a glyph for the live state, the optional needs-input or
+/// working count, a right-click menu of live sessions, and the anchor HintHUD shows
 /// under. It reacts only to the store's live snapshot. Its only clocks are the
 /// finished state's dismissal and the Core Animation trail, which runs only
 /// while something works and motion is allowed.
@@ -247,7 +248,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         let state = self.state
         let rendering = StatusRendering(state: state, waiting: summary.waiting, working: summary.working,
-                                        showsCount: settings.showsCount, overlay: overlayMode(for: state))
+                                        showsCount: settings.showsCount, showsWorkingCount: settings.showsWorkingCount,
+                                        overlay: overlayMode(for: state))
         guard rendering != rendered else { return }
         let previous = rendered
         rendered = rendering
@@ -256,10 +258,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func apply(_ rendering: StatusRendering, to button: NSStatusBarButton) {
+        // The working count is drawn into the glyph's triangle, so it never widens the item.
+        let working = StatusSymbols.working(count: rendering.workingCount)
         // Only the trail draws its own glyph; the still badge sits on the button's system-drawn one.
-        let image = StatusSymbols.buttonImage(for: rendering.state, overlayDrawsGlyph: rendering.overlay == .trail)
+        let image = StatusSymbols.buttonImage(for: rendering.state, working: working.face,
+                                              overlayDrawsGlyph: rendering.overlay == .trail)
         if button.image !== image { button.image = image }
-        let count = rendering.state == .waiting && rendering.showsCount ? rendering.waiting : 0
+        let count = rendering.waitingCount
         if count > 0 {
             button.font = StatusSymbols.countFont
             button.title = count.formatted()
@@ -268,6 +273,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             button.title = ""
             button.imagePosition = .imageOnly
         }
+        overlay.working = working
         overlay.mode = rendering.overlay
         overlay.needsLayout = true
         let words = StatusWording.label(finished: rendering.state == .finished,
@@ -467,16 +473,25 @@ private struct StatusRendering: Equatable {
     let waiting: Int
     let working: Int
     let showsCount: Bool
+    let showsWorkingCount: Bool
     let overlay: StatusOverlayMode
+
+    /// The needs-input count beside the glyph, or 0 for none.
+    var waitingCount: Int { state == .waiting && showsCount ? waiting : 0 }
+    /// The working count in the glyph's triangle, or 0 for none. Needs input
+    /// takes over the icon while any session waits.
+    var workingCount: Int { state == .working && showsWorkingCount ? working : 0 }
 }
 
-/// The two menu-bar switches. Both default to on, registered or not.
+/// The three menu-bar switches. All default to on, registered or not.
 private struct StatusSettings: Equatable {
     var animates: Bool
     var showsCount: Bool
+    var showsWorkingCount: Bool
 
     static func read() -> StatusSettings {
-        StatusSettings(animates: flag(AppSettings.Key.statusAnimates), showsCount: flag(AppSettings.Key.statusShowsCount))
+        StatusSettings(animates: flag(AppSettings.Key.statusAnimates), showsCount: flag(AppSettings.Key.statusShowsCount),
+                       showsWorkingCount: flag(AppSettings.Key.statusShowsWorkingCount))
     }
 
     static func flag(_ key: String) -> Bool {
@@ -587,6 +602,11 @@ private enum StatusWording {
 private enum StatusSymbols {
     private static let plainName = "point.3.connected.trianglepath.dotted"
     private static let filledName = "point.3.filled.connected.trianglepath.dotted"
+    /// 1.5 times the default 13 pt symbol: the trail's ink is about 18 pt tall
+    /// on a 26 × 20 pt canvas, which leaves the usual 2 pt margins in the 22 pt
+    /// bar and room for a readable count in the triangle. Every symbol here
+    /// shares it, so states never change scale.
+    private static let size = NSImage.SymbolConfiguration(pointSize: 19.5, weight: .regular)
 
     /// Template glyphs, so the menu bar tints them for light and dark bars.
     static let plain: NSImage? = symbol(plainName)
@@ -599,14 +619,30 @@ private enum StatusSymbols {
     static let spacer: NSImage? = makeSpacer()
     static let countFont = NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .medium)
 
-    static func buttonImage(for state: StatusItemState, overlayDrawsGlyph: Bool) -> NSImage? {
+    /// `working` is the working glyph, with or without its count.
+    static func buttonImage(for state: StatusItemState, working: NSImage?, overlayDrawsGlyph: Bool) -> NSImage? {
         switch state {
         case .idle: return plain
-        case .working: return overlayDrawsGlyph ? (spacer ?? plain) : plain
+        case .working: return overlayDrawsGlyph ? (spacer ?? working) : working
         case .waiting: return waiting ?? plain
         case .finished: return finished ?? plain
         }
     }
+
+    /// The glyph with `count` in its triangle: 1 to 9, then "+" for ten or more,
+    /// since two digits would not fit and the tooltip gives the exact number.
+    /// The plain glyph for 0, or when its nodes were not found and the triangle
+    /// cannot be placed.
+    static func working(count: Int) -> WorkingGlyph {
+        guard count > 0 else { return WorkingGlyph(face: plain, cutout: nil) }
+        let label = count > 9 ? "+" : count.formatted()
+        if let cached = counted[label] { return cached }
+        let glyph = makeCounted(label) ?? WorkingGlyph(face: plain, cutout: nil)
+        counted[label] = glyph
+        return glyph
+    }
+
+    private static var counted: [String: WorkingGlyph] = [:]
 
     /// An 8 pt profile dot on a 14 pt canvas; dynamic colors resolve when the menu draws.
     static func profileDot(_ color: NSColor, name: String) -> NSImage {
@@ -620,17 +656,18 @@ private enum StatusSymbols {
         return image
     }
 
-    private static func symbol(_ name: String) -> NSImage? {
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Agent Trail")
+    private static func symbol(_ name: String, _ extra: NSImage.SymbolConfiguration? = nil) -> NSImage? {
+        let configuration = extra.map { size.applying($0) } ?? size
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Agent Trail")?
+            .withSymbolConfiguration(configuration)
         image?.isTemplate = true
         return image
     }
 
     /// The filled variant backs onto the plain one should a system lack it.
     private static func makeWaiting() -> NSImage? {
-        guard let base = symbol(filledName) ?? symbol(plainName) else { return nil }
-        let configuration = NSImage.SymbolConfiguration(paletteColors: [Theme.Palette.needsInputNSColor])
-        guard let tinted = base.withSymbolConfiguration(configuration) else { return nil }
+        let amber = NSImage.SymbolConfiguration(paletteColors: [Theme.Palette.needsInputNSColor])
+        guard let tinted = symbol(filledName, amber) ?? symbol(plainName, amber) else { return nil }
         tinted.isTemplate = false
         return onCanvas(tinted, template: false)
     }
@@ -638,6 +675,70 @@ private enum StatusSymbols {
     private static func makeFinished() -> NSImage? {
         guard let check = symbol("checkmark.circle") else { return nil }
         return onCanvas(check, template: true)
+    }
+
+    /// Centers `label` on the incenter of the triangle through the glyph's nodes,
+    /// the point farthest from its three dotted edges. A bold digit there can be
+    /// as tall as 85% of the incircle (about 10 pt type, 14 pixels tall on a
+    /// Retina bar). The edges and the highlight keep a fifth of the inradius
+    /// clear around it. Nil without the nodes.
+    private static func makeCounted(_ label: String) -> WorkingGlyph? {
+        guard let plain, let nodes = StatusGlyphNodes.nodes(for: plain, probe: filledProbe), nodes.count == 3 else {
+            return nil
+        }
+        let (center, radius) = incircle(nodes.map(\.center))
+        let reference = NSFont.monospacedDigitSystemFont(ofSize: 100, weight: .bold)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 100 * 1.7 * radius / reference.capHeight, weight: .bold)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: label, attributes: [.font: font]))
+        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        let gap = radius / 5
+        // Node centers have a top-left origin; the canvas a bottom-left one.
+        let origin = CGPoint(x: center.x - bounds.midX, y: plain.size.height - center.y - bounds.midY)
+        let face = NSImage(size: plain.size, flipped: false) { rect in
+            plain.draw(in: rect)
+            guard let context = NSGraphicsContext.current?.cgContext else { return true }
+            clearAround(line, at: origin, gap: gap, in: context)
+            context.textPosition = origin
+            CTLineDraw(line, context)
+            return true
+        }
+        face.isTemplate = true
+        let cutout = NSImage(size: plain.size, flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return true }
+            context.setFillColor(CGColor(gray: 0, alpha: 1))
+            context.fill(rect)
+            clearAround(line, at: origin, gap: gap, in: context)
+            return true
+        }
+        return WorkingGlyph(face: face, cutout: cutout)
+    }
+
+    /// Clears the label and `gap` around its outline. The text matrix is not part
+    /// of the graphics state, so the identity set here stays for the label itself.
+    private nonisolated static func clearAround(_ line: CTLine, at origin: CGPoint, gap: CGFloat, in context: CGContext) {
+        context.textMatrix = .identity
+        context.saveGState()
+        context.setBlendMode(.clear)
+        context.setTextDrawingMode(.fillStroke)
+        context.setLineWidth(gap * 2)
+        context.setLineJoin(.round)
+        context.textPosition = origin
+        CTLineDraw(line, context)
+        context.restoreGState()
+    }
+
+    /// The incenter weighs each vertex by the side opposite it; the inradius is
+    /// twice the area over the perimeter.
+    private static func incircle(_ points: [CGPoint]) -> (center: CGPoint, radius: CGFloat) {
+        let a = hypot(points[1].x - points[2].x, points[1].y - points[2].y)
+        let b = hypot(points[0].x - points[2].x, points[0].y - points[2].y)
+        let c = hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+        let sum = a + b + c
+        let center = CGPoint(x: (a * points[0].x + b * points[1].x + c * points[2].x) / sum,
+                             y: (a * points[0].y + b * points[1].y + c * points[2].y) / sum)
+        let doubleArea = abs((points[1].x - points[0].x) * (points[2].y - points[0].y)
+                             - (points[2].x - points[0].x) * (points[1].y - points[0].y))
+        return (center, doubleArea / sum)
     }
 
     private static func makeSpacer() -> NSImage? {
@@ -662,6 +763,18 @@ private enum StatusSymbols {
         }
         result.isTemplate = template
         return result
+    }
+}
+
+/// The working glyph, with the count drawn into its triangle when there is one.
+private struct WorkingGlyph: Equatable {
+    let face: NSImage?
+    /// Opaque except over the count and a gap around it. It masks the trail's
+    /// highlight, which then passes behind the count. Nil without a count.
+    let cutout: NSImage?
+
+    static func == (lhs: WorkingGlyph, rhs: WorkingGlyph) -> Bool {
+        lhs.face === rhs.face && lhs.cutout === rhs.cutout
     }
 }
 
@@ -697,7 +810,8 @@ private final class StatusTrailOverlay: NSView {
     /// One node to the next about every 0.6 s, resting on each node for 40% of the step.
     private static let stepDuration: CFTimeInterval = 0.6
     private static let restShare = 0.4
-    private static let badgeDiameter: CGFloat = 5
+    /// The still badge's diameter as a share of the glyph's height: about 7 pt on a 20 pt canvas.
+    private static let badgeShare: CGFloat = 5 / 14
     /// The menu bar needs no more; ProMotion would otherwise draw at 120 Hz.
     private static let frameRate = CAFrameRateRange(minimum: 10, maximum: 30, preferred: 30)
 
@@ -720,11 +834,22 @@ private final class StatusTrailOverlay: NSView {
         }
     }
 
+    /// What the trail draws: the glyph, or the glyph with the working count. It
+    /// shares the glyph's canvas, so the glyph's nodes still place the highlight.
+    var working: WorkingGlyph? {
+        didSet {
+            guard working != oldValue else { return }
+            applyScale()
+        }
+    }
+
     /// False only if the view has no layer, in which case the button keeps drawing its glyph.
     var canDrawGlyph: Bool { layer != nil && glyph != nil }
 
     private let glyphLayer = CALayer()
     private let glyphMask = CALayer()
+    /// Keeps the highlight and its copies off the working count.
+    private let countMask = CALayer()
     private let replicator = CAReplicatorLayer()
     private let bead = CALayer()
     private let badge = CALayer()
@@ -776,10 +901,11 @@ private final class StatusTrailOverlay: NSView {
         root.masksToBounds = false
         let still: [String: CAAction] = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(),
                                          "hidden": NSNull(), "backgroundColor": NSNull(), "cornerRadius": NSNull()]
-        let layers: [CALayer] = [glyphLayer, glyphMask, replicator, bead, badge]
+        let layers: [CALayer] = [glyphLayer, glyphMask, countMask, replicator, bead, badge]
         for sublayer in layers { sublayer.actions = still }
         glyphMask.contentsGravity = .resize
         glyphLayer.mask = glyphMask
+        countMask.contentsGravity = .resize
         // Two fading copies follow the highlight a beat behind: the trail.
         replicator.instanceCount = 3
         replicator.instanceDelay = 0.07
@@ -809,13 +935,18 @@ private final class StatusTrailOverlay: NSView {
         CATransaction.commit()
     }
 
-    /// The mask is rasterized for the current screen's scale.
+    /// The masks are rasterized for the current screen's scale.
     private func applyScale() {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let cutout = working?.cutout
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         glyphMask.contentsScale = scale
-        glyphMask.contents = glyph?.layerContents(forContentsScale: scale)
+        glyphMask.contents = (working?.face ?? glyph)?.layerContents(forContentsScale: scale)
+        countMask.contentsScale = scale
+        countMask.contents = cutout?.layerContents(forContentsScale: scale)
+        // An empty mask would hide the highlight, so without a count there is none.
+        replicator.mask = cutout == nil ? nil : countMask
         CATransaction.commit()
     }
 
@@ -843,12 +974,14 @@ private final class StatusTrailOverlay: NSView {
         let largest = (nodes ?? []).map(\.diameter).max() ?? 0
         // A touch wider than the node ring, so the highlight covers it whole.
         let diameter = largest * rect.width / image.size.width + 0.6
-        let badgeSize = Self.badgeDiameter
+        let badgeSize = rect.height * Self.badgeShare
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         glyphLayer.frame = rect
         glyphMask.frame = glyphLayer.bounds
         replicator.frame = bounds
+        // The replicator spans the view, so the count's cutout sits on the glyph there too.
+        countMask.frame = rect
         bead.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
         bead.cornerRadius = diameter / 2
         if let first = points.first { bead.position = first }
@@ -1116,32 +1249,99 @@ private enum StatusGlyphNodes {
     }
 }
 
-/// Developer preview for `--render-status-demo`: the menu-bar states drawn large
-/// on a light and a dark bar (idle, idle with the trail's detected nodes marked
-/// in animation order, needs input, finished). It uses the live item's images
-/// and node detection, so a change that breaks the trail shows up here.
+/// Developer preview for `--render-status-demo`: the menu-bar states on a light
+/// and a dark bar, drawn large and then at real size (2x as on a Retina bar, and
+/// 1x beside it). Columns: idle; idle with the trail's detected nodes marked in
+/// animation order; working with 3, the highlight at rest on the first node;
+/// working with ten or more, the highlight gliding from the second node to the
+/// third; needs input; finished. It uses the live item's images and node
+/// detection, so a change that breaks the trail or the count shows up here.
 @MainActor
 enum StatusIconPreview {
+    private struct Column {
+        let image: NSImage?
+        var marksNodes = false
+        /// The highlight's place on the trail: 0 rests on the first node, 1.5 is
+        /// halfway from the second to the third. Nil draws none.
+        var highlight: Double?
+        var cutout: NSImage?
+
+        @MainActor static func working(_ count: Int, highlight: Double) -> Column {
+            let glyph = StatusSymbols.working(count: count)
+            return Column(image: glyph.face, highlight: highlight, cutout: glyph.cutout)
+        }
+    }
+
+    private static let largeScale: CGFloat = 8
+
     static func image() -> NSImage {
-        let scale: CGFloat = 8
         let glyph = StatusSymbols.plain?.size ?? NSSize(width: 18, height: 16)
-        let cell = NSSize(width: glyph.width * scale + 48, height: glyph.height * scale + 40)
-        let images: [NSImage?] = [StatusSymbols.plain, StatusSymbols.plain, StatusSymbols.waiting, StatusSymbols.finished]
-        let size = NSSize(width: cell.width * CGFloat(images.count), height: cell.height * 2)
+        let columns = [Column(image: StatusSymbols.plain),
+                       Column(image: StatusSymbols.plain, marksNodes: true),
+                       Column.working(3, highlight: 0),
+                       Column.working(12, highlight: 1.5),
+                       Column(image: StatusSymbols.waiting),
+                       Column(image: StatusSymbols.finished)]
+        let cell = NSSize(width: (glyph.width * largeScale + 48).rounded(), height: (glyph.height * largeScale + 40).rounded())
+        let band = (glyph.height * 2 + 24).rounded()
+        let size = NSSize(width: cell.width * CGFloat(columns.count), height: (cell.height + band) * 2)
         return NSImage(size: size, flipped: false) { _ in
             for (row, dark) in [false, true].enumerated() {
-                let y = CGFloat(1 - row) * cell.height
+                let bottom = size.height - CGFloat(row + 1) * (cell.height + band)
+                let ink: NSColor = dark ? .white : .black
                 (dark ? NSColor(white: 0.12, alpha: 1) : NSColor(white: 0.93, alpha: 1)).setFill()
-                NSRect(x: 0, y: y, width: size.width, height: cell.height).fill()
-                for (column, image) in images.enumerated() {
-                    guard let image else { continue }
-                    let rect = NSRect(x: CGFloat(column) * cell.width + 24, y: y + 20,
-                                      width: glyph.width * scale, height: glyph.height * scale)
-                    draw(image, in: rect, ink: dark ? .white : .black)
-                    if column == 1 { markNodes(in: rect, glyph: glyph) }
+                NSRect(x: 0, y: bottom, width: size.width, height: cell.height + band).fill()
+                for (index, column) in columns.enumerated() {
+                    guard let image = column.image else { continue }
+                    let x = CGFloat(index) * cell.width + 24
+                    let large = NSRect(x: x, y: bottom + band + 20,
+                                       width: glyph.width * largeScale, height: glyph.height * largeScale)
+                    draw(column, image: image, in: large, glyph: glyph, ink: ink)
+                    if column.marksNodes { markNodes(in: large, glyph: glyph) }
+                    let retina = NSRect(x: x, y: bottom + 12, width: glyph.width * 2, height: glyph.height * 2)
+                    draw(column, image: image, in: retina, glyph: glyph, ink: ink)
+                    let actual = NSRect(x: (retina.maxX + 16).rounded(), y: bottom + 12, width: glyph.width, height: glyph.height)
+                    draw(column, image: image, in: actual, glyph: glyph, ink: ink)
                 }
             }
             return true
+        }
+    }
+
+    /// The highlight is cut around the count, as the overlay's mask cuts it.
+    private static func draw(_ column: Column, image: NSImage, in rect: NSRect, glyph: NSSize, ink: NSColor) {
+        draw(image, in: rect, ink: ink)
+        guard let highlight = column.highlight else { return }
+        let trail = NSImage(size: rect.size, flipped: false) { bounds in
+            drawHighlight(at: highlight, in: bounds, glyph: glyph, ink: ink)
+            column.cutout?.draw(in: bounds, from: .zero, operation: .destinationIn, fraction: 1)
+            return true
+        }
+        trail.draw(in: rect)
+    }
+
+    /// The highlight and its two fading copies, roughly as the overlay animates
+    /// them: full size at rest, shrinking to 0.55 halfway through a glide. Without
+    /// nodes the live item breathes its badge instead, and the nodes column shows a cross.
+    private static func drawHighlight(at place: Double, in rect: NSRect, glyph: NSSize, ink: NSColor) {
+        guard let plain = StatusSymbols.plain,
+              let nodes = StatusGlyphNodes.nodes(for: plain, probe: StatusSymbols.filledProbe), !nodes.isEmpty else { return }
+        let sx = rect.width / glyph.width
+        let sy = rect.height / glyph.height
+        let diameter = ((nodes.map(\.diameter).max() ?? 0) + 0.6) * sx
+        func point(_ index: Int) -> CGPoint {
+            let node = nodes[index % nodes.count]
+            return CGPoint(x: rect.minX + node.center.x * sx, y: rect.maxY - node.center.y * sy)
+        }
+        let step = floor(place)
+        let from = point(Int(step))
+        let to = point(Int(step) + 1)
+        for copy in [2, 1, 0] {
+            let progress = max(0, place - step - Double(copy) * 0.25)
+            let center = CGPoint(x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress)
+            let size = diameter * (1 - 0.45 * sin(.pi * progress))
+            ink.withAlphaComponent(1 - 0.36 * Double(copy)).setFill()
+            NSBezierPath(ovalIn: NSRect(x: center.x - size / 2, y: center.y - size / 2, width: size, height: size)).fill()
         }
     }
 

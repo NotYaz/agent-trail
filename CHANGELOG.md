@@ -4,6 +4,8 @@
 
 - **Color themes.** Pick Classic, Gentle, Vivid, or Aurora from the panel's ⋯ menu. Gentle brightens the canvas and the indigo wash, draws sparklines in indigo, gives the Trail calendar a blue-slate tint, and brightens dark mode's Working green and needs-input amber. Vivid adds brighter profile colors that keep their families (blue, pink, violet, teal) and, unlike Classic's, pass color-vision checks for every pair in light and dark. Aurora adds an indigo Trail calendar and a three-color wash. Classic stays the default. Renders take `--theme NAME`.
 - The website has a matching theme picker under the hero screenshot; it recolors the page and swaps the screenshots.
+- **A working count in the menu bar.** While sessions work and none needs input, a number inside the trail's triangle shows how many, including Claude sessions working in background; + means ten or more. It follows light and dark bars like the glyph, and the travelling dot passes behind it. The amber needs-input count still takes over while a session waits. **Show working count** in ⋯ › Menu bar turns it off.
+- **A larger menu-bar icon.** The trail and its other states are 1.5 times their old size, about 18 pt tall with the usual margins in the bar, so the count reads at a glance. The item is about 9 pt wider. `--render-status-demo` now also draws the icons at real size.
 
 ## 0.1.0-alpha.10 — 2026-11-02
 

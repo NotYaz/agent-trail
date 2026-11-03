@@ -162,11 +162,11 @@ The menu-bar icon shows the same at a glance:
 | Icon | Meaning |
 | --- | --- |
 | Plain trail | Nothing is working or waiting. |
-| A dot travelling along the trail | At least one session is working. With Reduce Motion or Low Power Mode, a still dot instead. |
+| A dot travelling along the trail, with a number inside | At least one session is working. The number in the triangle says how many, including sessions working in background, and + means ten or more. With Reduce Motion or Low Power Mode, a still dot instead. |
 | Amber and filled, with a count | A session needs input. It bounces once when a new request arrives. |
 | Checkmark, for a few seconds | Work just finished and nothing else is running. |
 
-Right-click the icon for a list of live sessions grouped by state; choose one to jump to it. The panel's ⋯ menu has **Menu bar** settings (animation, the needs-input count), **Show session titles**, and **Theme**: Classic, Gentle (brighter surfaces, indigo sparklines and calendar), Vivid (Gentle plus brighter profile colors that stay apart for color-blind readers), or Aurora (Vivid plus an indigo Trail calendar and a stronger wash). Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
+Right-click the icon for a list of live sessions grouped by state; choose one to jump to it. The panel's ⋯ menu has **Menu bar** settings (animation, the working and needs-input counts), **Show session titles**, and **Theme**: Classic, Gentle (brighter surfaces, indigo sparklines and calendar), Vivid (Gentle plus brighter profile colors that stay apart for color-blind readers), or Aurora (Vivid plus an indigo Trail calendar and a stronger wash). Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
 
 Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. Claude requires a matching desktop session; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
 
@@ -296,7 +296,7 @@ swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
 swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
 
-`--render-status-demo OUTPUT.png` draws the menu-bar icon states large, with the nodes the working animation follows marked in order. Add `--light` for the light appearance, `--height N` to render a taller panel for review, or `--theme classic|gentle|vivid|aurora` to render a color theme without changing your saved choice. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
+`--render-status-demo OUTPUT.png` draws the menu-bar icon states large and at real size (2x and 1x), with the nodes the working animation follows marked in order. Add `--light` for the light appearance, `--height N` to render a taller panel for review, or `--theme classic|gentle|vivid|aurora` to render a color theme without changing your saved choice. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
 
 ## Development
 
