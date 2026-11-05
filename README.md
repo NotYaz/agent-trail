@@ -8,13 +8,33 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
-**0.1.0-alpha.12 · Public alpha · macOS 14+ · MIT license · [Website](https://agent-trail.app/)**
+**[0.1.0-alpha.12](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.12) · Public alpha · macOS 14+ · [MIT license](LICENSE) · [Changelog](CHANGELOG.md) · [Website](https://agent-trail.app/)**
+
+[![CI](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml)
 
 > **Long jobs stay visible.** When Claude starts a training run, a long build, or an evaluation sweep in the background and ends its turn, Claude reports the session as idle. Agent Trail sees that the session's own command is still running and shows it as **Working in background** until the job ends, so a quiet window never hides a run in progress. [How it works](#long-running-jobs-and-background-commands)
 
 <img src="docs/assets/demo.png" width="600" alt="Agent Trail Projects tab with the Pulse strip, project trend sparklines, live session counts, and quick-focus buttons for synthetic projects">
 
 *Sample data. Project names, profiles, paths, and counts in these previews are synthetic.*
+
+## Install
+
+**Download** `Agent-Trail-macOS-universal2.zip` from the [0.1.0-alpha.12 release](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.12), not the "Source code" archives: one app for Apple Silicon and Intel Macs on macOS 14 or later.
+
+1. Unzip it and move **Agent Trail** to your Applications folder.
+2. Open it. This alpha is ad-hoc signed and **not Apple-notarized**, so macOS stops the first launch. Close the warning without choosing **Move to Trash**. Within the next hour, open **System Settings › Privacy & Security**, click **Open Anyway** next to the Agent Trail message, then confirm with **Open Anyway** (**Open** on macOS 14) and your login password. You do this once per release. On macOS 14 you can instead Control-click the app, choose **Open**, and click **Open** again.
+
+To skip the warning, run `xattr -dr com.apple.quarantine "/Applications/Agent Trail.app"` in Terminal before the first launch. To check the download before you open it, keep the ZIP and its `.sha256` file in one folder, go to that folder in Terminal (for example `cd ~/Downloads`), and run `shasum -a 256 -c Agent-Trail-macOS-universal2.zip.sha256`; it prints `Agent-Trail-macOS-universal2.zip: OK`. Safari may unzip the download and move the ZIP to the Trash; choose **Put Back** there to restore it for this check.
+
+**Build from source** with **Swift 6+**, using Xcode or the Command Line Tools, from the repository folder:
+
+```sh
+./scripts/build-app.sh
+open "dist/Agent Trail.app"
+```
+
+A local build opens without the warning. To keep it, copy `dist/Agent Trail.app` to your Applications folder. [Development](#development) covers tests and other build options.
 
 ## Why it exists
 
@@ -40,21 +60,11 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 
 <img src="docs/assets/growth.png" width="600" alt="Agent Trail Growth tab with KPI tiles, the recorded-edits chart with a 7-day average, and the Trail calendar from synthetic sample projects">
 
-## Try it
+## First run
 
-Build from source with **Swift 6+**, using Xcode or the Command Line Tools, on macOS 14 or later:
-
-```sh
-swift test
-./scripts/build-app.sh
-open "dist/Agent Trail.app"
-```
-
-Run these commands from the repository folder. The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects** and **Growth** inside the same 600 × 680 panel (⌘1 and ⌘2; ⌘F searches and ⌘R refreshes). Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; live status checks run separately every 3 seconds.
+The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects** and **Growth** inside the same 600 × 680 panel (⌘1 and ⌘2; ⌘F searches and ⌘R refreshes). Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; live status checks run separately every 3 seconds.
 
 Routine refreshes keep the last complete history visible while the next scan finishes. Tab changes and updates use gentle transitions that respect macOS Reduce Motion.
-
-To install, copy `dist/Agent Trail.app` to your Applications folder. The script also creates an architecture-labeled ZIP and SHA-256 checksum in `dist/`. These alpha builds use an **ad-hoc signature** and are **not Apple-notarized**. A downloaded build may be blocked by Gatekeeper. Building locally is the supported starting point for this alpha; see Apple's [guidance for opening apps safely](https://support.apple.com/en-us/102445).
 
 ### Jump to the work
 
@@ -316,6 +326,9 @@ swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 There are no third-party package dependencies. The Swift package includes the native app, a reusable core, tests, and a diagnostic CLI.
 
 ```sh
+# Run the test suite.
+swift test
+
 # Build for a specific CPU, or create a universal binary.
 ./scripts/build-app.sh --arch arm64
 ./scripts/build-app.sh --arch x86_64 --output-dir dist/intel

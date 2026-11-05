@@ -2,6 +2,12 @@
 
 Agent Trail is an alpha. Security fixes focus on the latest source revision; no older release line has a separate support commitment.
 
+## Report a vulnerability
+
+Report privately through [GitHub private vulnerability reporting](https://github.com/NotYaz/agent-trail/security/advisories/new). Include the affected version or commit, a minimal reproduction with synthetic records, and the impact. Do not include live tokens, private conversations, or complete histories. Agent Trail has one maintainer: fixes land on `main` and ship in the next alpha, and there is no response-time guarantee.
+
+For an ordinary parsing or compatibility bug, use the issue template with redacted examples. See [CONTRIBUTING.md](CONTRIBUTING.md) for fixture guidance.
+
 ## Data boundaries
 
 The app reads configured local histories on the Mac: Claude desktop session indexes and JSONL transcripts (a transcript Desktop does not list is opened to read the entrypoint and folder of its opening records, kept in memory, and counted only for `claude` started in a terminal), Codex rollout JSONL under the profile home (default `~/.codex`), and Grok `summary.json` plus `updates.jsonl` (default `~/.grok`). It does not decompress Codex `.jsonl.zst` archives or treat assistant databases as edit evidence. It writes its own settings and incremental activity caches under `~/Library/Application Support/AgentTrail/`. Claude uses `activity-cache.json`. Codex and Grok use `activity-cache-codex.json` and `activity-cache-grok.json`. It does not change assistant records, install hooks, send telemetry, or upload histories. After a user click, it opens a session link (Claude's `claude://code/continue`, Codex's `codex://threads/<id>`) or brings an already running app forward. When several instances of that app run, it reads the parent process IDs of the session's ancestors to pick the instance the session runs under. Link ids are validated before use, and links go only to a running app. With several Claude instances it brings the identified instance forward first and sends the link only once that instance is frontmost; otherwise it shows a hint instead. The app does not launch, quit, kill, or restart assistants, and it uses no Automation or Accessibility permission. Live session titles, Claude's needs-action sentence, and pull request links are read from local records for display only: they stay in memory and are never cached, exported, or logged.
@@ -35,11 +41,3 @@ PNG export saves only to a user-selected local location and never posts or uploa
 ## Input and distribution
 
 The alpha uses private on-disk formats. Treat records and process information as untrusted input. Unknown data must not result in guessed authorship or arbitrary application activation. Distributed alpha bundles are ad-hoc signed, without Developer ID signing or Apple notarization.
-
-## Report a vulnerability
-
-On GitHub, use **Security → Advisories → Report a vulnerability** when private reporting is enabled. Include the affected revision, a minimal reproduction with synthetic records, and the impact. Do not include live tokens, private conversations, or complete histories.
-
-If private reporting is unavailable, open an issue that only requests a private contact channel. Keep the vulnerability details and sensitive data out of that public request. There is no published response-time guarantee during the alpha.
-
-For an ordinary parsing or compatibility bug, use the issue template with redacted examples. See [CONTRIBUTING.md](CONTRIBUTING.md) for fixture guidance.
