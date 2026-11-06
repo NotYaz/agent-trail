@@ -162,21 +162,37 @@ final class CodexLiveActivityProviderTests: XCTestCase {
         }
     }
 
-    func testOwnerParserRejectsOtherProfilesInvalidIDsAndConflictingOwners() throws {
+    func testOwnersRejectOtherProfilesInvalidIDsAndConflictingOwners() throws {
         let directory = URL(fileURLWithPath: "/profiles/codex/thread-writer-locks")
         let root = directory.path
-        let output = """
-        p101
-        f10
-        n\(root)/\(Fixture.first).lock
-        n/profiles/other/thread-writer-locks/\(Fixture.second).lock
-        n\(root)/not-a-thread.lock
-        n\(root)/nested/\(Fixture.third).lock
-        p102
-        n\(root)/\(Fixture.first).lock
-        n\(root)/\(Fixture.second).lock
-        """
-        XCTAssertEqual(CodexLiveActivityProvider.parseOpenSessionOwners(output, directory: directory), [Fixture.second: 102])
+        let handles: [(pid: Int32, path: String)] = [
+            (101, "\(root)/\(Fixture.first).lock"),
+            (101, "/profiles/other/thread-writer-locks/\(Fixture.second).lock"),
+            (101, "\(root)/not-a-thread.lock"),
+            (101, "\(root)/nested/\(Fixture.third).lock"),
+            (102, "\(root)/\(Fixture.first).lock"),
+            (102, "\(root)/\(Fixture.second).lock")
+        ]
+        XCTAssertEqual(CodexLiveActivityProvider.sessionOwners(handles, directory: directory), [Fixture.second: 102])
+    }
+
+    func testOpenFilesListsOnlyTheNamedProcessesHandles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lock = directory.appendingPathComponent("\(Fixture.first).lock")
+        try Data().write(to: lock)
+        let handle = try FileHandle(forReadingFrom: lock)
+        defer { try? handle.close() }
+        var name = [UInt8](repeating: 0, count: 64)
+        let length = proc_name(getpid(), &name, UInt32(name.count))
+        let ownName = try XCTUnwrap(String(bytes: name[..<Int(max(length, 0))], encoding: .utf8))
+        let own = try XCTUnwrap(CodexLiveActivityProvider.openFiles(processName: ownName, suffix: ".lock"))
+        // The kernel spells temporary folders under /private.
+        XCTAssertTrue(own.contains { $0.pid == getpid() && canonicalPath($0.path) == canonicalPath(lock.path) }, "\(own)")
+        XCTAssertEqual(CodexLiveActivityProvider.sessionOwners(own, directory: directory), [Fixture.first: getpid()])
+        let other = try XCTUnwrap(CodexLiveActivityProvider.openFiles(processName: ownName + "-other", suffix: ".lock"))
+        XCTAssertFalse(other.contains { $0.pid == getpid() })
     }
 
     func testLoadedThreadsCarryNameBranchParentAndOneHostLookupPerServer() throws {

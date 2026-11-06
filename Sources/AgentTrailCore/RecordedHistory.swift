@@ -108,7 +108,12 @@ struct StoredEdit: Codable, Equatable {
     }
 }
 
-struct TailState: Codable {
+/// Refreshes save an adapter's history cache at most this often, and only when
+/// it changed; the app saves the rest when it quits. After a crash, the next
+/// launch rereads only what the logs gained since the last save.
+let historyCacheSaveInterval: TimeInterval = 5 * 60
+
+struct TailState: Codable, Equatable {
     var identity: String = ""
     var size: UInt64 = 0
     var modified: TimeInterval = 0

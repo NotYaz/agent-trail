@@ -181,6 +181,28 @@ final class ProjectLocationRegistryTests: XCTestCase {
         XCTAssertEqual(registry.rewrite(recorded, at: Date().addingTimeInterval(60)), recorded)
     }
 
+    func testResolverReusesSpellingsButRewritesEachEditByItsOwnDate() throws {
+        let fixture = try LocationFixture()
+        defer { fixture.remove() }
+        let original = try fixture.repository("old/AgentTrail")
+        var registry = ProjectLocationRegistry()
+        registry.observe(checkout: original.path, now: Date().addingTimeInterval(-3_600))
+        let moved = fixture.root.appendingPathComponent("Dev/agent-trail")
+        try fixture.move(original, to: moved)
+        registry.refresh(now: Date().addingTimeInterval(-120))
+        let before = Date().addingTimeInterval(-600)
+        _ = try fixture.repository("old/AgentTrail")
+        registry.refresh(now: Date())
+        let resolver = GitProjectResolver(locations: registry)
+        let recorded = original.appendingPathComponent("a.swift").path
+        // One scan asks for the same spelling at many dates; the answer still follows each date.
+        XCTAssertEqual(resolver.physical(recorded, at: Date().addingTimeInterval(60)), recorded)
+        XCTAssertEqual(resolver.physical(recorded, at: before), moved.appendingPathComponent("a.swift").path)
+        XCTAssertEqual(resolver.physical(recorded, at: Date().addingTimeInterval(60)), recorded)
+        XCTAssertTrue(registry.mayRewrite(recorded))
+        XCTAssertFalse(registry.mayRewrite(fixture.root.appendingPathComponent("elsewhere/a.swift").path))
+    }
+
     func testRetargetedLinkStopsApplyingToLaterEvidence() throws {
         let fixture = try LocationFixture()
         defer { fixture.remove() }

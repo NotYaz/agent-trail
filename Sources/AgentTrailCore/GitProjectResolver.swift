@@ -27,6 +27,11 @@ final class GitProjectResolver {
     private(set) var locations: ProjectLocationRegistry
     private var repositories: [String: CachedRepository] = [:]
     private var physicalPaths: [String: String] = [:]
+    /// `lexicalPath` per recorded spelling. Each call stats the path, and a scan
+    /// asks for the same few hundred spellings once per edit.
+    private var lexicalPaths: [String: String?] = [:]
+    /// Whether any earlier location could rewrite a path, at any date.
+    private var rewritable: [String: Bool] = [:]
     private var existence: [String: Bool] = [:]
     private var symbolicLinks: [String: Bool] = [:]
     /// Symbolic links met while resolving recorded paths: link path → target.
@@ -41,6 +46,8 @@ final class GitProjectResolver {
     func reset() {
         repositories.removeAll(keepingCapacity: true)
         physicalPaths.removeAll(keepingCapacity: true)
+        lexicalPaths.removeAll(keepingCapacity: true)
+        rewritable.removeAll(keepingCapacity: true)
         existence.removeAll(keepingCapacity: true)
         symbolicLinks.removeAll(keepingCapacity: true)
         linkTargets.removeAll(keepingCapacity: true)
@@ -58,18 +65,39 @@ final class GitProjectResolver {
     /// vanished folders) are kept as recorded, so containment checks compare
     /// like with like. `date` is when the path was recorded.
     func physical(_ raw: String, at date: Date? = nil) -> String? {
-        guard raw.utf8.count <= 32_768, let lexical = ProjectLocationRegistry.lexicalPath(raw) else { return nil }
-        let relocated = locations.rewrite(lexical, at: date)
+        guard raw.utf8.count <= 32_768, let lexical = lexical(raw) else { return nil }
+        let relocated = rewrite(lexical, at: date)
         var result = resolvingExistingPrefix(relocated)
         // An earlier location is stored the way the folder was found, which can
         // differ from the recorded spelling when a parent folder is a link. Only
         // a path no earlier location matched is tried again: chaining a rewrite
         // would hand one swapped folder's history to the other.
         if relocated == lexical {
-            let again = locations.rewrite(result, at: date)
+            let again = rewrite(result, at: date)
             if again != result { result = resolvingExistingPrefix(again) }
         }
         return result
+    }
+
+    private func lexical(_ raw: String) -> String? {
+        if let known = lexicalPaths[raw] { return known }
+        let value = ProjectLocationRegistry.lexicalPath(raw)
+        if lexicalPaths.count > 50_000 { lexicalPaths.removeAll(keepingCapacity: true) }
+        lexicalPaths[raw] = value
+        return value
+    }
+
+    /// `locations.rewrite`, skipped for paths no earlier location contains.
+    private func rewrite(_ lexical: String, at date: Date?) -> String {
+        let candidate: Bool
+        if let known = rewritable[lexical] {
+            candidate = known
+        } else {
+            candidate = locations.mayRewrite(lexical)
+            if rewritable.count > 50_000 { rewritable.removeAll(keepingCapacity: true) }
+            rewritable[lexical] = candidate
+        }
+        return candidate ? locations.rewrite(lexical, at: date) : lexical
     }
 
     private func resolvingExistingPrefix(_ path: String) -> String {
@@ -173,7 +201,7 @@ final class GitProjectResolver {
         guard !paths.isEmpty else { return nil }
         var checkout: String?
         for path in paths {
-            guard let path = ProjectLocationRegistry.lexicalPath(path),
+            guard let path = lexical(path),
                   let found = repository(containingDirectory: (path as NSString).deletingLastPathComponent)
             else { return nil }
             if let checkout, checkout != found { return nil }

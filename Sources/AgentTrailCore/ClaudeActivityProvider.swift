@@ -7,6 +7,9 @@ import Foundation
 public final class ClaudeActivityProvider: ActivityProvider {
     private let cacheURL: URL?
     private var cache: [String: TranscriptCache] = [:]
+    /// True when `cache` differs from the saved file.
+    private var cacheDirty = false
+    private var lastCacheSave = Date.distantPast
     private var cacheLoadNotice: String?
     /// Where and how each transcript's session started, by path. In memory only.
     private var heads: [String: (identity: String, size: UInt64, head: TranscriptHead?)] = [:]
@@ -42,9 +45,11 @@ public final class ClaudeActivityProvider: ActivityProvider {
                     cache = try JSONDecoder().decode(SavedCache.self, from: data).transcripts
                 } else {
                     cacheLoadNotice = "Local activity history is being rebuilt once to include daily edit statistics."
+                    cacheDirty = true
                 }
             } catch {
                 cacheLoadNotice = "The local activity cache could not be read; change history will be rebuilt."
+                cacheDirty = true
             }
         }
     }
@@ -75,59 +80,77 @@ public final class ClaudeActivityProvider: ActivityProvider {
         var readTerminal = Set<String>()
         var lastProgress = Date.distantPast
         for (index, task) in tasks.enumerated() {
-            do {
-                let entry = try readTranscript(task)
-                switch task.owner {
-                case .desktop(let session):
-                    if !entry.confirmedEdits.isEmpty {
-                        let key = session.source.id + "\u{0}" + session.projectPath
-                        if edits[key] == nil {
-                            edits[key] = ProjectEdits(sourceID: session.source.id, projectPath: session.projectPath)
+            // Path and string objects bridged while reading are freed per log, not once per scan.
+            autoreleasepool {
+                do {
+                    let entry = try readTranscript(task)
+                    switch task.owner {
+                    case .desktop(let session):
+                        if !entry.confirmedEdits.isEmpty {
+                            let key = session.source.id + "\u{0}" + session.projectPath
+                            if edits[key] == nil {
+                                edits[key] = ProjectEdits(sourceID: session.source.id, projectPath: session.projectPath)
+                            }
+                            for (id, edit) in entry.confirmedEdits {
+                                edits[key]?.record(id, edit, delegated: task.delegated)
+                            }
                         }
+                    case .terminal(let session):
+                        // Folded per session below, so each edit counts where it landed.
+                        let key = session.source.id + "\u{0}" + session.id
+                        readTerminal.insert(key)
                         for (id, edit) in entry.confirmedEdits {
-                            edits[key]?.record(id, edit, delegated: task.delegated)
+                            terminalEdits[key, default: ProjectEdits(sourceID: session.source.id, projectPath: session.workspace)]
+                                .record(id, edit, delegated: task.delegated)
                         }
                     }
-                case .terminal(let session):
-                    // Folded per session below, so each edit counts where it landed.
-                    let key = session.source.id + "\u{0}" + session.id
-                    readTerminal.insert(key)
-                    for (id, edit) in entry.confirmedEdits {
-                        terminalEdits[key, default: ProjectEdits(sourceID: session.source.id, projectPath: session.workspace)]
-                            .record(id, edit, delegated: task.delegated)
+                    if entry.malformedLines > 0 {
+                        notices.append("\(task.source.name): skipped unreadable records in session history \(task.url.deletingPathExtension().lastPathComponent).")
                     }
+                    if entry.oversizedLines > 0 {
+                        notices.append("\(task.source.name): a session history record was too large to index safely.")
+                    }
+                } catch {
+                    notices.append("\(task.source.name): could not read a session's change history (\(error.localizedDescription)).")
                 }
-                if entry.malformedLines > 0 {
-                    notices.append("\(task.source.name): skipped unreadable records in session history \(task.url.deletingPathExtension().lastPathComponent).")
+                let completed = index + 1
+                if let progress, completed == tasks.count || Date().timeIntervalSince(lastProgress) >= 0.5 {
+                    let placed = cachedTerminal.filter { !readTerminal.contains($0.key) }.merging(terminalEdits) { _, read in read }
+                    progress(result(metadata: metadata, edits: edits, terminalEdits: placed, extraNotices: notices),
+                             completed, tasks.count)
+                    lastProgress = Date()
                 }
-                if entry.oversizedLines > 0 {
-                    notices.append("\(task.source.name): a session history record was too large to index safely.")
-                }
-            } catch {
-                notices.append("\(task.source.name): could not read a session's change history (\(error.localizedDescription)).")
-            }
-            let completed = index + 1
-            if let progress, completed == tasks.count || Date().timeIntervalSince(lastProgress) >= 0.5 {
-                let placed = cachedTerminal.filter { !readTerminal.contains($0.key) }.merging(terminalEdits) { _, read in read }
-                progress(result(metadata: metadata, edits: edits, terminalEdits: placed, extraNotices: notices),
-                         completed, tasks.count)
-                lastProgress = Date()
             }
         }
         // Prune histories no longer belonging to a configured session.
         let activePaths = Set(tasks.map { $0.url.path })
-        cache = cache.filter { activePaths.contains($0.key) }
-        if let cacheURL {
-            do {
-                try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(SavedCache(version: 2, transcripts: cache))
-                try data.write(to: cacheURL, options: .atomic)
-                try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
-            } catch {
-                notices.append("The local activity cache could not be saved; the next launch may reindex change history.")
-            }
+        let kept = cache.filter { activePaths.contains($0.key) }
+        if kept.count != cache.count {
+            cache = kept
+            cacheDirty = true
+        }
+        if Date().timeIntervalSince(lastCacheSave) >= historyCacheSaveInterval, let notice = saveCache() {
+            notices.append(notice)
         }
         return result(metadata: metadata, edits: edits, terminalEdits: terminalEdits, extraNotices: notices)
+    }
+
+    /// Writes the transcript cache if a scan changed it since the last save.
+    /// Returns a notice when it could not be saved; a later scan tries again.
+    @discardableResult
+    public func saveCache() -> String? {
+        guard cacheDirty, let cacheURL else { return nil }
+        do {
+            try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(SavedCache(version: 2, transcripts: cache))
+            try data.write(to: cacheURL, options: .atomic)
+            try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
+            cacheDirty = false
+            lastCacheSave = Date()
+            return nil
+        } catch {
+            return "The local activity cache could not be saved; the next launch may reindex change history."
+        }
     }
 
     private struct DesktopSession {
@@ -410,12 +433,14 @@ public final class ClaudeActivityProvider: ActivityProvider {
         func located(_ path: String, _ date: Date) -> String { resolver.physical(path, at: date) ?? path }
         var relocated: [String: ProjectEdits] = [:]
         for project in edits.values {
-            for (id, edit) in project.byToolID {
-                let path = located(project.projectPath, edit.date)
-                let key = project.sourceID + "\u{0}" + path
-                let moved = ConfirmedEdit(date: edit.date, workspace: located(edit.workspace, edit.date))
-                relocated[key, default: ProjectEdits(sourceID: project.sourceID, projectPath: path)]
-                    .record(id, moved, delegated: project.delegated.contains(id))
+            autoreleasepool {
+                for (id, edit) in project.byToolID {
+                    let path = located(project.projectPath, edit.date)
+                    let key = project.sourceID + "\u{0}" + path
+                    let moved = ConfirmedEdit(date: edit.date, workspace: located(edit.workspace, edit.date))
+                    relocated[key, default: ProjectEdits(sourceID: project.sourceID, projectPath: path)]
+                        .record(id, moved, delegated: project.delegated.contains(id))
+                }
             }
         }
         let sessionActivity: [ProjectActivity] = metadata.sessions.map {
@@ -614,6 +639,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
         entry.droppingOversizedLine = droppingOversizedLine
         entry.checkpoint = try checkpoint(handle, offset: entry.offset)
         cache[task.url.path] = entry
+        cacheDirty = true
         return entry
     }
 

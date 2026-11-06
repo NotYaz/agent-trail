@@ -12,6 +12,9 @@ public final class GrokActivityProvider: ActivityProvider {
     static let cacheVersion = 4
     private let cacheURL: URL?
     private var cache: [String: GrokFile] = [:]
+    /// True when `cache` differs from the saved file.
+    private var cacheDirty = false
+    private var lastCacheSave = Date.distantPast
     private var cacheLoadNotice: String?
     private let files = FileManager.default
     private let resolver: GitProjectResolver
@@ -39,9 +42,11 @@ public final class GrokActivityProvider: ActivityProvider {
                 cache = try JSONDecoder().decode(GrokSavedCache.self, from: data).files
             } else {
                 cacheLoadNotice = "Grok edit history is being rebuilt once for the current indexer."
+                cacheDirty = true
             }
         } catch {
             cacheLoadNotice = "The Grok activity cache could not be read; change history will be rebuilt."
+            cacheDirty = true
         }
     }
 
@@ -66,16 +71,22 @@ public final class GrokActivityProvider: ActivityProvider {
         let tasks = sessions.flatMap { session in session.updates.map { (session, $0) } }
         var lastProgress = Date.distantPast
         for (index, task) in tasks.enumerated() {
-            let file = cache[task.1.path] ?? GrokFile()
+            let cached = cache[task.1.path]
+            let file = cached ?? GrokFile()
+            var changed = cached == nil
             if file.projectPath != task.0.projectPath {
                 file.projectPath = task.0.projectPath
                 file.tail = TailState()
                 file.resetDerived()
+                changed = true
             }
+            let before = file.tail
             do {
                 try JSONLTail.read(url: task.1, state: &file.tail, reset: { file.resetDerived() }) { line in
                     parse(line, file: file)
                 }
+                // Parsed evidence changes only with the tail, so an unchanged tail needs no save.
+                if changed || file.tail != before { cacheDirty = true }
                 cache[task.1.path] = file
                 parsed[task.1.path] = file
                 if file.tail.malformedLines > 0 {
@@ -94,18 +105,33 @@ public final class GrokActivityProvider: ActivityProvider {
             }
         }
         let active = Set(tasks.map { $0.1.path })
-        cache = cache.filter { active.contains($0.key) }
-        if let cacheURL {
-            do {
-                try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(GrokSavedCache(version: Self.cacheVersion, files: cache))
-                try data.write(to: cacheURL, options: .atomic)
-                try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
-            } catch {
-                notices.append("The Grok activity cache could not be saved; the next launch may reindex change history.")
-            }
+        let kept = cache.filter { active.contains($0.key) }
+        if kept.count != cache.count {
+            cache = kept
+            cacheDirty = true
+        }
+        if Date().timeIntervalSince(lastCacheSave) >= historyCacheSaveInterval, let notice = saveCache() {
+            notices.append(notice)
         }
         return result(sessions: sessions, parsed: parsed, includeEdits: true, extraNotices: notices)
+    }
+
+    /// Writes the cache if a scan changed it since the last save. Returns a
+    /// notice when it could not be saved; a later scan tries again.
+    @discardableResult
+    public func saveCache() -> String? {
+        guard cacheDirty, let cacheURL else { return nil }
+        do {
+            try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(GrokSavedCache(version: Self.cacheVersion, files: cache))
+            try data.write(to: cacheURL, options: .atomic)
+            try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
+            cacheDirty = false
+            lastCacheSave = Date()
+            return nil
+        } catch {
+            return "The Grok activity cache could not be saved; the next launch may reindex change history."
+        }
     }
 
     private struct GrokSession {
