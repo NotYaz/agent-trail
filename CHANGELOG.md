@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Jump with two Claude instances no longer opens the wrong one's Code home.** macOS hands every `claude://` link to the Claude instance launched first, whichever is in front; Agent Trail assumed the one in front got it. So Jump on a session of the instance launched later (for example Main, when Second was opened first) sent the link to the other instance, which showed its own Code home. Jump now opens the first instance's sessions directly. For any other instance's session it brings that instance forward with a hint naming the session, and it never sends that instance's link. If the open reports a different instance than expected, it shows the same hint. Since alpha.8, the release notes and README said the session's own instance comes forward and receives the link; that was true only for the instance launched first.
+
 ## 0.1.0-alpha.12 — 2026-11-03
 
 - **Claude Code in the terminal.** Sessions started with `claude` in a terminal now appear next to Claude Desktop's. Their edits count for the project they landed in, as Codex's do, so a session started above a repository joins it; subagent edits count as delegated. They get live status, Working in background, and a Jump that brings their terminal forward (Terminal, iTerm2, Ghostty, Warp, VS Code, or Cursor, when the process environment names it), never a Claude Desktop Code session. In Claude Desktop's own terminal pane, Jump brings forward the Claude instance holding the pane, for `claude` and Grok alike. Only logs whose first record naming an entrypoint and folder says `cli` count; SDK and `claude -p` runs do not, and a Desktop session's log is never counted twice. A Mac without Claude Desktop no longer gets Desktop notices. `AgentTrailInspect --live` marks these sessions `startedInTerminal`.

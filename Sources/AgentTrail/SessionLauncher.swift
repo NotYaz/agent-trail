@@ -179,10 +179,10 @@ enum SessionLauncher {
 
     // MARK: Jump
 
-    /// The launcher order: (1) a Claude Desktop link, sent to this profile's
-    /// instance (directly when it is the only Claude, else once it is frontmost),
-    /// falling back to that instance plus a hint; a Claude session started in a
-    /// terminal skips this and goes to its terminal; (2) a Codex thread link
+    /// The launcher order: (1) a Claude Desktop link, sent only when this
+    /// profile's instance is the one macOS hands links to (the one launched
+    /// first), else the profile's instance comes forward with a hint; a Claude
+    /// session started in a terminal skips this and goes to its terminal; (2) a Codex thread link
     /// when the ChatGPT app owns the thread and runs; (3) the running host app,
     /// the instance the session runs under when several run;
     /// (4) the session's own app, else the folder in a running preferred
@@ -219,77 +219,26 @@ enum SessionLauncher {
             report(focusProfile(source, hint: hint))
             return
         }
-        guard let instance = soleClaudeInstance(for: source), let bundleURL = instance.bundleURL else {
-            jumpToClaudeInstance(url, source: source, hint: hint, report: report)
-            return
-        }
-        openLink(url, in: bundleURL) { opened in
-            if opened {
-                // Claude shows its own window for a link; this makes sure the
-                // verified instance is the one in front.
-                _ = InstanceController.focus(source: source)
-                report(.done)
-            } else {
-                report(focusProfile(source, hint: hint))
-            }
-        }
-    }
-
-    /// Several Claude instances share one bundle id, so a link cannot name one.
-    /// macOS hands a claude:// link to the frontmost instance (checked with
-    /// Claude · Main and Claude · Second running), so this profile's instance is
-    /// brought forward first and the link is sent only once it is frontmost.
-    /// If it does not come forward in time, no link is sent and a hint names the
-    /// session to pick; if another instance takes the front after the link, the
-    /// profile's instance is focused again with the same hint.
-    private static func jumpToClaudeInstance(_ url: URL, source: AgentSource, hint: String,
-                                             report: @escaping (JumpOutcome) -> Void) {
-        guard let pid = InstanceController.runningInstances(sources: [source])[source.id],
-              let app = NSRunningApplication(processIdentifier: pid), let bundleURL = app.bundleURL else {
+        // Several Claude instances share one bundle id, and macOS hands every link
+        // to the one launched first, whichever is in front. A link for another
+        // instance's session would reach that first instance, which opens its own
+        // Code home, so those sessions get a hint instead.
+        guard let instance = linkRecipient(for: source), let bundleURL = instance.bundleURL else {
             report(focusProfile(source, hint: hint))
             return
         }
-        if let error = InstanceController.focus(source: source) {
-            report(.failed(error))
-            return
-        }
-        whenFrontmost(pid, timeout: 1.5) { frontmost in
-            guard frontmost else {
-                report(.hint(hint, symbol: "sidebar.left"))
+        openLink(url, in: bundleURL) { recipient in
+            // Nil when the link failed. Another pid means the instances changed since
+            // the check, and that instance already has the link: say what to pick.
+            guard recipient == instance.processIdentifier else {
+                report(focusProfile(source, hint: hint))
                 return
             }
-            openLink(url, in: bundleURL) { opened in
-                guard opened else {
-                    report(focusProfile(source, hint: hint))
-                    return
-                }
-                // The instance that handled the link shows its window; check it
-                // was this profile's before calling the jump done.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
-                        report(.done)
-                    } else {
-                        report(focusProfile(source, hint: hint))
-                    }
-                }
-            }
+            // Claude shows its own window for a link; this makes sure the
+            // verified instance is the one in front.
+            _ = InstanceController.focus(source: source)
+            report(.done)
         }
-    }
-
-    /// Calls back once `pid` is the frontmost app, or with false after `timeout`.
-    /// Runs only after a click, for at most `timeout` seconds.
-    private static func whenFrontmost(_ pid: pid_t, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {
-        let deadline = Date().addingTimeInterval(timeout)
-        func check() {
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
-                completion(true)
-            } else if Date() >= deadline {
-                completion(false)
-            } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { check() }
-            }
-        }
-        check()
     }
 
     private static func focusProfile(_ source: AgentSource, hint: String) -> JumpOutcome {
@@ -297,15 +246,14 @@ enum SessionLauncher {
         return .hint(hint, symbol: "sidebar.left")
     }
 
-    /// The one running Claude, and only when it is this profile's instance.
-    private static func soleClaudeInstance(for source: AgentSource) -> NSRunningApplication? {
+    /// The running Claude that receives claude:// links, and only when it is
+    /// this profile's instance.
+    private static func linkRecipient(for source: AgentSource) -> NSRunningApplication? {
         let running = runningApplications(claudeBundleID)
-        guard running.count == 1 else { return nil }
-        let instance = running[0]
-        guard InstanceController.runningInstances(sources: [source])[source.id] == instance.processIdentifier else {
-            return nil
-        }
-        return instance
+        let instances = running.map { LinkRecipient.Instance(pid: $0.processIdentifier, launchDate: $0.launchDate) }
+        guard let pid = LinkRecipient.pid(among: instances),
+              InstanceController.runningInstances(sources: [source])[source.id] == pid else { return nil }
+        return running.first { $0.processIdentifier == pid }
     }
 
     /// Returns false when step 2 does not apply, so the next step runs.
@@ -316,8 +264,8 @@ enum SessionLauncher {
         guard running.count == 1, let app = running.first, let bundleURL = app.bundleURL,
               let thread = threadID(session.details.parentThreadID) ?? threadID(session.sessionID),
               let url = URL(string: "codex://threads/\(thread)") else { return false }
-        openLink(url, in: bundleURL) { opened in
-            report(opened ? .done : activateWithHint(app, context: context))
+        openLink(url, in: bundleURL) { recipient in
+            report(recipient != nil ? .done : activateWithHint(app, context: context))
         }
         return true
     }
@@ -523,15 +471,17 @@ enum SessionLauncher {
     }
 
     /// Opens a link in one specific, already running app bundle, so no other
-    /// handler of the scheme can receive it.
-    private static func openLink(_ url: URL, in bundleURL: URL, completion: @escaping (Bool) -> Void) {
+    /// handler of the scheme can receive it. `completion` gets the pid NSWorkspace
+    /// reports as the recipient (it matched the receiving Claude in the system
+    /// log), or nil when the link could not be opened.
+    private static func openLink(_ url: URL, in bundleURL: URL, completion: @escaping (pid_t?) -> Void) {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.addsToRecentItems = false
         configuration.promptsUserIfNeeded = false
         NSWorkspace.shared.open([url], withApplicationAt: bundleURL, configuration: configuration) { application, error in
-            let opened = application != nil && error == nil
-            DispatchQueue.main.async { completion(opened) }
+            let recipient = error == nil ? application?.processIdentifier : nil
+            DispatchQueue.main.async { completion(recipient) }
         }
     }
 
