@@ -154,21 +154,16 @@ public final class CodexLiveActivityProvider {
         switch status { case .waiting: return 0; case .working: return 1; case .idle: return 2; case .unknown: return 3 }
     }
 
-    /// lsof observes existing handles without opening, locking, or writing the
-    /// assistant's lock files. Exact parent paths prevent cross-profile matches.
-    static func parseOpenSessionOwners(_ output: String, directory: URL) -> [String: Int32] {
+    /// Thread ids whose lock file one process holds open. Exact parent paths
+    /// prevent cross-profile matches; a lock two processes hold is nobody's.
+    static func sessionOwners(_ handles: [(pid: Int32, path: String)], directory: URL) -> [String: Int32] {
         let root = canonicalPath(directory.path)
-        var currentPID: Int32?
         var owners: [String: Int32] = [:]
         var conflicts = Set<String>()
-        for line in output.split(separator: "\n") {
-            guard let field = line.first else { continue }
-            let value = String(line.dropFirst())
-            if field == "p" { currentPID = Int32(value) }
-            guard field == "n", let pid = currentPID, pid > 0 else { continue }
-            let url = URL(fileURLWithPath: value)
+        for (pid, path) in handles where pid > 0 {
+            let url = URL(fileURLWithPath: path)
             guard url.pathExtension == "lock", canonicalPath(url.deletingLastPathComponent().path) == root,
-                  canonicalPath(value) == root + "/" + url.lastPathComponent else { continue }
+                  canonicalPath(path) == root + "/" + url.lastPathComponent else { continue }
             let id = url.deletingPathExtension().lastPathComponent
             guard UUID(uuidString: id) != nil, !conflicts.contains(id) else { continue }
             if let previous = owners[id], previous != pid {
@@ -179,10 +174,45 @@ public final class CodexLiveActivityProvider {
         return owners
     }
 
+    /// Only `codex` processes are asked; a server is verified by its executable
+    /// afterwards. A system-wide lsof cost about 0.16 s of CPU on every poll.
     private static func readOpenSessionOwners(directory: URL) -> [String: Int32]? {
-        guard let output = run("/usr/sbin/lsof", arguments: ["-n", "-P", "-F", "pn", "+d", directory.path],
-                               acceptedExitCodes: [0, 1], maximumBytes: 1_048_576) else { return nil }
-        return parseOpenSessionOwners(output, directory: directory)
+        guard let handles = openFiles(processName: "codex", suffix: ".lock") else { return nil }
+        return sessionOwners(handles, directory: directory)
+    }
+
+    /// Files that processes with this name hold open, from the kernel's
+    /// descriptor tables, as lsof reads them: nothing is opened, locked or
+    /// written. Nil when processes cannot be listed; a process that exits
+    /// meanwhile is skipped.
+    static func openFiles(processName: String, suffix: String) -> [(pid: Int32, path: String)]? {
+        let estimate = proc_listallpids(nil, 0)
+        guard estimate > 0 else { return nil }
+        var pids = [pid_t](repeating: 0, count: Int(estimate) + 64)
+        // Returns a count of PIDs, not bytes.
+        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        guard count > 0 else { return nil }
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        var name = [UInt8](repeating: 0, count: 2 * Int(MAXCOMLEN) + 1)
+        var handles: [(pid: Int32, path: String)] = []
+        for pid in pids.prefix(min(Int(count), pids.count)) where pid > 0 {
+            let length = proc_name(pid, &name, UInt32(name.count))
+            guard length > 0, String(bytes: name[..<min(Int(length), name.count)], encoding: .utf8) == processName else { continue }
+            let needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+            guard needed > 0 else { continue }
+            var descriptors = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(needed) / stride + 16)
+            let filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &descriptors, Int32(descriptors.count * stride))
+            guard filled > 0 else { continue }
+            for descriptor in descriptors.prefix(min(Int(filled) / stride, descriptors.count))
+            where descriptor.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
+                var info = vnode_fdinfowithpath()
+                let size = Int32(MemoryLayout<vnode_fdinfowithpath>.size)
+                guard proc_pidfdinfo(pid, descriptor.proc_fd, PROC_PIDFDVNODEPATHINFO, &info, size) == size else { continue }
+                let path = withUnsafeBytes(of: info.pvip.vip_path) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+                if path.hasSuffix(suffix) { handles.append((pid, path)) }
+            }
+        }
+        return handles
     }
 
     private static func readServerStartedAt(pid: Int32) -> Date? {
@@ -384,7 +414,7 @@ public final class CodexLiveActivityProvider {
             guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else { return nil }
             try process.run()
             // A wedged system helper must not occupy the live reader forever.
-            // This handle belongs only to the lsof / ps child launched above.
+            // This handle belongs only to the ps child launched above.
             let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
             defer { try? pipe.fileHandleForReading.close() }
             var output = Data()

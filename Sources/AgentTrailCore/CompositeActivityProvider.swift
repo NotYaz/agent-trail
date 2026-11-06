@@ -126,6 +126,14 @@ public final class CompositeActivityProvider: ActivityProvider {
         return finish(merge(completed), learn: true)
     }
 
+    /// Saves every adapter cache a scan changed but has not written yet.
+    /// Scans write them at most every few minutes; call this before quitting.
+    public func flushCaches() {
+        claude.saveCache()
+        codex.saveCache()
+        grok.saveCache()
+    }
+
     private func merge(_ results: [ScanResult]) -> ScanResult {
         let activity = results.flatMap { $0.projects.flatMap(\.activities) }
         let notices = Array(Set(results.flatMap(\.notices))).sorted()

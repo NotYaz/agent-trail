@@ -135,6 +135,11 @@ public final class LiveActivityProvider {
     /// A terminal session's host, by PID and start; a nil value is settled as unknown.
     private var terminalHosts: [String: String?] = [:]
     private var failedHostReads: Set<String> = []
+    /// Decoded Desktop records by path. A poll decodes only files whose
+    /// identity, size or modification time changed; nil marks an unreadable one.
+    private var desktopRecords: [String: (stamp: DesktopFileStamp, record: DesktopRecord?)] = [:]
+    /// Desktop records listed by the current poll, so deleted ones are dropped.
+    private var listedDesktopRecords: Set<String> = []
 
     /// `commandStarts` lists when each live Bash command of a session process began.
     /// `terminalHints` receives only terminal-session PIDs whose start time matched.
@@ -157,6 +162,8 @@ public final class LiveActivityProvider {
         var sessions: [String: LiveAgentSession] = [:]
         var notices: [String] = []
         var candidates: [Candidate] = []
+        listedDesktopRecords.removeAll(keepingCapacity: true)
+        defer { desktopRecords = desktopRecords.filter { listedDesktopRecords.contains($0.key) } }
         for source in sources {
             // This process-registry schema belongs to Claude. Other assistants
             // have separate runtime readers in CompositeLiveActivityProvider.
@@ -482,6 +489,14 @@ public final class LiveActivityProvider {
         }
     }
 
+    /// Changes whenever a Desktop record is rewritten in place or replaced.
+    private struct DesktopFileStamp: Equatable {
+        let device: Int32
+        let inode: UInt64
+        let size: UInt64
+        let modified: Date
+    }
+
     private struct DesktopProject {
         let projectPath: String
         let checkoutRoots: [String]
@@ -536,28 +551,56 @@ public final class LiveActivityProvider {
             return [:]
         }
         var result: [String: DesktopProject] = [:]
+        // Records share a few folders. Links are still resolved on every poll.
+        var resolved: [String: String?] = [:]
+        func absolute(_ path: String?) -> String? {
+            guard let path else { return nil }
+            if let known = resolved[path] { return known }
+            let value = absolutePath(path)
+            resolved[path] = value
+            return value
+        }
         for case let url as URL in enumerator where url.pathExtension == "json" && url.lastPathComponent.hasPrefix("local_") {
             autoreleasepool {
-                do {
-                    let record = try JSONDecoder().decode(DesktopRecord.self, from: Data(contentsOf: url))
-                    guard record.sessionId != nil,
-                          let projectPath = absolutePath(record.originCwd) ?? absolutePath(record.cwd),
-                          let workspace = absolutePath(record.cwd) ?? absolutePath(record.worktreePath) else { return }
-                    var roots = [projectPath, workspace]
-                    roots += (record.gitAnchors ?? []).compactMap { absolutePath($0.gitRoot) }
-                    if let worktree = absolutePath(record.worktreePath) { roots.append(worktree) }
-                    let extra = Self.desktopDetails(record)
-                    let project = DesktopProject(projectPath: projectPath, checkoutRoots: Array(Set(roots)),
-                        activity: record.lastActivityAt?.value ?? 0, linkableSessionID: extra.linkableSessionID,
-                        details: extra.details)
-                    for id in [record.cliSessionId].compactMap({ $0 }) + (record.priorCliSessionIds ?? []) where !id.isEmpty {
-                        if result[id]?.activity ?? -.infinity <= project.activity { result[id] = project }
-                    }
-                } catch { failed = true }
+                guard let record = desktopRecord(url) else {
+                    failed = true
+                    return
+                }
+                guard record.sessionId != nil,
+                      let projectPath = absolute(record.originCwd) ?? absolute(record.cwd),
+                      let workspace = absolute(record.cwd) ?? absolute(record.worktreePath) else { return }
+                var roots = [projectPath, workspace]
+                roots += (record.gitAnchors ?? []).compactMap { absolute($0.gitRoot) }
+                if let worktree = absolute(record.worktreePath) { roots.append(worktree) }
+                let extra = Self.desktopDetails(record)
+                let project = DesktopProject(projectPath: projectPath, checkoutRoots: Array(Set(roots)),
+                    activity: record.lastActivityAt?.value ?? 0, linkableSessionID: extra.linkableSessionID,
+                    details: extra.details)
+                for id in [record.cliSessionId].compactMap({ $0 }) + (record.priorCliSessionIds ?? []) where !id.isEmpty {
+                    if result[id]?.activity ?? -.infinity <= project.activity { result[id] = project }
+                }
             }
         }
         if failed { notices.append("\(source.name): some desktop project metadata could not be read for live status.") }
         return result
+    }
+
+    /// Decodes a Desktop record unless the same file was decoded before. These
+    /// files also hold UI transcripts, so decoding all of them on every poll
+    /// was most of its cost. Nil when the file cannot be read or decoded.
+    private func desktopRecord(_ url: URL) -> DesktopRecord? {
+        let path = url.path
+        listedDesktopRecords.insert(path)
+        // A link's own times do not change with its target, so only plain files are kept.
+        guard let stat = FileStat.of(path), stat.kind == .regular else {
+            desktopRecords.removeValue(forKey: path)
+            return try? JSONDecoder().decode(DesktopRecord.self, from: Data(contentsOf: url))
+        }
+        let stamp = DesktopFileStamp(device: stat.device, inode: stat.inode, size: stat.size, modified: stat.modified)
+        if let known = desktopRecords[path], known.stamp == stamp { return known.record }
+        let record = try? JSONDecoder().decode(DesktopRecord.self, from: Data(contentsOf: url))
+        desktopRecords[path] = (stamp, record)
+        return record
     }
 
     private func absolutePath(_ path: String?) -> String? {

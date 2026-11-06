@@ -263,7 +263,10 @@ final class AppStore: ObservableObject {
         let currentSources = sources
         let targetCache = cacheURL
         let currentGeneration = generation
-        indexer.scan(sources: currentSources, cacheURL: targetCache, locationsURL: locationsURL, metadata: { [weak self] initial in
+        // Only the first index shows partial results. Later refreshes keep the
+        // last complete history, so building partials there was wasted work.
+        let isFirstIndex = lastScan == nil
+        let metadata: ((ScanResult) -> Void)? = isFirstIndex ? { [weak self] initial in
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration else { return }
                 // Keep already indexed edit evidence visible during refresh.
@@ -274,13 +277,16 @@ final class AppStore: ObservableObject {
                 self.notices = initial.notices
                 self.scanProgress = "Reading local change history…"
             }
-        }, progress: { [weak self] partial, completed, total in
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.generation == currentGeneration else { return }
-                    self.applyProgress(partial)
-                    self.scanProgress = "Indexing \(completed) of \(total) session logs…"
-                }
-        }, completion: { [weak self] result in
+        } : nil
+        let progress: ((ScanResult, Int, Int) -> Void)? = isFirstIndex ? { [weak self] partial, completed, total in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == currentGeneration else { return }
+                self.applyProgress(partial)
+                self.scanProgress = "Indexing \(completed) of \(total) session logs…"
+            }
+        } : nil
+        indexer.scan(sources: currentSources, cacheURL: targetCache, locationsURL: locationsURL,
+                     metadata: metadata, progress: progress, completion: { [weak self] result in
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration else { return }
                 self.applyHistory(result)
@@ -290,6 +296,11 @@ final class AppStore: ObservableObject {
                 self.scanProgress = nil
             }
         })
+    }
+
+    /// Refreshes save history caches at most every few minutes; quitting saves the rest.
+    func flushHistoryCaches() {
+        indexer.flush(timeout: 2)
     }
 
     func focus(_ source: AgentSource) {
@@ -748,15 +759,28 @@ private final class LocalIndexer: @unchecked Sendable {
     private let worker = DispatchQueue(label: "app.agenttrail.index", qos: .utility)
     private var provider: CompositeActivityProvider?
 
+    /// Nil `metadata` and `progress` skip the quick listing and every partial
+    /// result, so a routine refresh builds only the final one.
     func scan(sources: [AgentSource], cacheURL: URL, locationsURL: URL,
-              metadata: @escaping (ScanResult) -> Void,
-              progress: @escaping (ScanResult, Int, Int) -> Void,
+              metadata: ((ScanResult) -> Void)?,
+              progress: ((ScanResult, Int, Int) -> Void)?,
               completion: @escaping (ScanResult) -> Void) {
         worker.async {
             let provider = self.provider(cacheURL: cacheURL, locationsURL: locationsURL)
-            metadata(provider.metadata(sources: sources))
+            if let metadata { metadata(provider.metadata(sources: sources)) }
             completion(provider.scan(sources: sources, progress: progress))
         }
+    }
+
+    /// Saves the adapters' caches before quitting. Waits briefly for a scan in
+    /// flight; if it takes longer, the next launch rereads what was not saved.
+    func flush(timeout: TimeInterval) {
+        let done = DispatchSemaphore(value: 0)
+        worker.async {
+            self.provider?.flushCaches()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + timeout)
     }
 
     /// Runs after any scan already queued, on the same queue as the catalog.

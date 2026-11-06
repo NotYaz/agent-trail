@@ -353,6 +353,32 @@ final class ClaudeActivityProviderTests: XCTestCase {
         XCTAssertEqual(provider.scan(sources: [fixture.source]).projects[0].latestEdit?.latestEdit, fixture.date(40))
     }
 
+    func testRefreshSavesTheCacheOnlyWhenChangedAndQuitSavesTheRest() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.session()
+        let path = fixture.project.appendingPathComponent("source.swift").path
+        try fixture.write([fixture.request("first", path: path), fixture.response("first", seconds: 20, path: path)])
+        let provider = ClaudeActivityProvider(cacheURL: fixture.cache)
+        XCTAssertEqual(provider.scan(sources: [fixture.source]).projects[0].recordedEditCount, 1)
+        // Saves replace the file, so its inode tells whether one happened.
+        let firstSave = try XCTUnwrap(FileStat.of(fixture.cache.path)).inode
+        let saved = try Data(contentsOf: fixture.cache)
+        try fixture.append([fixture.request("second", path: path), fixture.response("second", seconds: 30, path: path)])
+        XCTAssertEqual(provider.scan(sources: [fixture.source]).projects[0].recordedEditCount, 2)
+        // A refresh this soon after a save leaves the file as it was.
+        XCTAssertEqual(try Data(contentsOf: fixture.cache), saved)
+        XCTAssertNil(provider.saveCache())
+        let flushed = try XCTUnwrap(FileStat.of(fixture.cache.path)).inode
+        XCTAssertNotEqual(flushed, firstSave)
+        XCTAssertNotEqual(try Data(contentsOf: fixture.cache), saved)
+        // Nothing new to save.
+        _ = provider.scan(sources: [fixture.source])
+        XCTAssertNil(provider.saveCache())
+        XCTAssertEqual(FileStat.of(fixture.cache.path)?.inode, flushed)
+        XCTAssertEqual(ClaudeActivityProvider(cacheURL: fixture.cache).scan(sources: [fixture.source]).projects[0].recordedEditCount, 2)
+    }
+
     func testOversizedPartialRecordStaysSkippedAcrossRestart() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

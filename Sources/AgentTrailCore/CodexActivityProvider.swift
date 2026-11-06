@@ -10,6 +10,9 @@ public final class CodexActivityProvider: ActivityProvider {
     static let cacheVersion = 4
     private let cacheURL: URL?
     private var cache: [String: CodexFile] = [:]
+    /// True when `cache` differs from the saved file.
+    private var cacheDirty = false
+    private var lastCacheSave = Date.distantPast
     private var cacheLoadNotice: String?
     private let files = FileManager.default
     private let resolver: GitProjectResolver
@@ -37,9 +40,11 @@ public final class CodexActivityProvider: ActivityProvider {
                 cache = try JSONDecoder().decode(SavedCache.self, from: data).files
             } else {
                 cacheLoadNotice = "Codex edit history is being rebuilt once for the current indexer."
+                cacheDirty = true
             }
         } catch {
             cacheLoadNotice = "The Codex activity cache could not be read; change history will be rebuilt."
+            cacheDirty = true
         }
     }
 
@@ -71,11 +76,15 @@ public final class CodexActivityProvider: ActivityProvider {
         var parsed: [String: CodexFile] = [:]
         var lastProgress = Date.distantPast
         for (index, task) in tasks.enumerated() {
-            let file = cache[task.url.path] ?? CodexFile()
+            let cached = cache[task.url.path]
+            let file = cached ?? CodexFile()
+            let before = file.tail
             do {
                 try JSONLTail.read(url: task.url, state: &file.tail, reset: { file.resetDerived() }) { line in
                     parse(line, file: file, fallbackID: task.url.deletingPathExtension().lastPathComponent)
                 }
+                // Parsed evidence changes only with the tail, so an unchanged tail needs no save.
+                if cached == nil || file.tail != before { cacheDirty = true }
                 cache[task.url.path] = file
                 parsed[task.url.path] = file
                 if file.tail.malformedLines > 0 {
@@ -94,18 +103,33 @@ public final class CodexActivityProvider: ActivityProvider {
             }
         }
         let active = Set(tasks.map { $0.url.path })
-        cache = cache.filter { active.contains($0.key) }
-        if let cacheURL {
-            do {
-                try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(SavedCache(version: Self.cacheVersion, files: cache))
-                try data.write(to: cacheURL, options: .atomic)
-                try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
-            } catch {
-                notices.append("The Codex activity cache could not be saved; the next launch may reindex change history.")
-            }
+        let kept = cache.filter { active.contains($0.key) }
+        if kept.count != cache.count {
+            cache = kept
+            cacheDirty = true
+        }
+        if Date().timeIntervalSince(lastCacheSave) >= historyCacheSaveInterval, let notice = saveCache() {
+            notices.append(notice)
         }
         return fold(files: discovered, parsed: parsed, notices: notices)
+    }
+
+    /// Writes the cache if a scan changed it since the last save. Returns a
+    /// notice when it could not be saved; a later scan tries again.
+    @discardableResult
+    public func saveCache() -> String? {
+        guard cacheDirty, let cacheURL else { return nil }
+        do {
+            try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(SavedCache(version: Self.cacheVersion, files: cache))
+            try data.write(to: cacheURL, options: .atomic)
+            try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
+            cacheDirty = false
+            lastCacheSave = Date()
+            return nil
+        } catch {
+            return "The Codex activity cache could not be saved; the next launch may reindex change history."
+        }
     }
 
     private struct Rollout {

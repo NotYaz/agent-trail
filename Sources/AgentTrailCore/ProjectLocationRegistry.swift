@@ -153,6 +153,15 @@ public struct ProjectLocationRegistry: Codable, Equatable, Sendable {
         return best.current + lexical.dropFirst(best.old.count)
     }
 
+    /// False when `rewrite` returns `lexical` unchanged for every date: no
+    /// earlier location contains it. Unlike a rewrite, the answer can be reused.
+    func mayRewrite(_ lexical: String) -> Bool {
+        locations.contains { location in
+            !location.isReplaced
+                && location.previousLocations.contains { CheckoutPath.contains(root: $0.path, path: lexical) }
+        }
+    }
+
     /// The canonical current path for a recorded path. Used for live sessions,
     /// which report the folder their process was started in.
     public func relocatedPath(_ raw: String, at date: Date? = nil) -> String {

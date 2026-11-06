@@ -413,6 +413,22 @@ final class LiveActivityProviderTests: XCTestCase {
         XCTAssertFalse(result.notices.joined().contains("Tighten"))
     }
 
+    func testDesktopRecordsAreReadAgainOnlyAfterTheyChange() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.desktop("session", extra: ["title": "First title"])
+        try fixture.live("session", pid: 101, status: "busy", secondsAgo: 1)
+        let provider = LiveActivityProvider(isProcessAlive: { _ in true })
+        XCTAssertEqual(provider.scan(sources: [fixture.source], now: fixture.now).sessions.first?.details.title, "First title")
+        XCTAssertEqual(provider.scan(sources: [fixture.source], now: fixture.now).sessions.first?.details.title, "First title")
+        // Rewritten in place at the same size, so only its modification time differs.
+        try fixture.desktop("session", extra: ["title": "Later title"])
+        XCTAssertEqual(provider.scan(sources: [fixture.source], now: fixture.now).sessions.first?.details.title, "Later title")
+        // Without its Desktop record, the session no longer matches one.
+        try FileManager.default.removeItem(at: fixture.desktopRoot.appendingPathComponent("local_session.json"))
+        XCTAssertTrue(provider.scan(sources: [fixture.source], now: fixture.now).sessions.isEmpty)
+    }
+
     func testMalformedOptionalDetailsNeverDropTheSession() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

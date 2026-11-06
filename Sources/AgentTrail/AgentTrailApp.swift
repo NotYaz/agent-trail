@@ -174,6 +174,10 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        store?.flushHistoryCaches()
+    }
+
     // Continuous effects (pulses, live timelines) stop while the popover is closed.
     func popoverDidShow(_ notification: Notification) {
         store?.isPanelVisible = true
