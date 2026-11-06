@@ -6,9 +6,9 @@
     <key>CFBundleIdentifier</key><string>local.agenttrail.app</string>
     <key>CFBundleName</key><string>Agent Trail</string>
     <key>CFBundleDisplayName</key><string>Agent Trail</string>
-    <key>CFBundleVersion</key><string>12</string>
+    <key>CFBundleVersion</key><string>13</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleGetInfoString</key><string>Agent Trail 0.1.0 alpha 12</string>
+    <key>CFBundleGetInfoString</key><string>Agent Trail 0.1.0 alpha 13</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleURLTypes</key>

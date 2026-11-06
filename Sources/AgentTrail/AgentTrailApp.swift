@@ -15,7 +15,7 @@ enum AgentTrailApp {
           --height N    panel render height in points, 200-4000 (default 680; the width stays 600)
           --window WxH  render the Map window's content at W x H points instead, from 640x640 to 4000x4000
           --theme NAME  classic, gentle, vivid or aurora (default classic); the saved choice is not used or changed
-          --pin KIND    pin an item as a click would: live, session, lane, trunk, commit, merge, group or fold
+          --pin KIND    pin an item as a click would: live, session, lane, trunk, commit, merge, group, bundle or fold
 
         """
 
