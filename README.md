@@ -49,6 +49,7 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 - See worktree context alongside recorded edits, and where a session was started when that was outside the project.
 - Keep a project's history when you move its folder; earlier locations are remembered automatically.
 - Jump straight to the work: each card's main button opens the most urgent live session (needs input, then working, then idle) in Claude, Codex, or the terminal running `claude` or Grok.
+- Switch from the keyboard: ⌃⌥J opens a session switcher in any app, ⌃⌥⇧J jumps straight to the most urgent session, and `agenttrail://` links let Shortcuts, Raycast, or a Stream Deck do the same.
 - See live Needs input, Working, Idle, and Unknown counts inside each project card.
 - Keep long jobs in view: a Claude session whose background command is still running (a training run, a long build, a wait on another job) shows **Working in background**, not Idle.
 - Read the Pulse strip at a glance: live sessions, edits in the last 7 days, active projects, and your day streak.
@@ -76,7 +77,38 @@ Each card's main button opens the session that most needs you: one waiting for i
 - **Grok:** brings forward the terminal app it runs in, when the process environment identifies it, including Claude Desktop's terminal pane.
 - **Otherwise:** it brings the assistant's app forward, or shows the folder in your running editor or Finder.
 
-Agent Trail opens a session or brings an app forward only after you click, and only when that app is already running. It never launches, quits, kills, or restarts an assistant, and it needs no Automation or Accessibility permission. **Open in** menu items can open your editor or terminal.
+Agent Trail opens a session or brings an app forward only after you click, press the switcher's shortcut, or open an `agenttrail://` link (see [Switch from the keyboard](#switch-from-the-keyboard)), and only when that app is already running. It never launches, quits, kills, or restarts an assistant, and it needs no Automation or Accessibility permission. **Open in** menu items can open your editor or terminal.
+
+### Switch from the keyboard
+
+Press **⌃⌥J** in any app to open the session switcher. It lists every live session in the right-click menu's order, needs input first, and numbers the first nine. While it is open, rows keep their place and number. Sessions that start meanwhile join at the end, and typing or reopening sorts the list again.
+
+- Type to filter by project, title, branch, folder, or profile.
+- ↑↓ or Tab select, and Return jumps. ⌘ and a digit picks that row. Before you type a filter, the digit alone does.
+- Esc clears the filter, then closes the switcher and gives focus back to the app you were in.
+
+**⌃⌥⇧J** skips the list and jumps straight to the most urgent session.
+
+To change the shortcut, open the panel's ⋯ menu and choose **Session switcher**: ⌃⌥J, ⌃⌥A, ⌃⌥⌘J, or Off. The ⇧ chord follows your choice. The letter follows your keyboard layout: under Dvorak or AZERTY, ⌃⌥J is the key labeled J.
+
+The shortcut goes through macOS's hot key service, so it needs no Accessibility or Input Monitoring permission, and it receives only its own two chords. While it is on, the app in front no longer gets those chords. If another app has already registered one of them with that service, the ⋯ menu says so. macOS does not report chords it uses itself, or chords that other apps watch for in other ways.
+
+Launchers and scripts can open these links:
+
+| Link | Opens |
+|---|---|
+| `agenttrail://jump` | The most urgent live session |
+| `agenttrail://jump?project=agent-trail` | The most urgent live session in a project, by folder name (any case) or full path |
+| `agenttrail://jump?session=ID` | One session, by the assistant's session or thread ID (`AgentTrailInspect --live` lists them) |
+| `agenttrail://switcher` | The session switcher |
+
+Some ways to open them:
+- `open agenttrail://jump` in a shell.
+- An **Open URLs** action in Shortcuts, which you can bind to a keyboard shortcut there.
+- A Raycast quicklink.
+- A Stream Deck button.
+
+Percent-encode spaces in a project name or path. A link only picks among the live sessions Agent Trail already shows. It never names a file, an app, or a command, and Agent Trail ignores any other link with a short hint. A link starts Agent Trail if it isn't running, and the jump then waits for the first live check.
 
 ## Configure profiles
 
@@ -187,7 +219,7 @@ The menu-bar icon shows the same at a glance:
 | Amber and filled, with a count | A session needs input. It bounces once when a new request arrives. |
 | Checkmark, for a few seconds | Work just finished and nothing else is running. |
 
-Right-click the icon for a list of live sessions grouped by state; choose one to jump to it. The panel's ⋯ menu has **Menu bar** settings (animation, the working and needs-input counts), **Show session titles**, and **Theme**: Classic, Gentle (brighter surfaces, indigo sparklines and calendar), Vivid (Gentle plus brighter profile colors that stay apart for color-blind readers), or Aurora (Vivid plus an indigo Trail calendar and a stronger wash). Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
+Right-click the icon for a list of live sessions grouped by state; choose one to jump to it, or choose **Session Switcher…** to open the switcher. The panel's ⋯ menu has **Session switcher** for the [keyboard shortcut](#switch-from-the-keyboard), **Menu bar** settings (animation, the working and needs-input counts), **Show session titles**, and **Theme**: Classic, Gentle (brighter surfaces, indigo sparklines and calendar), Vivid (Gentle plus brighter profile colors that stay apart for color-blind readers), or Aurora (Vivid plus an indigo Trail calendar and a stronger wash). Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
 
 Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. A Claude Desktop session requires a matching desktop session record, and `claude` in a terminal reports its own folder; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
 
@@ -319,7 +351,7 @@ swift run AgentTrail --render-growth-demo /tmp/agent-trail-growth.png
 swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
 
-`--render-status-demo OUTPUT.png` draws the menu-bar icon states large and at real size (2x and 1x), with the nodes the working animation follows marked in order. Add `--light` for the light appearance, `--height N` to render a taller panel for review, or `--theme classic|gentle|vivid|aurora` to render a color theme without changing your saved choice. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
+`--render-status-demo OUTPUT.png` draws the menu-bar icon states large and at real size (2x and 1x), with the nodes the working animation follows marked in order. `--render-switcher-demo OUTPUT.png` draws the session switcher with sample sessions. Add `--light` for the light appearance, `--height N` to render a taller panel for review, or `--theme classic|gentle|vivid|aurora` to render a color theme without changing your saved choice. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
 
 ## Development
 
@@ -368,7 +400,7 @@ Agent Trail is for people who want one card per repository across Claude (Deskto
 - Codex input/approval state when a reliable local signal becomes available.
 - Gemini CLI, OpenCode, and Cursor, once their local tool results can be confirmed. They are unsupported in this release.
 - More coverage of changes made through agent shell commands.
-- A global hotkey and optional launch at login.
+- Optional launch at login, so the switcher's shortcut works from the moment you sign in.
 - Signed, notarized downloads and a simpler installation path.
 
 ## Support the project
