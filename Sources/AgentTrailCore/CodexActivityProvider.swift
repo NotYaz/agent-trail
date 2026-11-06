@@ -229,7 +229,8 @@ public final class CodexActivityProvider: ActivityProvider {
         }
         let folded = HistoryFold.fold(order.compactMap { sessions[$0] }, resolver: resolver)
         return ScanResult(projects: ProjectSummary.merge(folded.activity), notices: Array(Set(notices)).sorted(),
-                          sessionProjects: folded.associations, missingFolders: folded.missingFolders)
+                          sessionProjects: folded.associations, missingFolders: folded.missingFolders,
+                          sessionTrails: SessionTrail.merge(folded.trails))
     }
 
     private func readHeader(_ url: URL) -> CodexFile? {

@@ -260,6 +260,90 @@ public struct MissingFolder: Hashable, Sendable {
     }
 }
 
+/// One confirmed edit on a session's trail: when it completed, the checkout it
+/// counts for, and the folder it landed in (that checkout, or a Claude worktree).
+public struct TrailEdit: Codable, Hashable, Sendable {
+    public var date: Date
+    public var projectPath: String
+    public var workspacePath: String
+    public var delegated: Bool
+
+    public init(date: Date, projectPath: String, workspacePath: String, delegated: Bool = false) {
+        self.date = date
+        self.projectPath = projectPath
+        self.workspacePath = workspacePath
+        self.delegated = delegated
+    }
+}
+
+/// A branch a session wrote, and the folder it was checked out in.
+public struct WrittenBranch: Codable, Hashable, Sendable {
+    public var workspacePath: String
+    public var branch: String
+
+    public init(workspacePath: String, branch: String) {
+        self.workspacePath = workspacePath
+        self.branch = branch
+    }
+}
+
+/// One session over time: the same edits the project cards count, kept with
+/// the session that made them. Each edit appears on exactly one trail.
+public struct SessionTrail: Codable, Hashable, Sendable {
+    public var sourceID: String
+    public var sessionID: String
+    /// The project card the session itself counts on.
+    public var projectPath: String
+    public var createdAt: Date
+    public var latestActivity: Date
+    /// The thread that spawned this one, when the assistant records it.
+    public var parentSessionID: String?
+    /// Ascending by date.
+    public var edits: [TrailEdit]
+    /// Claude Desktop only: the branches the session wrote, in its own order.
+    public var writtenBranches: [WrittenBranch]
+    /// Claude Desktop only: the CLI session ids live reports use for this session.
+    public var otherIDs: [String]
+
+    public init(sourceID: String, sessionID: String, projectPath: String, createdAt: Date, latestActivity: Date,
+                parentSessionID: String? = nil, edits: [TrailEdit] = [], writtenBranches: [WrittenBranch] = [],
+                otherIDs: [String] = []) {
+        self.sourceID = sourceID
+        self.sessionID = sessionID
+        self.projectPath = projectPath
+        self.createdAt = createdAt
+        self.latestActivity = latestActivity
+        self.parentSessionID = parentSessionID
+        self.edits = edits
+        self.writtenBranches = writtenBranches
+        self.otherIDs = otherIDs
+    }
+
+    /// Paths canonicalized and edits sorted, as `ProjectSummary.merge` treats
+    /// projects. Edits share a few folders, so each is resolved once.
+    static func merge(_ trails: [SessionTrail]) -> [SessionTrail] {
+        var resolved: [String: String] = [:]
+        func canonical(_ path: String) -> String {
+            if let known = resolved[path] { return known }
+            let value = canonicalPath(path)
+            resolved[path] = value
+            return value
+        }
+        return trails.map { trail in
+            var trail = trail
+            trail.projectPath = canonical(trail.projectPath)
+            trail.edits = trail.edits.map {
+                TrailEdit(date: $0.date, projectPath: canonical($0.projectPath),
+                          workspacePath: canonical($0.workspacePath), delegated: $0.delegated)
+            }.sorted { ($0.date, $0.workspacePath) < ($1.date, $1.workspacePath) }
+            trail.writtenBranches = trail.writtenBranches.map {
+                WrittenBranch(workspacePath: canonical($0.workspacePath), branch: $0.branch)
+            }
+            return trail
+        }.sorted { ($0.createdAt, $0.sourceID, $0.sessionID) < ($1.createdAt, $1.sourceID, $1.sessionID) }
+    }
+}
+
 public struct ScanResult: Sendable {
     public var projects: [ProjectSummary]
     public var notices: [String]
@@ -269,10 +353,13 @@ public struct ScanResult: Sendable {
     public var missingFolders: [MissingFolder]
     /// Projects whose own folder could not be found during the scan.
     public var unavailableProjects: Set<String>
+    /// Every session with its confirmed edits, for the Map.
+    public var sessionTrails: [SessionTrail]
 
     public init(projects: [ProjectSummary], notices: [String] = [], scannedAt: Date = Date(),
                 sessionProjects: [SessionProjectAssociation] = [], projectLocations: ProjectLocationRegistry = .init(),
-                missingFolders: [MissingFolder] = [], unavailableProjects: Set<String> = []) {
+                missingFolders: [MissingFolder] = [], unavailableProjects: Set<String> = [],
+                sessionTrails: [SessionTrail] = []) {
         self.projects = projects
         self.notices = notices
         self.scannedAt = scannedAt
@@ -280,6 +367,7 @@ public struct ScanResult: Sendable {
         self.projectLocations = projectLocations
         self.missingFolders = missingFolders
         self.unavailableProjects = unavailableProjects
+        self.sessionTrails = sessionTrails
     }
 }
 

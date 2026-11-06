@@ -141,7 +141,8 @@ public final class CompositeActivityProvider: ActivityProvider {
             scannedAt: results.map(\.scannedAt).max() ?? Date(),
             sessionProjects: Array(Set(results.flatMap(\.sessionProjects)))
                 .sorted { ($0.sourceID, $0.sessionID) < ($1.sourceID, $1.sessionID) },
-            missingFolders: results.flatMap(\.missingFolders))
+            missingFolders: results.flatMap(\.missingFolders),
+            sessionTrails: SessionTrail.merge(results.flatMap(\.sessionTrails)))
     }
 
     /// Attach catalog state. After a complete scan, also remember checkouts and

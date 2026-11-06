@@ -21,6 +21,8 @@ enum AppSettings {
         static let preferredTerminalBundleID = "preferredTerminalBundleID"
         /// The `ColorTheme` raw value. Missing means Classic.
         static let colorTheme = "colorTheme"
+        /// The Map window's details panel beside the map. Missing means shown.
+        static let mapShowsDetails = "mapShowsDetails"
     }
 
     /// The four switches default to on. The preferred apps have no default:

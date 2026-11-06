@@ -5,11 +5,13 @@ import AgentTrailCore
 enum PanelSection: String, CaseIterable {
     case projects = "Projects"
     case growth = "Growth"
+    case map = "Map"
 
     var symbol: String {
         switch self {
         case .projects: return "square.stack.3d.up"
         case .growth: return "chart.line.uptrend.xyaxis"
+        case .map: return "arrow.triangle.branch"
         }
     }
 }
@@ -39,7 +41,42 @@ final class AppStore: ObservableObject {
     @Published var runningSourceIDs: Set<String> = []
     @Published var scanProgress: String?
     @Published var refreshInterval: Double = 15
-    @Published var panelSection: PanelSection = .projects
+    @Published var panelSection: PanelSection = .projects {
+        didSet { if panelSection == .map && oldValue != .map && !isMapWindowVisible { refreshMap(force: true) } }
+    }
+    /// The Map tab's project, built from session trails and its Git history.
+    @Published var projectMap: ProjectMap?
+    /// Hover and selection on the Map. Its own object, so a hover redraws only what shows it.
+    let mapHover = MapHoverModel()
+    /// The project the Map shows; nil follows the most recently active one.
+    @Published var mapProjectPath: String? {
+        didSet {
+            guard mapProjectPath != oldValue else { return }
+            clearPanelMapHover()
+            refreshMap()
+        }
+    }
+    /// How far back the Map reaches, in local days ending today.
+    @Published var mapRange: MapRange = .week {
+        didSet {
+            guard mapRange != oldValue else { return }
+            clearPanelMapHover()
+            refreshMap()
+        }
+    }
+    /// How the Map draws: the timeline, or one of the experimental views.
+    @Published var mapMode: MapMode = .lanes {
+        didSet { if mapMode != oldValue { refreshMap() } }
+    }
+    /// False folds related branches into streams once a project has many.
+    @Published var mapShowsAllBranches = false {
+        didSet { if mapShowsAllBranches != oldValue { refreshMap() } }
+    }
+    /// Branch lanes the Map shows before folding them into streams.
+    static let mapFoldThreshold = 14
+    /// Bundles the Lanes view draws open, a lane per strand, by bundle id. Only drawing
+    /// changes, so the map is not built again.
+    @Published var mapOpenBundles: Set<String> = []
     @Published var liveSessions: [LiveAgentSession] = [] {
         didSet { rebuildProjectOverviews() }
     }
@@ -76,7 +113,18 @@ final class AppStore: ObservableObject {
     @Published var growthFocusSourceID: String?
     @Published var growthAnchor: GrowthAnchor?
     /// False while the popover is closed, so continuous effects can stop.
-    @Published var isPanelVisible = true
+    @Published var isPanelVisible = true {
+        didSet { if isPanelVisible && !oldValue && !isMapWindowVisible { refreshMap(force: true) } }
+    }
+    /// True while the Map window is on screen and not covered or minimized.
+    /// Each surface rebuilds the map only when the other is not already showing it.
+    @Published var isMapWindowVisible = false {
+        didSet {
+            if isMapWindowVisible && !oldValue && !(panelSection == .map && isPanelVisible) { refreshMap(force: true) }
+        }
+    }
+    /// True while the Map window is key, so a failed Jump shows there instead of under the icon.
+    var isMapWindowKey = false
     let demoMode: Bool
     /// Numbered copies of the sample projects, for measuring long lists.
     private let demoCopies: Int
@@ -91,9 +139,27 @@ final class AppStore: ObservableObject {
     var showProfiles: (() -> Void)?
     /// Reopens the floating panel, which closes while a folder picker is up.
     var showPanel: (() -> Void)?
+    /// Opens the Map in its own resizable window, or brings that window forward.
+    var showMapWindow: (() -> Void)?
 
     private let indexer = LocalIndexer()
     private let liveReader = LiveReader()
+    /// Every session's trail from the last complete scan, for the Map; nil
+    /// until a scan has completed, so the Map never draws a partial history.
+    private var sessionTrails: [SessionTrail]?
+    private let mapQueue = DispatchQueue(label: "app.agenttrail.map", qos: .userInitiated)
+    private var mapGeneration = 0
+    private var lastMapBuild = Date.distantPast
+    /// One build runs at a time; a request during it runs once more afterwards.
+    private var mapBuildInFlight = false
+    private var mapBuildPending = false
+    private var mapBuildPendingForce = false
+    /// Which sessions reported which status at the last Map build.
+    private var mapLiveKey: Set<String> = []
+    /// What the last Map build was made from. A request with the same inputs is skipped
+    /// until the clock alone is due: a build runs Git three times and lays out every view
+    /// again, and most scans and live changes touch other projects.
+    private var mapInputs: MapBuildInputs?
     private var timer: Timer?
     private var liveTimer: Timer?
     private var isLiveScanning = false
@@ -193,7 +259,7 @@ final class AppStore: ObservableObject {
         guard refreshesPeriodically else { return }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in self?.refresh(fromTimer: true) }
         }
         liveTimer?.invalidate()
         liveTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
@@ -209,6 +275,7 @@ final class AppStore: ObservableObject {
         } catch {
             generation = UUID()
             configurationIsValid = false
+            resetMap()
             sources = []
             applyIdentity(ScanResult(projects: []))
             projects = []
@@ -236,6 +303,7 @@ final class AppStore: ObservableObject {
         sources = configuration.sources
         refreshInterval = configuration.refreshInterval
         configurationIsValid = true
+        resetMap()
         applyIdentity(ScanResult(projects: []))
         projects = []
         notices = []
@@ -249,7 +317,10 @@ final class AppStore: ObservableObject {
         refresh()
     }
 
-    func refresh() {
+    /// `fromTimer` is false for a refresh the user asked for, which also reads Git again for the
+    /// Map at once: a commit made in a terminal changes nothing the timer's scans compare.
+    func refresh(fromTimer: Bool = false) {
+        if !fromTimer { refreshMap(force: true) }
         if demoMode {
             let result = DemoData.result(now: now, calendar: .current, copies: demoCopies)
             applyIdentity(result)
@@ -292,6 +363,8 @@ final class AppStore: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration else { return }
                 self.applyHistory(result)
+                self.sessionTrails = result.sessionTrails
+                self.refreshMap()
                 if self.notices != result.notices { self.notices = result.notices }
                 self.lastScan = result.scannedAt
                 self.isScanning = false
@@ -397,7 +470,7 @@ final class AppStore: ObservableObject {
     private func reportLaunchFailure(_ message: String) {
         infoMessage = nil
         errorMessage = message
-        if !isPanelVisible { HintHUD.show(message, symbol: "exclamationmark.triangle", duration: 5) }
+        if !isPanelVisible && !isMapWindowKey { HintHUD.show(message, symbol: "exclamationmark.triangle", duration: 5) }
     }
 
     private func applyProgress(_ partial: ScanResult) {
@@ -452,13 +525,143 @@ final class AppStore: ObservableObject {
                 self.lastLiveScan = snapshot.scannedAt
                 // Most ticks report what the last one did. The first answer always
                 // publishes, so views and the menu bar learn that live status was checked.
-                if firstAnswer || snapshot.sessions != self.liveSessions { self.liveSessions = snapshot.sessions }
+                if firstAnswer || snapshot.sessions != self.liveSessions {
+                    self.liveSessions = snapshot.sessions
+                }
+                self.refreshMapForLive()
                 if snapshot.notices != self.liveNotices { self.liveNotices = snapshot.notices }
                 self.isLiveScanning = false
                 self.updateRunningSources()
                 self.updateLiveFreshness()
             }
         }
+    }
+
+    /// The project the Map shows now.
+    var mapProject: String? { mapProjectPath ?? projects.first?.path }
+
+    /// The Map is on screen: the panel's Map tab, the Map window, or both.
+    private var mapIsShown: Bool { (panelSection == .map && isPanelVisible) || isMapWindowVisible }
+
+    /// The window can change the project or range while the panel's Map is
+    /// unmounted, so the panel's pin is cleared here rather than by its view.
+    private func clearPanelMapHover() {
+        mapHover.hovered = nil
+        mapHover.selected = nil
+    }
+
+    /// Builds the Map off the main thread while it is on screen: the project's
+    /// session trails, its Git history (read-only) and the sessions reporting live.
+    /// `force` builds even when nothing the last build compared has changed.
+    func refreshMap(force: Bool = false) {
+        guard mapIsShown, !demoMode, let allTrails = sessionTrails else { return }
+        guard !mapBuildInFlight else {
+            mapBuildPending = true
+            mapBuildPendingForce = mapBuildPendingForce || force
+            return
+        }
+        // Following the most recent project would flip between projects as they
+        // trade places; the Map stays on the one it opened with until changed.
+        // A pinned project that moved follows its new path; one that is gone
+        // gives way to the most recent.
+        let paths = Set(projects.map(\.path))
+        if let pinned = mapProjectPath, !paths.contains(pinned), !projects.isEmpty {
+            let moved = projectLocations.relocatedPath(pinned)
+            mapProjectPath = paths.contains(moved) ? moved : projects.first?.path
+            return
+        }
+        if mapProjectPath == nil, let first = projects.first?.path {
+            mapProjectPath = first
+            return
+        }
+        guard let path = mapProject else {
+            projectMap = nil
+            mapInputs = nil
+            return
+        }
+        let live = liveSessions.map {
+            MapSnapshot.LiveMark(sourceID: $0.sourceID, sessionID: $0.sessionID, status: $0.status.rawValue)
+        }
+        mapLiveKey = Self.liveKey(liveSessions)
+        let sources = self.sources
+        let now = self.now
+        let range = mapRange
+        let calendar = activityCalendar
+        // Only the timeline folds lanes; the other views group branches themselves.
+        let collapseAbove = mapMode == .lanes && !mapShowsAllBranches ? Self.mapFoldThreshold : nil
+        let since = range.start(now: now, calendar: calendar)
+        // Live runs and lane ends grow with the clock, and a commit with no new edits
+        // changes only Git, so an unchanged map is still rebuilt once a minute.
+        let clockDue = force || projectMap == nil || mapIsStale
+        let previous = mapInputs
+        mapGeneration += 1
+        let generation = mapGeneration
+        mapBuildInFlight = true
+        mapQueue.async { [weak self] in
+            let trails = MapSnapshot.trails(allTrails, for: path)
+            let inputs = MapBuildInputs(path: path, range: range, calendar: calendar, collapseAbove: collapseAbove,
+                                        trails: trails, live: live)
+            guard clockDue || inputs != previous else {
+                DispatchQueue.main.async { [weak self] in self?.finishMapBuild(generation, nil) }
+                return
+            }
+            // A day before the first session in range shows where its branches
+            // started; the walk is always bounded. Cloud sessions count from
+            // their first commit, since they keep no local history.
+            let first = (trails.map(\.createdAt) + [GitHistoryReader.firstCloudCommit(checkout: path)].compactMap { $0 }).min()
+            let earliest = first.map { max($0, since ?? $0) } ?? since ?? now
+            let snapshot = MapSnapshot(projectPath: path, takenAt: now, sources: sources, trails: trails,
+                git: GitHistoryReader.read(checkout: path, since: earliest.addingTimeInterval(-86_400)), live: live)
+            let map = ProjectMap.build(snapshot, range: range, calendar: calendar, now: now, collapseAbove: collapseAbove)
+            DispatchQueue.main.async { [weak self] in
+                self?.finishMapBuild(generation, (map: map, inputs: inputs, at: now))
+            }
+        }
+    }
+
+    /// Ends a build, or a request skipped because nothing it depends on changed.
+    private func finishMapBuild(_ generation: Int, _ built: (map: ProjectMap, inputs: MapBuildInputs, at: Date)?) {
+        mapBuildInFlight = false
+        if mapGeneration == generation, let built {
+            mapInputs = built.inputs
+            lastMapBuild = built.at
+            if projectMap != built.map { projectMap = built.map }
+        }
+        if mapBuildPending {
+            let force = mapBuildPendingForce
+            mapBuildPending = false
+            mapBuildPendingForce = false
+            refreshMap(force: force)
+        }
+    }
+
+    /// A minute since the last build, or a clock that moved back past it.
+    private var mapIsStale: Bool { !(0..<60).contains(now.timeIntervalSince(lastMapBuild)) }
+
+    /// Profiles changed: nothing built from the old ones may show.
+    private func resetMap() {
+        mapGeneration += 1
+        sessionTrails = nil
+        projectMap = nil
+        mapInputs = nil
+        mapBuildPending = false
+        mapBuildPendingForce = false
+        mapProjectPath = nil
+    }
+
+    /// A session that starts, stops or changes status rebuilds the Map at once;
+    /// live runs growing with the clock rebuild it at most once a minute.
+    private func refreshMapForLive() {
+        guard mapIsShown else { return }
+        if Self.liveKey(liveSessions) != mapLiveKey {
+            refreshMap()
+        } else if projectMap?.spans.contains(where: { $0.live != nil }) == true, mapIsStale {
+            refreshMap()
+        }
+    }
+
+    private static func liveKey(_ sessions: [LiveAgentSession]) -> Set<String> {
+        Set(sessions.map { $0.sourceID + "\u{0}" + $0.sessionID + "\u{0}" + $0.status.rawValue })
     }
 
     /// A report from the last 10 s, allowing 5 s of clock skew, as the working
@@ -813,5 +1016,30 @@ private final class LocalIndexer: @unchecked Sendable {
         let created = CompositeActivityProvider(cacheURL: cacheURL, locationsURL: locationsURL)
         provider = created
         return created
+    }
+}
+
+/// Everything a Map build depends on besides the clock and Git: the project, how it is
+/// shown, its sessions' trails, and which of them report working or waiting, the only
+/// live states the Map draws.
+private struct MapBuildInputs: Equatable {
+    let path: String
+    let range: MapRange
+    let calendar: ActivityCalendar
+    let collapseAbove: Int?
+    let trails: [SessionTrail]
+    let live: Set<String>
+
+    init(path: String, range: MapRange, calendar: ActivityCalendar, collapseAbove: Int?,
+         trails: [SessionTrail], live: [MapSnapshot.LiveMark]) {
+        self.path = path
+        self.range = range
+        self.calendar = calendar
+        self.collapseAbove = collapseAbove
+        self.trails = trails
+        let ids = Set(trails.flatMap { trail in ([trail.sessionID] + trail.otherIDs).map { trail.sourceID + "\u{0}" + $0 } })
+        let drawn: Set<String> = [LiveStatus.working.rawValue, LiveStatus.waiting.rawValue]
+        self.live = Set(live.filter { drawn.contains($0.status) && ids.contains($0.sourceID + "\u{0}" + $0.sessionID) }
+            .map { $0.sourceID + "\u{0}" + $0.sessionID + "\u{0}" + $0.status })
     }
 }

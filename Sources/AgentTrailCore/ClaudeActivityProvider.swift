@@ -92,7 +92,8 @@ public final class ClaudeActivityProvider: ActivityProvider {
                                 edits[key] = ProjectEdits(sourceID: session.source.id, projectPath: session.projectPath)
                             }
                             for (id, edit) in entry.confirmedEdits {
-                                edits[key]?.record(id, edit, delegated: task.delegated)
+                                edits[key]?.record(id, edit, delegated: task.delegated,
+                                                   session: TrailOwner(id: session.id, createdAt: session.createdAt))
                             }
                         }
                     case .terminal(let session):
@@ -162,6 +163,8 @@ public final class ClaudeActivityProvider: ActivityProvider {
         let checkoutRoots: [String]
         let latestActivity: Date
         let createdAt: Date
+        /// The branches Desktop says this session wrote, with the folder of each.
+        var writtenBranches: [WrittenBranch] = []
     }
 
     /// A `claude` session started in a terminal. With no Desktop record, its own
@@ -207,6 +210,9 @@ public final class ClaudeActivityProvider: ActivityProvider {
         var createdAt: Double?
         var lastActivityAt: Double?
         var gitAnchors: [Anchor]?
+        /// "<folder>\u{0}<branch>" for each branch the session wrote. Read
+        /// leniently: a value in another shape never makes the record unreadable.
+        var writtenBranches: LenientStrings?
         struct Anchor: Decodable { var gitRoot: String? }
     }
 
@@ -292,7 +298,12 @@ public final class ClaudeActivityProvider: ActivityProvider {
                     projectPath: project, workspacePath: workspace,
                     checkoutRoots: Array(Set(roots)).sorted { $0.count > $1.count },
                     latestActivity: Date(timeIntervalSince1970: milliseconds / 1000),
-                    createdAt: Date(timeIntervalSince1970: creationMilliseconds / 1000)))
+                    createdAt: Date(timeIntervalSince1970: creationMilliseconds / 1000),
+                    writtenBranches: (record.writtenBranches?.values ?? []).compactMap { value in
+                        let parts = value.split(separator: "\u{0}", omittingEmptySubsequences: false)
+                        guard parts.count == 2, !parts[1].isEmpty, let folder = absolutePath(String(parts[0])) else { return nil }
+                        return WrittenBranch(workspacePath: folder, branch: String(parts[1]))
+                    }))
             } catch { unreadable += 1 }
         }
         if unreadable > 0 { notices.append("\(source.name): \(unreadable) coding-session metadata file(s) could not be read.") }
@@ -400,28 +411,69 @@ public final class ClaudeActivityProvider: ActivityProvider {
         return nil
     }
 
+    /// The session that keeps an edit's record, for its trail.
+    private struct TrailOwner {
+        let id: String
+        let createdAt: Date
+
+        func precedes(_ other: TrailOwner) -> Bool { (createdAt, id) < (other.createdAt, other.id) }
+    }
+
+    /// Strings from a JSON array; anything that is not a string array decodes as empty.
+    private struct LenientStrings: Decodable {
+        let values: [String]
+
+        init(from decoder: Decoder) throws {
+            guard var container = try? decoder.unkeyedContainer() else {
+                values = []
+                return
+            }
+            var values: [String] = []
+            while !container.isAtEnd {
+                if let value = try? container.decode(String.self) {
+                    values.append(value)
+                } else if (try? container.decode(DiscardedValue.self)) == nil {
+                    break
+                }
+            }
+            self.values = values
+        }
+
+        private struct DiscardedValue: Decodable {
+            init(from decoder: Decoder) throws {}
+        }
+    }
+
     private struct ProjectEdits {
         let sourceID: String
         let projectPath: String
         var byToolID: [String: ConfirmedEdit] = [:]
         /// Tool IDs whose earliest record exists only in subagent transcripts.
         var delegated: Set<String> = []
+        /// Desktop only: the session whose transcript holds the kept record.
+        var sessionByToolID: [String: TrailOwner] = [:]
 
         /// Keeps the first occurrence, as `firstOccurrence` does. An identical
         /// root copy clears the flag, so the result is independent of order.
-        mutating func record(_ id: String, _ edit: ConfirmedEdit, delegated isDelegated: Bool) {
+        /// Identical copies in two sessions stay with the one that began first.
+        mutating func record(_ id: String, _ edit: ConfirmedEdit, delegated isDelegated: Bool, session: TrailOwner? = nil) {
             guard let existing = byToolID[id] else {
                 byToolID[id] = edit
                 if isDelegated { delegated.insert(id) }
+                sessionByToolID[id] = session
                 return
             }
             let incomingWins = edit.date < existing.date || (edit.date == existing.date && edit.workspace < existing.workspace)
             let identical = edit.date == existing.date && edit.workspace == existing.workspace
             if incomingWins {
                 byToolID[id] = edit
+                sessionByToolID[id] = session
                 if isDelegated { delegated.insert(id) } else { delegated.remove(id) }
             } else if identical && !isDelegated {
                 delegated.remove(id)
+            }
+            if identical, let session, let owner = sessionByToolID[id], session.precedes(owner) {
+                sessionByToolID[id] = session
             }
         }
     }
@@ -439,7 +491,7 @@ public final class ClaudeActivityProvider: ActivityProvider {
                     let key = project.sourceID + "\u{0}" + path
                     let moved = ConfirmedEdit(date: edit.date, workspace: located(edit.workspace, edit.date))
                     relocated[key, default: ProjectEdits(sourceID: project.sourceID, projectPath: path)]
-                        .record(id, moved, delegated: project.delegated.contains(id))
+                        .record(id, moved, delegated: project.delegated.contains(id), session: project.sessionByToolID[id])
                 }
             }
         }
@@ -477,9 +529,27 @@ public final class ClaudeActivityProvider: ActivityProvider {
                 edits: stored, delegatedEdits: recorded?.delegated ?? [])
         }
         let folded = HistoryFold.fold(terminal, resolver: resolver)
+        var desktopEdits: [String: [TrailEdit]] = [:]
+        for project in relocated.values {
+            for (id, edit) in project.byToolID {
+                guard let session = project.sessionByToolID[id]?.id else { continue }
+                desktopEdits[project.sourceID + "\u{0}" + session, default: []].append(TrailEdit(date: edit.date,
+                    projectPath: project.projectPath, workspacePath: edit.workspace, delegated: project.delegated.contains(id)))
+            }
+        }
+        let desktopTrails = metadata.sessions.map { session in
+            SessionTrail(sourceID: session.source.id, sessionID: session.id,
+                projectPath: located(session.projectPath, session.createdAt),
+                createdAt: session.createdAt, latestActivity: session.latestActivity,
+                edits: desktopEdits[session.source.id + "\u{0}" + session.id] ?? [],
+                writtenBranches: session.writtenBranches.map {
+                    WrittenBranch(workspacePath: located($0.workspacePath, session.createdAt), branch: $0.branch)
+                }, otherIDs: session.cliIDs.sorted())
+        }
         return ScanResult(projects: ProjectSummary.merge(sessionActivity + editActivity + folded.activity),
             notices: Array(Set(metadata.notices + extraNotices)).sorted(),
-            sessionProjects: folded.associations, missingFolders: folded.missingFolders)
+            sessionProjects: folded.associations, missingFolders: folded.missingFolders,
+            sessionTrails: SessionTrail.merge(desktopTrails + folded.trails))
     }
 
     private enum Owner {

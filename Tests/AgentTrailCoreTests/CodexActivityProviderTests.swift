@@ -540,6 +540,11 @@ final class CodexActivityProviderTests: XCTestCase {
         let activity = try XCTUnwrap(project.activities.first)
         XCTAssertEqual(activity.editMoments, [EditMoment(date: fixture.date(10)), EditMoment(date: fixture.date(20), delegated: true)])
         XCTAssertEqual(activity.sessionStarts, [fixture.date(0), fixture.date(5)])
+        // Each edit sits on one trail: the repeated copy stays the parent's.
+        XCTAssertEqual(result.sessionTrails.map(\.sessionID), ["session-1", "helper"])
+        XCTAssertEqual(result.sessionTrails.map(\.parentSessionID), [nil, "session-1"])
+        XCTAssertEqual(result.sessionTrails.map { $0.edits.map(\.date) }, [[fixture.date(10)], [fixture.date(20)]])
+        XCTAssertEqual(result.sessionTrails.flatMap(\.edits).map(\.delegated), [false, true])
     }
 
     func testMomentInvariantsHoldAcrossCheckoutsAndMissingFolders() throws {

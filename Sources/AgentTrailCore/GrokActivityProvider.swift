@@ -226,7 +226,8 @@ public final class GrokActivityProvider: ActivityProvider {
             notices.append("Grok: edit history is unavailable for \(missingHistory) session(s).")
         }
         return ScanResult(projects: ProjectSummary.merge(folded.activity), notices: Array(Set(notices)).sorted(),
-            sessionProjects: folded.associations, missingFolders: folded.missingFolders)
+            sessionProjects: folded.associations, missingFolders: folded.missingFolders,
+            sessionTrails: SessionTrail.merge(folded.trails))
     }
 
     @discardableResult
