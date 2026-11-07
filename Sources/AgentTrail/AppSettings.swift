@@ -23,6 +23,8 @@ enum AppSettings {
         static let colorTheme = "colorTheme"
         /// The Map window's details panel beside the map. Missing means shown.
         static let mapShowsDetails = "mapShowsDetails"
+        /// `AssistantKind` raw values whose "found on this Mac" suggestion was dismissed.
+        static let dismissedAssistantSuggestions = "dismissedAssistantSuggestions"
     }
 
     /// The four switches default to on. The preferred apps have no default:

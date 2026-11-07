@@ -190,7 +190,8 @@ public final class GrokLiveActivityProvider {
         switch status { case .waiting: return 0; case .working: return 1; case .idle: return 2; case .unknown: return 3 }
     }
 
-    private static func readProcessStartTimes(_ pids: Set<Int32>) -> [Int32: UInt64] {
+    /// Each live PID's start time in microseconds since 1970; dead and zombie PIDs are absent.
+    static func readProcessStartTimes(_ pids: Set<Int32>) -> [Int32: UInt64] {
         var result: [Int32: UInt64] = [:]
         for pid in pids where pid > 0 {
             var info = proc_bsdinfo()

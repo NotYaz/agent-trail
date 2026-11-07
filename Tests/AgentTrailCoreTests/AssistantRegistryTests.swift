@@ -47,7 +47,7 @@ final class AssistantRegistryTests: XCTestCase {
         XCTAssertEqual(AgentSource(id: "x", name: "X", configDirectory: "~/.codex", assistant: .codex).bundleIdentifier, "")
         XCTAssertFalse(AssistantKind.grok.descriptor.reportsDelegation)
         XCTAssertEqual(AssistantKind.grok.descriptor.hosting, .terminal)
-        XCTAssertEqual(AssistantKind.homeEnvironmentVariables, ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME"])
+        XCTAssertEqual(AssistantKind.homeEnvironmentVariables, ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "COPILOT_HOME"])
     }
 
     func testListedNames() {
@@ -55,7 +55,7 @@ final class AssistantRegistryTests: XCTestCase {
         XCTAssertEqual(AssistantKind.listed(["A"]), "A")
         XCTAssertEqual(AssistantKind.listed(["A", "B"], conjunction: "or"), "A or B")
         XCTAssertEqual(AssistantKind.listed(["A", "B", "C"]), "A, B, and C")
-        XCTAssertEqual(AssistantKind.listedNames(), "Claude, Codex, and Grok")
+        XCTAssertEqual(AssistantKind.listedNames(), "Claude, Codex, Grok, and Copilot")
     }
 
     func testStatsIndexReadsDelegationFromDescriptor() {
@@ -74,5 +74,31 @@ final class AssistantRegistryTests: XCTestCase {
         let reported = Dictionary(uniqueKeysWithValues: zip(index.sourceOrder, index.reportsDelegation))
         XCTAssertEqual(reported["claude-primary"], true)
         XCTAssertEqual(reported["grok"], false)
+    }
+}
+
+final class AssistantDetectionTests: XCTestCase {
+    func testSuggestsOnlyAssistantsWithSessionsAndNoProfile() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("agent-trail-detect-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let files = FileManager.default
+        // An empty VS Code storage folder is not Copilot use.
+        try files.createDirectory(at: home.appendingPathComponent("Library/Application Support/Code/User/workspaceStorage/a/chatSessions"),
+                                  withIntermediateDirectories: true)
+        try files.createDirectory(at: home.appendingPathComponent(".grok/sessions/x"), withIntermediateDirectories: true)
+        let configured = [AgentSource(id: "claude-primary", name: "Claude", configDirectory: "~/.claude")]
+        XCTAssertEqual(AssistantDetection.suggestions(configured: configured, home: home.path).map(\.assistant), [.grok])
+        try Data("{}".utf8).write(to: home.appendingPathComponent("Library/Application Support/Code/User/workspaceStorage/a/chatSessions/s.jsonl"))
+        let found = AssistantDetection.suggestions(configured: configured, home: home.path)
+        XCTAssertEqual(found.map(\.assistant), [.grok, .copilot])
+        let copilot = try XCTUnwrap(found.last)
+        XCTAssertEqual(copilot.id, "copilot")
+        XCTAssertEqual(copilot.configDirectory, "~/.copilot")
+        try ProfileConfiguration(sources: configured + found).validate()
+        // A profile of that assistant, whatever its id, covers it; ids never collide.
+        let taken = configured + [AgentSource(id: "copilot", name: "Mine", configDirectory: "~/x", assistant: .claude)]
+        XCTAssertEqual(AssistantDetection.suggestions(configured: taken, home: home.path).last?.id, "copilot-2")
+        let covered = configured + [AgentSource(id: "work", name: "Work", configDirectory: "~/w", assistant: .copilot)]
+        XCTAssertFalse(AssistantDetection.suggestions(configured: covered, home: home.path).contains { $0.assistant == .copilot })
     }
 }

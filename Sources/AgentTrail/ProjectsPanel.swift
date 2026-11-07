@@ -164,6 +164,7 @@ struct AgentTrailPanel: View {
 
     @ViewBuilder private func rows(_ projects: [ProjectOverview], notices: [String]) -> some View {
         if showsIndexingCaption { indexingCaption }
+        if let suggestion = store.assistantSuggestions.first { suggestionRow(suggestion) }
         if store.projectOverviews.isEmpty && store.isScanning {
             loadingState
         } else if projects.isEmpty {
@@ -397,6 +398,41 @@ struct AgentTrailPanel: View {
         sharedOnly = false
         workingOnly = false
         waitingOnly = false
+    }
+
+    // MARK: Suggestions
+
+    /// An assistant with sessions on this Mac that no profile reads yet.
+    private func suggestionRow(_ suggestion: AgentSource) -> some View {
+        let name = suggestion.assistant.displayName
+        return HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "plus.circle")
+                .font(Theme.Typeface.title)
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(name) sessions found on this Mac")
+                    .font(Theme.Typeface.caption.weight(.semibold))
+                Text("Add a \(name) profile to see its projects and edits here.")
+                    .font(Theme.Typeface.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+            Button("Not now") { store.dismissSuggestion(suggestion.assistant) }
+                .buttonStyle(.borderless)
+                .font(Theme.Typeface.caption)
+            Button("Add profile") { store.addSuggestedProfile(suggestion) }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, Theme.Space.cardPadding)
+        .padding(.vertical, 10)
+        .cardSurface()
+        .padding(.horizontal, Theme.Space.gutter)
+        .padding(.top, Theme.Space.xxs)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(name) sessions found on this Mac")
     }
 
     // MARK: Notices

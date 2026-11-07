@@ -6,6 +6,7 @@ public enum AssistantKind: String, Codable, CaseIterable, Sendable {
     case claude
     case codex
     case grok
+    case copilot
 
     public var displayName: String { descriptor.displayName }
 

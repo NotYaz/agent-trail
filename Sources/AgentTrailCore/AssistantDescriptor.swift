@@ -6,7 +6,7 @@ public enum AssistantHosting: Sendable, Equatable {
     case desktopApp
     /// Its own app or a terminal; the live reader names the host per session (Codex).
     case appOrTerminal
-    /// A command-line agent running in a terminal (Grok).
+    /// A command-line agent running in a terminal (Grok, the Copilot CLI).
     case terminal
 }
 
@@ -29,8 +29,17 @@ public struct AssistantDescriptor: Sendable {
     public let defaultBundleIdentifier: String
     /// True when a profile must name the assistant's desktop app.
     public let requiresBundleIdentifier: Bool
-    /// True when a profile pairs its home with a desktop data folder.
+    /// True when a profile pairs its home with an app's data folder (Claude
+    /// Desktop's, or VS Code's for Copilot).
     public let usesUserDataDirectory: Bool
+    /// The data folder a profile with the default home reads when it names none.
+    public let defaultUserDataDirectory: String?
+    /// True when a profile with a custom home must name its data folder.
+    public let requiresUserDataDirectory: Bool
+    /// Settings copy for the data folder field.
+    public let userDataTitle: String?
+    public let userDataPlaceholder: String?
+    public let userDataNote: String?
     /// False when the assistant records no subagents or spawned sessions, so
     /// Growth shows "not reported" instead of a false 0% delegated.
     public let reportsDelegation: Bool
@@ -54,20 +63,39 @@ extension AssistantKind {
             return AssistantDescriptor(kind: self, displayName: "Claude", homeTitle: "Claude config folder",
                 homeFolder: ".claude", homeEnvironmentVariable: "CLAUDE_CONFIG_DIR", hosting: .desktopApp,
                 defaultBundleIdentifier: "com.anthropic.claudefordesktop", requiresBundleIdentifier: true,
-                usesUserDataDirectory: true, reportsDelegation: true, delegationOrigin: "a Claude subagent",
+                usesUserDataDirectory: true, defaultUserDataDirectory: "~/Library/Application Support/Claude",
+                requiresUserDataDirectory: true, userDataTitle: "Desktop user-data folder",
+                userDataPlaceholder: "Default Claude desktop profile",
+                userDataNote: "Leave blank only for the default Claude profile. For custom config folders, enter the matching --user-data-dir folder.",
+                reportsDelegation: true, delegationOrigin: "a Claude subagent",
                 editEvidence: "Claude's Edit and Write tools", worktreeFolder: ".claude")
         case .codex:
             return AssistantDescriptor(kind: self, displayName: "Codex", homeTitle: "Codex home",
                 homeFolder: ".codex", homeEnvironmentVariable: "CODEX_HOME", hosting: .appOrTerminal,
                 defaultBundleIdentifier: "", requiresBundleIdentifier: false,
-                usesUserDataDirectory: false, reportsDelegation: true, delegationOrigin: "a spawned Codex thread",
+                usesUserDataDirectory: false, defaultUserDataDirectory: nil, requiresUserDataDirectory: false,
+                userDataTitle: nil, userDataPlaceholder: nil, userDataNote: nil,
+                reportsDelegation: true, delegationOrigin: "a spawned Codex thread",
                 editEvidence: "Codex's completed file changes", worktreeFolder: ".codex")
         case .grok:
             return AssistantDescriptor(kind: self, displayName: "Grok", homeTitle: "Grok home",
                 homeFolder: ".grok", homeEnvironmentVariable: "GROK_HOME", hosting: .terminal,
                 defaultBundleIdentifier: "", requiresBundleIdentifier: false,
-                usesUserDataDirectory: false, reportsDelegation: false, delegationOrigin: nil,
+                usesUserDataDirectory: false, defaultUserDataDirectory: nil, requiresUserDataDirectory: false,
+                userDataTitle: nil, userDataPlaceholder: nil, userDataNote: nil,
+                reportsDelegation: false, delegationOrigin: nil,
                 editEvidence: "Grok's completed write and search-replace calls", worktreeFolder: nil)
+        case .copilot:
+            // One profile reads the Copilot CLI's home and VS Code's chat storage.
+            return AssistantDescriptor(kind: self, displayName: "Copilot", homeTitle: "Copilot CLI home",
+                homeFolder: ".copilot", homeEnvironmentVariable: "COPILOT_HOME", hosting: .terminal,
+                defaultBundleIdentifier: "", requiresBundleIdentifier: false,
+                usesUserDataDirectory: true, defaultUserDataDirectory: "~/Library/Application Support/Code",
+                requiresUserDataDirectory: false, userDataTitle: "VS Code user-data folder",
+                userDataPlaceholder: "VS Code's default folder, with the default home",
+                userDataNote: "Copilot Chat sessions are read from this VS Code folder, and Copilot CLI sessions from the home above. With the default ~/.copilot home, leave it blank to read VS Code's default folder; with another home, enter the VS Code folder whose chats to read. Insiders uses ~/Library/Application Support/Code - Insiders.",
+                reportsDelegation: true, delegationOrigin: "a Copilot subagent",
+                editEvidence: "Copilot's applied edit and create-file calls", worktreeFolder: nil)
         }
     }
 
@@ -107,6 +135,7 @@ protocol HistoryAdapter: AnyObject {
 extension ClaudeActivityProvider: HistoryAdapter {}
 extension CodexActivityProvider: HistoryAdapter {}
 extension GrokActivityProvider: HistoryAdapter {}
+extension CopilotActivityProvider: HistoryAdapter {}
 
 /// Builds each assistant's readers. One exhaustive switch per reader kind, so
 /// a new assistant cannot be left out of scans, cache flushes or live status.
@@ -116,6 +145,7 @@ enum AssistantRegistry {
         case .claude: return ClaudeActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .codex: return CodexActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .grok: return GrokActivityProvider(cacheURL: cacheURL, resolver: resolver)
+        case .copilot: return CopilotActivityProvider(cacheURL: cacheURL, resolver: resolver)
         }
     }
 
@@ -130,6 +160,9 @@ enum AssistantRegistry {
             return { reader.scan(sources: $0, now: $1) }
         case .grok:
             let reader = GrokLiveActivityProvider()
+            return { reader.scan(sources: $0, now: $1) }
+        case .copilot:
+            let reader = CopilotLiveActivityProvider()
             return { reader.scan(sources: $0, now: $1) }
         }
     }
