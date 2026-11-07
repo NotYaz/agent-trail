@@ -45,6 +45,14 @@
       "assistant": "opencode",
       "configDirectory": "~/.local/share/opencode",
       "bundleIdentifier": ""
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "assistant": "cursor",
+      "configDirectory": "~/.cursor",
+      "userDataDirectory": "~/Library/Application Support/Cursor",
+      "bundleIdentifier": ""
     }
   ]
 }
