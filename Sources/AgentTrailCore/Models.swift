@@ -7,6 +7,7 @@ public enum AssistantKind: String, Codable, CaseIterable, Sendable {
     case codex
     case grok
     case copilot
+    case opencode
 
     public var displayName: String { descriptor.displayName }
 

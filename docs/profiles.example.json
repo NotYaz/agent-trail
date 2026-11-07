@@ -38,6 +38,13 @@
       "configDirectory": "~/.copilot",
       "userDataDirectory": "~/Library/Application Support/Code",
       "bundleIdentifier": ""
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "assistant": "opencode",
+      "configDirectory": "~/.local/share/opencode",
+      "bundleIdentifier": ""
     }
   ]
 }
