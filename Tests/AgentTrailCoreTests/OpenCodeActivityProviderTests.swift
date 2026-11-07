@@ -123,6 +123,83 @@ final class OpenCodeActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "ses_fork" }?.edits.count, 1)
     }
 
+    func testForkCopiesResolveWhereTheParentRanThemAfterTheParentMoves() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        let other = f.root.appendingPathComponent("other", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try f.git(other)
+        try f.createV2()
+        // The parent edits in the project, then moves to another checkout.
+        let copied = f.tool("call_1", "write", completed: 11, input: ["path": "a.txt"])
+        try f.session("ses_parent", directory: other, created: 0)
+        try f.message("msg_1", session: "ses_parent", seq: 1, created: 10, data: f.assistant([copied], created: 10, completed: 12))
+        try f.message("msg_2", session: "ses_parent", type: "user", seq: 2, created: 15, data: f.user(created: 15))
+        try f.message("msg_3", session: "ses_parent", type: "location-switched", seq: 3, created: 20, data: [
+            "location": ["directory": other.path],
+            "previous": ["location": ["directory": f.project.path]],
+            "time": ["created": f.ms(20)]
+        ])
+        // Forked before msg_2 after the move: it copies msg_1 but not the
+        // move, and is made in the folder the parent is in now.
+        try f.session("ses_fork", directory: other, created: 25, fork: "ses_parent")
+        try f.message("msg_1_fork", session: "ses_fork", seq: 1, created: 10, data: f.assistant([copied], created: 10, completed: 12))
+        try f.message("msg_4", session: "ses_fork", seq: 2, created: 26, data: f.assistant([
+            f.tool("call_4", "write", completed: 27, input: ["path": "b.txt"])], created: 26, completed: 28))
+        let result = f.provider().scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first { $0.path == canonicalPath(f.project.path) }?.recordedEditCount, 1)
+        XCTAssertEqual(result.projects.first { $0.path == canonicalPath(other.path) }?.recordedEditCount, 1)
+        // The copy stays the parent's; the fork keeps its own edit.
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "ses_parent" }?.edits.map(\.projectPath),
+                       [canonicalPath(f.project.path)])
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "ses_fork" }?.edits.map(\.projectPath),
+                       [canonicalPath(other.path)])
+    }
+
+    func testForkOwnStepsStartWhereTheForkWasMade() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        let second = f.root.appendingPathComponent("second", isDirectory: true)
+        let third = f.root.appendingPathComponent("third", isDirectory: true)
+        for folder in [second, third] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try f.git(folder)
+        }
+        try f.createV2()
+        func move(_ id: String, session: String, seq: Int, created: TimeInterval, from: URL, to: URL) throws {
+            try f.message(id, session: session, type: "location-switched", seq: seq, created: created, data: [
+                "location": ["directory": to.path],
+                "previous": ["location": ["directory": from.path]],
+                "time": ["created": f.ms(created)]
+            ])
+        }
+        let first = f.tool("call_1", "write", completed: 11, input: ["path": "a.txt"])
+        let moved = f.tool("call_2", "write", completed: 14, input: ["path": "b.txt"])
+        // The parent moves to `second` and edits there, then moves on to `third`.
+        try f.session("ses_parent", directory: third, created: 0)
+        try f.message("msg_1", session: "ses_parent", seq: 1, created: 10, data: f.assistant([first], created: 10, completed: 12))
+        try move("msg_2", session: "ses_parent", seq: 2, created: 12, from: f.project, to: second)
+        try f.message("msg_3", session: "ses_parent", seq: 3, created: 13, data: f.assistant([moved], created: 13, completed: 15))
+        try f.message("msg_4", session: "ses_parent", type: "user", seq: 4, created: 16, data: f.user(created: 16))
+        try move("msg_5", session: "ses_parent", seq: 5, created: 18, from: second, to: third)
+        // Forked before msg_4: it copies the first move, and is made in `third`.
+        try f.session("ses_fork", directory: third, created: 25, fork: "ses_parent")
+        try f.message("msg_1_fork", session: "ses_fork", seq: 1, created: 10, data: f.assistant([first], created: 10, completed: 12))
+        try move("msg_2_fork", session: "ses_fork", seq: 2, created: 12, from: f.project, to: second)
+        try f.message("msg_3_fork", session: "ses_fork", seq: 3, created: 13, data: f.assistant([moved], created: 13, completed: 15))
+        try f.message("msg_6", session: "ses_fork", seq: 4, created: 26, data: f.assistant([
+            f.tool("call_3", "write", completed: 27, input: ["path": "c.txt"])], created: 26, completed: 28))
+        let result = f.provider().scan(sources: [f.source])
+        for (folder, count) in [(f.project, 1), (second, 1), (third, 1)] {
+            XCTAssertEqual(result.projects.first { $0.path == canonicalPath(folder.path) }?.recordedEditCount, count,
+                           folder.lastPathComponent)
+        }
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "ses_parent" }?.edits.map(\.projectPath),
+                       [f.project, second].map { canonicalPath($0.path) })
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "ses_fork" }?.edits.map(\.projectPath),
+                       [canonicalPath(third.path)])
+    }
+
     func testEditsOutsideTheSessionFolderAndAnyCheckoutDoNotCount() throws {
         let f = try OpenCodeFixture()
         defer { f.remove() }
@@ -300,6 +377,29 @@ final class OpenCodeActivityProviderTests: XCTestCase {
         let notices = f.provider().scan(sources: [f.source]).notices
         XCTAssertEqual(notices.count, 1)
         XCTAssertTrue(notices.first?.contains("before 1.2") == true, "\(notices)")
+    }
+
+    func testADatabaseFileTheProfileNamesIsReadWhateverItIsCalled() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        // OPENCODE_DB takes any file name.
+        try f.createV2(in: "history.sqlite")
+        try f.session("ses_a", directory: f.project, created: 0, in: "history.sqlite")
+        try f.message("msg_1", session: "ses_a", seq: 1, created: 10, data: f.assistant([
+            f.tool("call_1", "write", completed: 11, input: ["path": "a.txt"])], created: 10, completed: 12),
+            in: "history.sqlite")
+        let named = AgentSource(id: "opencode", name: "OpenCode",
+                                configDirectory: f.data.appendingPathComponent("history.sqlite").path, assistant: .opencode)
+        let result = f.provider().scan(sources: [named])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(result.notices, [])
+        // A named file that is not a database says so, not that no history exists.
+        let notes = f.root.appendingPathComponent("notes.txt")
+        try Data(String(repeating: "not a database\n", count: 400).utf8).write(to: notes)
+        let text = AgentSource(id: "opencode", name: "OpenCode", configDirectory: notes.path, assistant: .opencode)
+        let notices = f.provider().scan(sources: [text]).notices
+        XCTAssertTrue(notices.contains { $0.contains("could not be opened read-only") }, "\(notices)")
+        XCTAssertFalse(notices.contains { $0.contains("no local OpenCode history") }, "\(notices)")
     }
 
     func testUnknownTablesAreReportedNotGuessed() throws {

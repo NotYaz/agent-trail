@@ -4,7 +4,8 @@ import Foundation
 /// serve`, and the OpenCode desktop app, which all write one store.
 ///
 /// The profile's folder is OpenCode's data folder (`~/.local/share/opencode`,
-/// or `$XDG_DATA_HOME/opencode`), or a database file it names (`OPENCODE_DB`).
+/// or `$XDG_DATA_HOME/opencode`), or a database file it names (`OPENCODE_DB`),
+/// whatever that file is called.
 /// The folder's `opencode.db`, and `opencode-<channel>.db` for other release
 /// channels, is one SQLite database read strictly through `ReadOnlySQLite`.
 /// `opencode-next.db` is skipped: OpenCode 2 imports it into `opencode.db`.
@@ -32,12 +33,15 @@ import Foundation
 /// import finished (`kv` `migration.v1-v2`). A 1.x session missing from
 /// OpenCode 2's tables and older than the import was deleted there. The edits
 /// of a staged revert do not count; a committed revert deletes them. A
-/// subagent session names its parent; a fork's copied edits keep their call id
-/// and time, so they count once. Shell commands, failed, denied or unfinished
-/// tools and file modification times are never evidence. The cache keeps ids,
-/// times and folder paths only: no prompts, tool input, diffs or file content.
+/// subagent session names its parent. A fork's copied edits keep their call id
+/// and time and resolve in the folders its parent ran them in, so they count
+/// once; its own steps start in the folder it was made in. Shell commands,
+/// failed, denied or unfinished tools and file modification times are never
+/// evidence. The cache keeps ids, times and folder paths only: no prompts,
+/// tool input, diffs or file content.
 public final class OpenCodeActivityProvider: ActivityProvider {
-    static let cacheVersion = 1
+    /// 2: a fork's copied edits resolve in its parent's folders.
+    static let cacheVersion = 2
     private let cache: HistoryCache<OpenCodeStore>
     private let resolver: GitProjectResolver
     private let ownsResolver: Bool
@@ -113,6 +117,8 @@ public final class OpenCodeActivityProvider: ActivityProvider {
             return "\(source.name): \(skipped) OpenCode session(s) could not be read; they are read again when they change."
         case .busy:
             return "\(source.name): the OpenCode database was busy; its newest history is read on the next scan."
+        case .interrupted:
+            return "\(source.name): reading the OpenCode database took too long; its newest history is read on the next scan."
         case .unreadable:
             return "\(source.name): the OpenCode database could not be opened read-only.\(kept)"
         case .unknownFormat:
@@ -143,11 +149,13 @@ public final class OpenCodeActivityProvider: ActivityProvider {
     }
 
     /// The profile's databases: `opencode.db` first, then other channels'
-    /// `opencode-<channel>.db`; or the database file the profile names.
+    /// `opencode-<channel>.db`; or the database file the profile names, by any
+    /// name, as `OPENCODE_DB` takes any. A file that is not an OpenCode
+    /// database gets the unreadable or unknown-format notice.
     static func databases(_ source: AgentSource) -> [URL] {
         let path = canonicalPath(source.configDirectory)
         guard let stat = FileStat.of(path) else { return [] }
-        if stat.kind == .regular { return path.hasSuffix(".db") ? [URL(fileURLWithPath: path)] : [] }
+        if stat.kind == .regular { return [URL(fileURLWithPath: path)] }
         guard stat.kind == .directory, let names = try? FileManager.default.contentsOfDirectory(atPath: path) else {
             return []
         }
@@ -307,7 +315,9 @@ enum OpenCodeDatabase {
     enum Outcome: Equatable {
         case unchanged
         case refreshed(skippedSessions: Int)
+        /// Busy or past a query's deadline: read again on the next scan.
         case busy
+        case interrupted
         case unreadable
         case unknownFormat
 
@@ -366,6 +376,8 @@ enum OpenCodeDatabase {
             return .refreshed(skippedSessions: skipped)
         } catch ReadOnlySQLite.Failure.busy {
             return .busy
+        } catch ReadOnlySQLite.Failure.interrupted {
+            return .interrupted
         } catch {
             return .unreadable
         }
@@ -412,15 +424,23 @@ enum OpenCodeDatabase {
             ? "CASE WHEN json_valid(s.revert) THEN json_extract(s.revert, '$.messageID') END" : "NULL"
         let worktree = layout.v2Projects ? "p.worktree" : "NULL"
         let join = layout.v2Projects ? " LEFT JOIN project p ON p.id = s.project_id" : ""
-        let rows = try db.rows("SELECT s.id, \(column("parent_id")), s.directory, s.time_created, \(column("time_busy")), \(column("time_idle")), \(column("time_suspended")), \(column("workspace_id")), \(revert), \(worktree), s.time_updated FROM session_v2 s\(join)",
+        let rows = try db.rows("SELECT s.id, \(column("parent_id")), s.directory, s.time_created, \(column("time_busy")), \(column("time_idle")), \(column("time_suspended")), \(column("workspace_id")), \(revert), \(worktree), s.time_updated, \(column("fork_session_id")) FROM session_v2 s\(join)",
                                maximumColumnBytes: 65_536)
         let messages = try counts(db, "SELECT session_id, count(*), max(time_created) FROM session_message GROUP BY session_id")
         var parts: [String: (count: Int64, latest: Int64)] = [:]
         if layout.v2Parts {
             parts = try counts(db, "SELECT session_id, count(*) FROM session_part GROUP BY session_id")
         }
+        // Each session's current folder, where a fork finds its parent.
+        var folders: [String: String] = [:]
+        for row in rows where row.count == 12 {
+            if let id = row[0].string,
+               let folder = row[2].string.flatMap(ProjectLocationRegistry.lexicalPath) ?? usableWorktree(row[9]) {
+                folders[id] = folder
+            }
+        }
         var result: [String: OpenCodeSession] = [:]
-        for row in rows where row.count == 11 {
+        for row in rows where row.count == 12 {
             guard let id = row[0].string, isSafeID(id), let created = moment(row[3]) else { continue }
             let message = messages[id]
             let fingerprint = (row.dropFirst().map { Self.describe($0) }
@@ -438,10 +458,13 @@ enum OpenCodeDatabase {
                 continue
             }
             let latest = message.flatMap { Self.milliseconds($0.latest) } ?? created
+            var fork: (parentID: String, directory: String?)?
+            if let parent = row[11].string, isSafeID(parent) { fork = (parentID: parent, directory: folders[parent]) }
             do {
                 guard var session = try extractV2(db, layout: layout, id: id,
                         recorded: row[2].string.flatMap(ProjectLocationRegistry.lexicalPath),
                         worktree: usableWorktree(row[9]), revertMessage: row[8].string, parentID: row[1].string,
+                        fork: fork, createdMilliseconds: row[3].int,
                         boundToWorkspace: row[7] != .null, created: created, latest: max(created, latest), now: now) else {
                     continue
                 }
@@ -450,6 +473,8 @@ enum OpenCodeDatabase {
                 result[id] = session
             } catch ReadOnlySQLite.Failure.busy {
                 throw ReadOnlySQLite.Failure.busy
+            } catch ReadOnlySQLite.Failure.interrupted {
+                throw ReadOnlySQLite.Failure.interrupted
             } catch {
                 skipped += 1
                 // Keep what was read before; it is read again when the session changes.
@@ -463,29 +488,65 @@ enum OpenCodeDatabase {
         return result
     }
 
+    /// `fork` names the parent a fork was made from and that parent's current
+    /// folder; `createdMilliseconds` is the session row's `time_created`.
     private static func extractV2(_ db: ReadOnlySQLite, layout: Layout, id: String, recorded: String?,
                                   worktree: String?, revertMessage: String?, parentID: String?,
+                                  fork: (parentID: String, directory: String?)?, createdMilliseconds: Int64?,
                                   boundToWorkspace: Bool, created: Date, latest: Date,
                                   now: Date) throws -> OpenCodeSession? {
         // Moves, in order. The first one's `previous` is where the session started.
-        var switches: [(seq: Int64, directory: String)] = []
-        var initial: String?
-        var sawSwitch = false
+        var moves: [(seq: Int64, directory: String?, previous: String?)] = []
         try db.each("SELECT seq, CASE WHEN json_valid(data) THEN json_extract(data, '$.location.directory') END, CASE WHEN json_valid(data) THEN json_extract(data, '$.previous.location.directory') END FROM session_message WHERE session_id = ?1 AND type = 'location-switched' ORDER BY seq",
                     bindings: [.text(id)], maximumColumnBytes: 65_536) { row in
             guard row.count == 3, let seq = row[0].int else { return true }
-            if !sawSwitch {
-                sawSwitch = true
-                initial = row[2].string.flatMap(ProjectLocationRegistry.lexicalPath)
-            }
-            if let directory = row[1].string.flatMap(ProjectLocationRegistry.lexicalPath) {
-                switches.append((seq: seq, directory: directory))
-            }
+            moves.append((seq: seq, directory: row[1].string.flatMap(ProjectLocationRegistry.lexicalPath),
+                          previous: row[2].string.flatMap(ProjectLocationRegistry.lexicalPath)))
             return true
         }
         // Legacy rows may hold an empty folder; the project's root stands in.
         let current = recorded ?? worktree
-        guard let start = initial ?? current else { return nil }
+
+        // A fork copies its parent's settled messages up to the fork point,
+        // keeping their seq and creation time, but none of the parent's later
+        // moves, and is made in the folder the parent is in by then. Its
+        // copied steps ran where the parent was (its first move's `previous`,
+        // else its folder); its own steps, numbered after the copies, start
+        // where the fork was made. Without the parent, copies resolve as before.
+        var copiedThrough: Int64?
+        var parentStart: String?
+        if let fork, let createdMilliseconds {
+            copiedThrough = try db.rows("SELECT max(seq) FROM session_message WHERE session_id = ?1 AND time_created < ?2",
+                                        bindings: [.text(id), .integer(createdMilliseconds)],
+                                        maximumColumnBytes: 1_024).first?.first?.int
+            if copiedThrough != nil, let parentFolder = fork.directory {
+                let first = try db.rows("SELECT CASE WHEN json_valid(data) THEN json_extract(data, '$.previous.location.directory') END FROM session_message WHERE session_id = ?1 AND type = 'location-switched' ORDER BY seq LIMIT 1",
+                                        bindings: [.text(fork.parentID)], maximumColumnBytes: 65_536).first?.first
+                parentStart = first?.string.flatMap(ProjectLocationRegistry.lexicalPath) ?? parentFolder
+            }
+        }
+        var switches: [(seq: Int64, directory: String)] = []
+        let start: String
+        if let copiedThrough {
+            let copied = moves.filter { $0.seq <= copiedThrough }
+            let made = moves.first(where: { $0.seq > copiedThrough })?.previous ?? current
+            guard let first = (copied.isEmpty ? parentStart : copied[0].previous) ?? made else { return nil }
+            start = first
+            for move in copied {
+                if let directory = move.directory { switches.append((seq: move.seq, directory: directory)) }
+            }
+            // The fork point, after every copied step.
+            if let made { switches.append((seq: copiedThrough, directory: made)) }
+            for move in moves where move.seq > copiedThrough {
+                if let directory = move.directory { switches.append((seq: move.seq, directory: directory)) }
+            }
+        } else {
+            guard let first = moves.first?.previous ?? current else { return nil }
+            start = first
+            for move in moves {
+                if let directory = move.directory { switches.append((seq: move.seq, directory: directory)) }
+            }
+        }
 
         // A staged revert restored the files of every later step.
         var boundary: Int64?
@@ -572,6 +633,8 @@ enum OpenCodeDatabase {
                 result[id] = session
             } catch ReadOnlySQLite.Failure.busy {
                 throw ReadOnlySQLite.Failure.busy
+            } catch ReadOnlySQLite.Failure.interrupted {
+                throw ReadOnlySQLite.Failure.interrupted
             } catch {
                 skipped += 1
                 if var old = previous[id] {

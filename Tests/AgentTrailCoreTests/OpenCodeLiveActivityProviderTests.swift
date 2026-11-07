@@ -18,12 +18,24 @@ final class OpenCodeLiveActivityProviderTests: XCTestCase {
     }
 
     /// A service process that started `offset` seconds after its registration was written.
+    /// `otherServers` lists other OpenCode servers; by default there are none.
     private func provider(_ f: OpenCodeFixture, registration: URL, pid: Int32 = 4242, offset: TimeInterval = -60,
-                          alive: Bool = true) -> OpenCodeLiveActivityProvider {
+                          alive: Bool = true,
+                          otherServers: @escaping () -> [Int32: UInt64]? = { [:] }) -> OpenCodeLiveActivityProvider {
         let written = FileStat.of(registration.path)?.modified ?? Date()
         let start = UInt64((written.timeIntervalSince1970 + offset) * 1_000_000)
         return OpenCodeLiveActivityProvider(processStartTimes: { pids in alive && pids.contains(pid) ? [pid: start] : [:] },
-                                            home: f.home.path)
+                                            otherServers: otherServers, home: f.home.path)
+    }
+
+    /// One row of OpenCode's event log, which it writes only with event persistence on.
+    private func event(_ f: OpenCodeFixture, session: String, seq: Int, _ type: String, reason: String? = nil) throws {
+        try f.exec("CREATE TABLE IF NOT EXISTS event (id text PRIMARY KEY, aggregate_id text NOT NULL, seq integer NOT NULL, created integer NOT NULL DEFAULT 0, type text NOT NULL, data text NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS event_aggregate_seq_idx ON event (aggregate_id, seq)")
+        var data: [String: Any] = ["sessionID": session]
+        if let reason { data["reason"] = reason }
+        let text = try f.json(data)
+        try f.run("INSERT INTO event (id, aggregate_id, seq, created, type, data) VALUES (?, ?, ?, ?, ?, ?)",
+                  ["evt_\(session)_\(seq)", session, seq, f.ms(recent), type, text])
     }
 
     func testExecutingSessionsAreWorkingAndAnOpenQuestionNeedsInput() throws {
@@ -68,7 +80,8 @@ final class OpenCodeLiveActivityProviderTests: XCTestCase {
         try f.session("ses_a", directory: f.project, created: 0, busy: recent)
         // A turn a dead process left mid-way two hours ago, before this service started.
         try f.session("ses_stale", directory: f.project, created: 0, busy: 0)
-        let unregistered = OpenCodeLiveActivityProvider(processStartTimes: { _ in [4242: 1] }, home: f.home.path)
+        let unregistered = OpenCodeLiveActivityProvider(processStartTimes: { _ in [4242: 1] }, otherServers: { [:] },
+                                                        home: f.home.path)
         XCTAssertEqual(unregistered.scan(sources: [f.source]).sessions, [], "no registered service")
         let registration = try register(f)
         XCTAssertEqual(provider(f, registration: registration).scan(sources: [f.source]).sessions.map(\.sessionID), ["ses_a"])
@@ -96,5 +109,64 @@ final class OpenCodeLiveActivityProviderTests: XCTestCase {
         XCTAssertNil(OpenCodeLiveActivityProvider.registeredPID(Data("{\"pid\": 1}".utf8)))
         XCTAssertNil(OpenCodeLiveActivityProvider.registeredPID(Data("{\"pid\": 42.5}".utf8)))
         XCTAssertNil(OpenCodeLiveActivityProvider.registeredPID(Data("{\"pid\": \"4242\"}".utf8)))
+    }
+
+    func testATurnLeftByAServerShutdownIsNotShown() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        try f.createV2()
+        // A private server shut down mid-turn and kept the execution for its next start.
+        try f.session("ses_left", directory: f.project, created: 0, busy: recent)
+        try event(f, session: "ses_left", seq: 1, "session.execution.started.1")
+        try event(f, session: "ses_left", seq: 2, "session.execution.interrupted.1", reason: "shutdown")
+        // The service resumed such a turn, which records a newer start.
+        try f.session("ses_resumed", directory: f.project, created: 0, busy: recent)
+        try event(f, session: "ses_resumed", seq: 1, "session.execution.interrupted.1", reason: "shutdown")
+        try event(f, session: "ses_resumed", seq: 2, "session.execution.started.1")
+        try event(f, session: "ses_resumed", seq: 3, "session.instructions.updated.2")
+        // Only a shutdown keeps a turn executing for a later start.
+        try f.session("ses_again", directory: f.project, created: 0, busy: recent)
+        try event(f, session: "ses_again", seq: 1, "session.execution.interrupted.1", reason: "user")
+        // Nothing logged: event persistence is off, as it is by default.
+        try f.session("ses_plain", directory: f.project, created: 0, busy: recent)
+        let registration = try register(f)
+        let snapshot = provider(f, registration: registration).scan(sources: [f.source])
+        XCTAssertEqual(Set(snapshot.sessions.map(\.sessionID)), ["ses_resumed", "ses_again", "ses_plain"])
+        XCTAssertEqual(Set(snapshot.sessions.map(\.status)), [.working])
+    }
+
+    func testAnotherOpenCodeServerOnTheDatabaseKeepsItsPossibleTurnsFromWorking() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        try f.createV2()
+        try f.session("ses_a", directory: f.project, created: 0, busy: recent)
+        let registration = try register(f)
+        let written = FileStat.of(registration.path)?.modified ?? Date()
+        func started(_ offset: TimeInterval) -> UInt64 { UInt64((written.timeIntervalSince1970 + offset) * 1_000_000) }
+        // `opencode acp` started a private server after this turn began, so it is not running it.
+        let later = provider(f, registration: registration, otherServers: { [5151: started(0)] })
+        XCTAssertEqual(later.scan(sources: [f.source]).sessions.map(\.status), [.working])
+
+        // One running since before the turn began might be running it.
+        var running: [Int32: UInt64]? = [5151: started(-30)]
+        let live = provider(f, registration: registration, otherServers: { running })
+        let unknown = live.scan(sources: [f.source]).sessions
+        XCTAssertEqual(unknown.map(\.status), [.unknown])
+        XCTAssertEqual(unknown.first?.pid, 4242)
+        // That server is gone and the turn is still executing: it may be one its shutdown left behind.
+        running = [:]
+        XCTAssertEqual(live.scan(sources: [f.source]).sessions, [])
+        // The session's next turn is the service's.
+        try f.run("UPDATE session_v2 SET time_busy = ? WHERE id = 'ses_a'", [f.ms(recent + 1)])
+        XCTAssertEqual(live.scan(sources: [f.source]).sessions.map(\.status), [.working])
+        // When processes cannot be listed, no turn is verified as the service's.
+        running = nil
+        XCTAssertEqual(live.scan(sources: [f.source]).sessions.map(\.status), [.unknown])
+
+        XCTAssertTrue(OpenCodeLiveActivityProvider.isOtherServer(["/opt/homebrew/bin/opencode", "serve", "--stdio", "--port", "0"]))
+        XCTAssertTrue(OpenCodeLiveActivityProvider.isOtherServer(["opencode", "serve", "--port", "4096"]))
+        XCTAssertFalse(OpenCodeLiveActivityProvider.isOtherServer(["/Applications/OpenCode.app/Contents/Resources/opencode-cli", "serve", "--service"]))
+        XCTAssertFalse(OpenCodeLiveActivityProvider.isOtherServer(["opencode", "acp"]))
+        XCTAssertFalse(OpenCodeLiveActivityProvider.isOtherServer(["opencode"]))
     }
 }
