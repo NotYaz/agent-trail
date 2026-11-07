@@ -73,6 +73,22 @@ final class QwenLiveActivityProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.notices.count, 1, "\(snapshot.notices)")
     }
 
+    func testRecordsFromAnotherPIDNamespaceOrMachineAreSkipped() throws {
+        let f = try QwenFixture()
+        defer { f.remove() }
+        // A Linux container or VM sharing this Qwen home records its PID namespace and start token.
+        try register(f, pid: 4242, fields: ["pidNs": 4_026_531_836, "procStart": "6c1e0b8a-0d5f-4a8e-9b7c-1d2e3f405162:123456"])
+        try register(f, pid: 4243, fields: ["pidNs": 4_026_532_001])
+        try register(f, pid: 4244, fields: ["procStart": "abc:123"])
+        // A Mac writer records both as null.
+        try register(f, pid: 4245)
+        let snapshot = QwenLiveActivityProvider(processStartTimes: { pids in
+            Dictionary(uniqueKeysWithValues: pids.map { ($0, UInt64(1_792_999_000) * 1_000_000) })
+        }, terminalHints: { _ in nil }).scan(sources: [f.source], now: registered.addingTimeInterval(600))
+        XCTAssertEqual(snapshot.sessions.map(\.pid), [4245])
+        XCTAssertEqual(snapshot.notices, [])
+    }
+
     func testRecordNames() {
         XCTAssertEqual(QwenLiveActivityProvider.recordPID("4242.json"), 4242)
         XCTAssertEqual(QwenLiveActivityProvider.recordPID("4242-0a1b2c3d.json"), 4242)

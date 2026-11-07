@@ -11,23 +11,29 @@ import Foundation
 ///
 /// One confirmed edit is a `tool_result` record of an `edit` (formerly
 /// `replace`), `write_file` or `notebook_edit` call whose `toolCallResult`
-/// status is `success`. Its file is the result's `resultDisplay.filePath`,
-/// else the call's own absolute path argument; its time is the record's.
-/// Records `/branch` and `--fork-session` copied from another session
-/// (`forkedFrom`) are skipped, so an edit counts for the session that made it.
+/// status is `success`, called directly or through the `tool_call` bridge
+/// (which reaches deferred tools). A call the headless loop skipped without
+/// running is recorded as `success` too, with `executionStatus: not_started`,
+/// and never counts. Its file is the result's `resultDisplay.filePath`, else
+/// the call's own absolute path argument; its time is the record's. Records
+/// `/branch` and `--fork-session` copied from another session (`forkedFrom`)
+/// are skipped, so an edit counts for the session that made it.
 ///
 /// A subagent's transcript, `projects/<folder>/subagents/<session id>/
 /// agent-<id>.jsonl`, records no status: there an edit counts when Qwen
 /// answered the call with `output` and no `error`, which is how it reports
 /// every successful call (failed and cancelled ones carry `error`). Those
-/// edits join the parent session as delegated.
+/// edits join the parent session as delegated. A subagent run by an external
+/// executor (another ACP agent) answers every call with `{input, toolName,
+/// output, content, status}`, failed ones included; those never count, and
+/// that agent's own history records its edits.
 ///
 /// Shell commands, failed or cancelled calls and file modification times are
 /// never evidence, and nothing in a session's working folder is read: paths
 /// stay the strings Qwen recorded. The cache keeps ids, times and folder
 /// paths only: no prompts, code, diffs or file content.
 public final class QwenActivityProvider: ActivityProvider {
-    static let cacheVersion = 1
+    static let cacheVersion = 2
     private let cache: HistoryCache<QwenFile>
     private let files = FileManager.default
     private let resolver: GitProjectResolver
@@ -342,8 +348,18 @@ struct QwenLog: Codable, Equatable {
         guard let parts = (message as? [String: Any])?["parts"] as? [Any] else { return }
         for case let part as [String: Any] in parts {
             guard let call = part["functionCall"] as? [String: Any], let id = call["id"] as? String, !id.isEmpty,
-                  id.utf8.count <= 512, let name = call["name"] as? String, Self.editTools.contains(name) else { continue }
-            let arguments = call["args"] as? [String: Any] ?? [:]
+                  id.utf8.count <= 512, let called = call["name"] as? String else { continue }
+            var name = called
+            var arguments = call["args"] as? [String: Any] ?? [:]
+            if name == "tool_call" {
+                // The bridge to a deferred tool (built-in edit tools are
+                // deferred when `tools.eager` leaves them out): `{name,
+                // arguments}`, the name matched without regard to case.
+                guard let target = arguments["name"] as? String else { continue }
+                name = target.lowercased()
+                arguments = arguments["arguments"] as? [String: Any] ?? [:]
+            }
+            guard Self.editTools.contains(name) else { continue }
             let raw = (arguments["file_path"] as? String) ?? (arguments["notebook_path"] as? String)
             let path = raw.flatMap { $0.hasPrefix("/") ? ProjectLocationRegistry.lexicalPath($0) : nil }
             // Calls that never got a result (a crash) are dropped in bulk.
@@ -370,13 +386,21 @@ struct QwenLog: Codable, Equatable {
         }
         guard let id = callID ?? responseID, !id.isEmpty, id.utf8.count <= 512 else { return }
         let call = pending.removeValue(forKey: id)
-        guard let name = responseName ?? call?.name, Self.editTools.contains(name) else { return }
+        // A bridged call is answered as `tool_call`; its call names the tool it ran.
+        let resolved = responseName == "tool_call" ? call?.name : (responseName ?? call?.name)
+        guard let name = resolved, Self.editTools.contains(name) else { return }
+        // Skipped without running (a sibling of `structured_output` in a
+        // headless turn), yet recorded with status `success`.
+        if info["executionStatus"] as? String == "not_started" { return }
         if let status = info["status"] as? String {
             guard status == "success" else { return }
         } else {
             // Subagent transcripts record no status. Qwen answers every
             // successful call with `output`, every failed or cancelled one with `error`.
-            guard sidechain, let answer = response, answer["output"] is String, answer["error"] == nil else { return }
+            // An external executor's `{input, toolName, output, content, status}`
+            // looks the same whatever the outcome, so it is not evidence.
+            guard sidechain, let answer = response, answer["status"] == nil, answer["toolName"] == nil,
+                  answer["input"] == nil, answer["output"] is String, answer["error"] == nil else { return }
         }
         let display = info["resultDisplay"] as? [String: Any]
         let recorded = (display?["filePath"] as? String).flatMap { $0.hasPrefix("/") ? ProjectLocationRegistry.lexicalPath($0) : nil }
