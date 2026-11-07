@@ -34,6 +34,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let togglePanel: () -> Void
     private let showPanel: () -> Void
     private let closePanel: () -> Void
+    private let showSwitcher: () -> Void
 
     private var cancellables: Set<AnyCancellable> = []
     /// Notification tokens. The controller lives as long as the app.
@@ -55,13 +56,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var button: NSStatusBarButton? { statusItem.button }
 
     /// `togglePanel` runs on a plain click, `showPanel` for "Open Agent Trail",
-    /// and `closePanel` before the session menu opens.
+    /// `closePanel` before the session menu opens, and `showSwitcher` for "Session Switcher…".
     init(store: AppStore, togglePanel: @escaping () -> Void, showPanel: @escaping () -> Void,
-         closePanel: @escaping () -> Void) {
+         closePanel: @escaping () -> Void, showSwitcher: @escaping () -> Void) {
         self.store = store
         self.togglePanel = togglePanel
         self.showPanel = showPanel
         self.closePanel = closePanel
+        self.showSwitcher = showSwitcher
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         overlay = StatusTrailOverlay(frame: .zero)
         motion = StatusMotion.read(screensAsleep: false)
@@ -180,9 +182,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if rose { bounce() }
     }
 
-    /// The panel's view of live sessions: deduplicated and counted on their projects.
     private func liveSessions() -> [LiveAgentSession] {
-        store.projectOverviews.flatMap { overview -> [LiveAgentSession] in overview.live?.sessions ?? [] }
+        store.panelLiveSessions
     }
 
     /// A session went from working to idle, and nothing works or waits now.
@@ -379,6 +380,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if ordered.isEmpty { menu.addItem(placeholderItem()) }
         menu.addItem(.separator())
         menu.addItem(openItem(title: "Open Agent Trail"))
+        menu.addItem(switcherItem())
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Agent Trail", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
@@ -421,6 +423,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return item
     }
 
+    /// Shows the system-wide shortcut, so the menu teaches it.
+    private func switcherItem() -> NSMenuItem {
+        let shortcut = store.demoMode ? SessionShortcut.off : AppSettings.sessionShortcut
+        let item = NSMenuItem(title: "Session Switcher…", action: #selector(openSwitcherFromMenu(_:)),
+                              keyEquivalent: shortcut.keyEquivalent)
+        item.keyEquivalentModifierMask = shortcut.modifierFlags
+        item.target = self
+        return item
+    }
+
     private func placeholderItem() -> NSMenuItem {
         let title: String
         // A valid configuration has at least one profile, so none means it failed
@@ -450,6 +462,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openPanelFromMenu(_ sender: Any?) {
         showPanel()
+    }
+
+    @objc private func openSwitcherFromMenu(_ sender: Any?) {
+        showSwitcher()
     }
 
     private func profileNames() -> [String: String] {

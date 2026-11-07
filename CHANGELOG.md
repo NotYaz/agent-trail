@@ -3,6 +3,14 @@
 ## Unreleased
 
 - **Jump with two Claude instances no longer opens the wrong one's Code home.** macOS hands every `claude://` link to the Claude instance launched first, whichever is in front; Agent Trail assumed the one in front got it. So Jump on a session of the instance launched later (for example Main, when Second was opened first) sent the link to the other instance, which showed its own Code home. Jump now opens the first instance's sessions directly. For any other instance's session it brings that instance forward with a hint naming the session, and it never sends that instance's link. If the open reports a different instance than expected, it shows the same hint. Since alpha.8, the release notes and README said the session's own instance comes forward and receives the link; that was true only for the instance launched first.
+- **A session switcher on a keyboard shortcut.** Press ⌃⌥J in any app to open a panel with every live session, needs input first, numbered 1–9.
+  - Type to filter by project, title, branch, folder, or profile. Return or ⌘1–⌘9 jumps, and so does a digit before you type a filter. Esc gives focus back to the app you were in.
+  - ⌃⌥⇧J jumps straight to the most urgent session without the list.
+  - Pick ⌃⌥J, ⌃⌥A, ⌃⌥⌘J, or Off in ⋯ › Session switcher. The right-click menu has **Session Switcher…** with the shortcut beside it.
+  - The shortcut needs no Accessibility or Input Monitoring permission. Its letter follows your keyboard layout, and if another app already registered the chord, the ⋯ menu says so.
+- The menu bar app now has an Edit menu, so ⌘X, ⌘C, ⌘V, ⌘A, and undo work in its text fields, the project search included.
+- **`agenttrail://` links.** `agenttrail://jump` opens the most urgent live session. Add `?project=NAME` to pick from one project, or `?session=ID` for one session. `agenttrail://switcher` opens the switcher. Shortcuts, Raycast, a Stream Deck, or `open` in a shell can drive jumps this way. Links only pick among live sessions Agent Trail already shows; anything else is ignored.
+- `AgentTrail --render-switcher-demo OUTPUT.png` draws the switcher with sample sessions.
 
 ## 0.1.0-alpha.12 — 2026-11-03
 

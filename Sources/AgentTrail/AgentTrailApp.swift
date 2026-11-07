@@ -6,10 +6,10 @@ import AgentTrailCore
 @main
 enum AgentTrailApp {
     private static let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo",
-                                      "--render-status-demo"]
+                                      "--render-status-demo", "--render-switcher-demo"]
     private static let usage = """
-        Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo|--render-status-demo OUTPUT.png [--light] [--height N] [--theme NAME]
-          --light       render the light appearance (panels only; the share card is always dark)
+        Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo|--render-status-demo|--render-switcher-demo OUTPUT.png [--light] [--height N] [--theme NAME]
+          --light       render the light appearance (panels and the switcher; the share card is always dark)
           --height N    panel render height in points, 200-4000 (default 680; the width stays 600)
           --theme NAME  classic, gentle, vivid or aurora (default classic); the saved choice is not used or changed
 
@@ -55,6 +55,20 @@ enum AgentTrailApp {
         let quit = NSMenuItem(title: "Quit Agent Trail", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = application
         appMenu.addItem(quit)
+        // Text fields, such as the switcher's filter, get ⌘X, ⌘C, ⌘V, ⌘A and undo from here.
+        let editMenu = NSMenu(title: "Edit")
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        editItem.submenu = editMenu
+        menu.addItem(editItem)
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
         let windowMenu = NSMenu()
         let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
         windowItem.submenu = windowMenu
@@ -76,6 +90,18 @@ enum AgentTrailApp {
             return
         }
         let store = AppStore(demoMode: true, now: DemoData.referenceDate())
+        if kind == "--render-switcher-demo" {
+            let switcher = SessionSwitcher(store: store, closePopover: {})
+            guard let view = switcher.previewView() else { throw CocoaError(.fileWriteUnknown) }
+            view.appearance = NSAppearance(named: CommandLine.arguments.contains("--light") ? .aqua : .darkAqua)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            view.layoutSubtreeIfNeeded()
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw CocoaError(.fileWriteUnknown) }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
+            try write(png, to: output)
+            return
+        }
         if kind == "--render-share-demo" {
             let summary = store.portrait(projectPath: nil, period: .month, showNames: false)
             let card = ActivityShareCard(summary: summary, sources: store.sources, sampleData: true)
@@ -143,6 +169,11 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
     private var popover: NSPopover?
     private var store: AppStore?
     private var settingsWindow: NSWindow?
+    private var switcher: SessionSwitcher?
+    /// A link that arrived before launch finished, for the switcher once it exists.
+    private var launchLink: URL?
+    /// A launch for a link leaves the panel closed.
+    private var openedForLink = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -162,9 +193,38 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         statusController = StatusItemController(store: store,
             togglePanel: { [weak self] in self?.togglePanel() },
             showPanel: { [weak self] in self?.showPanel() },
-            closePanel: { [weak self] in self?.closePanel() })
+            closePanel: { [weak self] in self?.closePanel() },
+            showSwitcher: { [weak self] in self?.switcher?.show() })
 
-        DispatchQueue.main.async { [weak self] in self?.showPanel() }
+        // The system-wide shortcut and agenttrail:// links.
+        let switcher = SessionSwitcher(store: store, closePopover: { [weak self] in self?.closePanel() })
+        self.switcher = switcher
+        if let link = launchLink {
+            launchLink = nil
+            switcher.open(link)
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard !self.openedForLink else {
+                // The store starts out as if the panel showed; without it, failures need hints.
+                self.store?.isPanelVisible = false
+                return
+            }
+            self.showPanel()
+        }
+    }
+
+    /// `agenttrail://` links from launchers, Shortcuts and scripts. Only the last
+    /// of several opened at once runs. Nothing from a link is logged or echoed.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        openedForLink = true
+        guard let url = urls.last else { return }
+        if let switcher {
+            switcher.open(url)
+        } else {
+            launchLink = url
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -257,6 +317,7 @@ struct AgentTrailShell: View {
     @AppStorage(AppSettings.Key.statusShowsWorkingCount) private var statusShowsWorkingCount = true
     @AppStorage(AppSettings.Key.statusShowsCount) private var statusShowsCount = true
     @AppStorage(AppSettings.Key.colorTheme) private var colorTheme: ColorTheme = .classic
+    @AppStorage(AppSettings.Key.sessionShortcut) private var sessionShortcut: SessionShortcut = .standard
 
     /// `height` exists for `--height` renders; the live popover is always 680pt.
     init(store: AppStore, animatesCharts: Bool = true, height: CGFloat = AgentTrailShell.panelHeight) {
@@ -476,7 +537,8 @@ struct AgentTrailShell: View {
     }
 
     /// Titles affect cards, menus and hints, so that switch sits at the top
-    /// level with the theme; the three icon switches live under "Menu bar".
+    /// level with the theme; the three icon switches live under "Menu bar",
+    /// and the system-wide shortcut under "Session switcher".
     @ViewBuilder private var displayMenuItems: some View {
         Toggle("Show session titles", isOn: $showSessionTitles)
         Picker("Theme", selection: themeSelection) {
@@ -494,6 +556,23 @@ struct AgentTrailShell: View {
                 Text("Reduce Motion keeps the icon still")
             }
         }
+        Menu("Session switcher") {
+            Picker("Shortcut", selection: $sessionShortcut) {
+                ForEach(SessionShortcut.allCases) { shortcut in
+                    Text(shortcut.menuTitle).tag(shortcut)
+                }
+            }
+            .pickerStyle(.inline)
+            if sessionShortcut != .off {
+                Divider()
+                Text("\(sessionShortcut.mostUrgentSymbols) jumps to the most urgent session")
+            }
+            if let issue = store.shortcutIssue {
+                Divider()
+                Text(issue)
+            }
+        }
+        .disabled(store.demoMode)
     }
 
     /// Switches the drawing theme before the stored choice rebuilds the panel.

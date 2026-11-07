@@ -29,6 +29,8 @@ final class AppStore: ObservableObject {
         }
     }
     @Published private(set) var projectOverviews: [ProjectOverview] = []
+    /// Set by SessionSwitcher when macOS refuses the switcher's shortcut; the ⋯ menu shows it.
+    @Published var shortcutIssue: String?
     @Published var sources: [AgentSource] = []
     @Published var notices: [String] = []
     @Published var isScanning = false
@@ -323,14 +325,18 @@ final class AppStore: ObservableObject {
     }
 
     /// Opens the work behind one live session, in SessionLauncher's order.
-    /// Called only from an explicit click or menu choice. It opens a link or
-    /// activates an app only when that app is already running.
-    func jump(_ session: LiveAgentSession) {
+    /// Called only for something the user did: a click, a menu choice, the
+    /// session switcher or its shortcut, or an agenttrail:// link. It opens a
+    /// link or activates an app only when that app is already running.
+    /// `completion` gets the outcome after it is shown; demo jumps never call it.
+    func jump(_ session: LiveAgentSession, completion: ((JumpOutcome) -> Void)? = nil) {
         let showTitles = AppSettings.showSessionTitles
         let source = sources.first { $0.id == session.sourceID }
         guard let source else {
             // Also reaches the status-item menu, where the panel toast is not visible.
-            reportLaunchFailure("The profile for this session is no longer configured.")
+            let message = "The profile for this session is no longer configured."
+            reportLaunchFailure(message)
+            completion?(.failed(message))
             return
         }
         let context = JumpContext(profileName: source.name,
@@ -343,6 +349,7 @@ final class AppStore: ObservableObject {
         }
         SessionLauncher.jump(session, source: source, context: context) { [weak self] outcome in
             self?.applyJump(outcome)
+            completion?(outcome)
         }
     }
 

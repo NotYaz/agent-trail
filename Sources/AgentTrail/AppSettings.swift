@@ -13,6 +13,8 @@ enum AppSettings {
         static let statusShowsCount = "statusShowsCount"
         /// Show how many sessions work next to the menu-bar glyph while none needs input.
         static let statusShowsWorkingCount = "statusShowsWorkingCount"
+        /// The `SessionShortcut` raw value for the session switcher. Missing means ⌃⌥J.
+        static let sessionShortcut = "sessionShortcut"
         /// The editor used by "Open in {editor}" and the Jump fallback.
         static let preferredEditorBundleID = "preferredEditorBundleID"
         /// The terminal used by "Open in {terminal}".
@@ -39,6 +41,11 @@ enum AppSettings {
     static var statusAnimates: Bool { bool(Key.statusAnimates) }
     static var statusShowsCount: Bool { bool(Key.statusShowsCount) }
     static var statusShowsWorkingCount: Bool { bool(Key.statusShowsWorkingCount) }
+
+    /// An unknown stored value reads as the default, as a hand-edited Bool does.
+    static var sessionShortcut: SessionShortcut {
+        string(Key.sessionShortcut).flatMap(SessionShortcut.init(rawValue:)) ?? .standard
+    }
 
     static var preferredEditorBundleID: String? {
         get { string(Key.preferredEditorBundleID) }
