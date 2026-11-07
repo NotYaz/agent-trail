@@ -38,6 +38,10 @@ public enum AssistantDetection {
             guard FileStat.of(storage)?.kind == .directory,
                   let workspaces = try? FileManager.default.contentsOfDirectory(atPath: storage) else { return false }
             return workspaces.contains { nonEmptyFolder("\(storage)/\($0)/chatSessions") }
+        case .opencode:
+            // OpenCode 1.2 and later keep every session in this one database.
+            guard let stat = FileStat.of("\(home)/.local/share/opencode/opencode.db") else { return false }
+            return stat.kind == .regular && stat.size > 0
         }
     }
 
