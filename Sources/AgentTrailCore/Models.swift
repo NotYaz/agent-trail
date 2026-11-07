@@ -1,28 +1,17 @@
 import Foundation
 
 /// Which local assistant a profile reads. Missing values in older settings stay Claude.
+/// Everything that differs per assistant lives in its `descriptor`.
 public enum AssistantKind: String, Codable, CaseIterable, Sendable {
     case claude
     case codex
     case grok
 
-    public var displayName: String {
-        switch self {
-        case .claude: return "Claude"
-        case .codex: return "Codex"
-        case .grok: return "Grok"
-        }
-    }
+    public var displayName: String { descriptor.displayName }
 
     /// Standard home used for new profiles. Set configDirectory explicitly when
-    /// Codex or Grok is launched with a custom home environment variable.
-    public func defaultHome(home: String) -> String {
-        switch self {
-        case .claude: return "\(home)/.claude"
-        case .codex: return "\(home)/.codex"
-        case .grok: return "\(home)/.grok"
-        }
-    }
+    /// an assistant is launched with a custom home environment variable.
+    public func defaultHome(home: String) -> String { descriptor.defaultHome(home: home) }
 }
 
 public struct AgentSource: Identifiable, Codable, Hashable, Sendable {
@@ -39,7 +28,7 @@ public struct AgentSource: Identifiable, Codable, Hashable, Sendable {
         self.configDirectory = configDirectory
         self.userDataDirectory = userDataDirectory
         self.assistant = assistant
-        self.bundleIdentifier = bundleIdentifier ?? (assistant == .claude ? "com.anthropic.claudefordesktop" : "")
+        self.bundleIdentifier = bundleIdentifier ?? assistant.descriptor.defaultBundleIdentifier
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -52,9 +41,18 @@ public struct AgentSource: Identifiable, Codable, Hashable, Sendable {
         name = try values.decode(String.self, forKey: .name)
         configDirectory = try values.decode(String.self, forKey: .configDirectory)
         userDataDirectory = try values.decodeIfPresent(String.self, forKey: .userDataDirectory)
-        assistant = try values.decodeIfPresent(AssistantKind.self, forKey: .assistant) ?? .claude
+        if let raw = try values.decodeIfPresent(String.self, forKey: .assistant) {
+            guard let kind = AssistantKind(rawValue: raw) else {
+                // A newer build's assistant: name it, so the settings error can say so.
+                throw DecodingError.dataCorruptedError(forKey: .assistant, in: values,
+                    debugDescription: "Unknown assistant '\(raw.prefix(40))'")
+            }
+            assistant = kind
+        } else {
+            assistant = .claude
+        }
         bundleIdentifier = try values.decodeIfPresent(String.self, forKey: .bundleIdentifier)
-            ?? (assistant == .claude ? "com.anthropic.claudefordesktop" : "")
+            ?? assistant.descriptor.defaultBundleIdentifier
     }
 
     public static func defaults(home: String = NSHomeDirectory()) -> [AgentSource] {
@@ -371,7 +369,9 @@ public struct ScanResult: Sendable {
     }
 }
 
-// Add other assistants by translating their local records into ProjectActivity.
+/// Add another assistant with a descriptor (AssistantDescriptor.swift), a
+/// `HistoryAdapter` that turns its local records into `HistorySession`s, and
+/// an `AssistantRegistry` entry.
 public protocol ActivityProvider {
     func scan(sources: [AgentSource]) -> ScanResult
 }

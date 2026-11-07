@@ -282,7 +282,7 @@ enum SessionLauncher {
         }
         // These hosts were named by terminal hints, so the session sits in a
         // terminal even when the host is an editor or Claude Desktop.
-        let inTerminal = session.details.startedInTerminal || source?.assistant == .grok
+        let inTerminal = session.details.startedInTerminal || source?.assistant.descriptor.hosting == .terminal
         return activateWithHint(app, inTerminal: inTerminal, context: context)
     }
 

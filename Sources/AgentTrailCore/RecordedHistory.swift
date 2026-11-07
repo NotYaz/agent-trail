@@ -202,3 +202,92 @@ enum JSONLTail {
         return bytes.reduce(UInt64(14695981039346656037)) { ($0 ^ UInt64($1)) &* 1099511628211 }
     }
 }
+
+/// An adapter's cache of recorded evidence per log file, saved as
+/// `{version, files}` with mode 0600. An unreadable cache, or one written by
+/// another cache version, is rebuilt once with a notice. Use from one queue.
+final class HistoryCache<File: Codable> {
+    let version: Int
+    private let url: URL?
+    /// The assistant's name in notices.
+    private let name: String
+    private(set) var files: [String: File] = [:]
+    /// True when `files` differs from the saved file.
+    private var dirty = false
+    private var lastSave = Date.distantPast
+    private var loadNotice: String?
+
+    init(url: URL?, version: Int, name: String) {
+        self.url = url
+        self.version = version
+        self.name = name
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            let header = try JSONDecoder().decode(Header.self, from: data)
+            if header.version == version {
+                files = try JSONDecoder().decode(Saved.self, from: data).files
+            } else {
+                loadNotice = "\(name) edit history is being rebuilt once for the current indexer."
+                dirty = true
+            }
+        } catch {
+            loadNotice = "The \(name) activity cache could not be read; change history will be rebuilt."
+            dirty = true
+        }
+    }
+
+    subscript(path: String) -> File? { files[path] }
+
+    /// Keeps `file` for `path`. `changed` marks the cache for the next save.
+    func store(_ file: File, at path: String, changed: Bool) {
+        files[path] = file
+        if changed { dirty = true }
+    }
+
+    /// The load notice, once.
+    func takeLoadNotice() -> String? {
+        defer { loadNotice = nil }
+        return loadNotice
+    }
+
+    /// Forgets files the latest scan no longer found.
+    func prune(keeping active: Set<String>) {
+        let kept = files.filter { active.contains($0.key) }
+        guard kept.count != files.count else { return }
+        files = kept
+        dirty = true
+    }
+
+    /// Saves when the last save is at least `historyCacheSaveInterval` old.
+    func saveIfDue() -> String? {
+        guard Date().timeIntervalSince(lastSave) >= historyCacheSaveInterval else { return nil }
+        return save()
+    }
+
+    /// Writes the cache if it changed since the last save. Returns a notice
+    /// when it could not be saved; a later scan tries again.
+    @discardableResult
+    func save() -> String? {
+        guard dirty, let url else { return nil }
+        let manager = FileManager.default
+        do {
+            try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(Saved(version: version, files: files))
+            try data.write(to: url, options: .atomic)
+            try? manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            dirty = false
+            lastSave = Date()
+            return nil
+        } catch {
+            return "The \(name) activity cache could not be saved; the next launch may reindex change history."
+        }
+    }
+
+    private struct Saved: Codable {
+        var version: Int
+        var files: [String: File]
+    }
+
+    private struct Header: Decodable { let version: Int }
+}

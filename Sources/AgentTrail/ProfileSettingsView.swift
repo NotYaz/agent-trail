@@ -52,7 +52,7 @@ struct ProfileSettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Profiles")
                     .font(Theme.Typeface.title)
-                Text("Connect the Claude, Codex, and Grok profiles you work with.")
+                Text("Connect the \(AssistantKind.listedNames()) profiles you work with.")
                     .font(Theme.Typeface.caption)
                     .foregroundStyle(.secondary)
             }
@@ -149,14 +149,7 @@ struct ProfileSettingsView: View {
                 if let index = selectedIndex {
                     VStack(alignment: .leading, spacing: 6) {
                         fieldLabel("Assistant", symbol: "sparkles")
-                        Picker("Assistant", selection: assistantBinding) {
-                            ForEach(AssistantKind.allCases, id: \.self) { kind in
-                                Text(kind.displayName).tag(kind)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .accessibilityLabel("Assistant")
+                        assistantPicker
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
@@ -170,7 +163,7 @@ struct ProfileSettingsView: View {
                                 placeholder: draftSources[index].assistant.defaultHome(home: "~"),
                                 value: sourceBinding(\.configDirectory), field: .config)
 
-                    if draftSources[index].assistant == .claude {
+                    if draftSources[index].assistant.descriptor.usesUserDataDirectory {
                         VStack(alignment: .leading, spacing: 6) {
                             folderField("Desktop user-data folder", symbol: "macwindow", placeholder: "Default Claude desktop profile",
                                         value: userDataBinding, field: .userData)
@@ -280,24 +273,30 @@ struct ProfileSettingsView: View {
         }
     }
 
-    private func configTitle(_ assistant: AssistantKind) -> String {
-        switch assistant {
-        case .claude: return "Claude config folder"
-        case .codex: return "Codex home"
-        case .grok: return "Grok home"
+    /// Segments while every assistant fits the editor column, a menu after that.
+    @ViewBuilder private var assistantPicker: some View {
+        let picker = Picker("Assistant", selection: assistantBinding) {
+            ForEach(AssistantKind.allCases, id: \.self) { kind in
+                Text(kind.displayName).tag(kind)
+            }
         }
+        if AssistantKind.allCases.count <= 4 {
+            picker.labelsHidden().pickerStyle(.segmented).accessibilityLabel("Assistant")
+        } else {
+            picker.labelsHidden().pickerStyle(.menu).fixedSize().accessibilityLabel("Assistant")
+        }
+    }
+
+    private func configTitle(_ assistant: AssistantKind) -> String {
+        assistant.descriptor.homeTitle
     }
 
     private func setAssistant(_ kind: AssistantKind) {
         guard let index = selectedIndex, draftSources[index].assistant != kind else { return }
         let previous = draftSources[index].assistant
         draftSources[index].assistant = kind
-        if kind == .claude {
-            draftSources[index].bundleIdentifier = "com.anthropic.claudefordesktop"
-        } else {
-            draftSources[index].userDataDirectory = nil
-            draftSources[index].bundleIdentifier = ""
-        }
+        draftSources[index].bundleIdentifier = kind.descriptor.defaultBundleIdentifier
+        if !kind.descriptor.usesUserDataDirectory { draftSources[index].userDataDirectory = nil }
         let previousHome = previous.defaultHome(home: "~")
         if draftSources[index].configDirectory.isEmpty || draftSources[index].configDirectory == previousHome {
             draftSources[index].configDirectory = kind.defaultHome(home: "~")
