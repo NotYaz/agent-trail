@@ -42,6 +42,9 @@ public enum AssistantDetection {
             // OpenCode 1.2 and later keep every session in this one database.
             guard let stat = FileStat.of("\(home)/.local/share/opencode/opencode.db") else { return false }
             return stat.kind == .regular && stat.size > 0
+        case .cursor:
+            if nonEmptyFolder("\(home)/.cursor/chats") { return true }
+            return FileStat.of("\(home)/Library/Application Support/Cursor/User/globalStorage/state.vscdb")?.kind == .regular
         }
     }
 
