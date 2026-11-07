@@ -53,6 +53,20 @@
       "configDirectory": "~/.cursor",
       "userDataDirectory": "~/Library/Application Support/Cursor",
       "bundleIdentifier": ""
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "assistant": "gemini",
+      "configDirectory": "~/.gemini",
+      "bundleIdentifier": ""
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen Code",
+      "assistant": "qwen",
+      "configDirectory": "~/.qwen",
+      "bundleIdentifier": ""
     }
   ]
 }

@@ -116,6 +116,25 @@ extension AssistantKind {
                 userDataNote: "Cursor app chats are read from this folder, and Cursor CLI sessions from the home above. With the default ~/.cursor home, leave it blank to read Cursor's default folder.",
                 reportsDelegation: true, delegationOrigin: "a Cursor subagent",
                 editEvidence: "Cursor's applied edit and delete calls", worktreeFolder: nil)
+        case .gemini:
+            // GEMINI_CLI_HOME names the folder that holds `.gemini`, not the home
+            // itself, so it cannot be compared with a profile's home.
+            return AssistantDescriptor(kind: self, displayName: "Gemini CLI", homeTitle: "Gemini CLI home",
+                homeFolder: ".gemini", homeEnvironmentVariable: nil, hosting: .terminal,
+                defaultBundleIdentifier: "", requiresBundleIdentifier: false,
+                usesUserDataDirectory: false, defaultUserDataDirectory: nil, requiresUserDataDirectory: false,
+                userDataTitle: nil, userDataPlaceholder: nil, userDataNote: nil,
+                reportsDelegation: true, delegationOrigin: "a Gemini CLI subagent",
+                editEvidence: "Gemini CLI's successful write_file and replace calls", worktreeFolder: ".gemini")
+        case .qwen:
+            return AssistantDescriptor(kind: self, displayName: "Qwen Code", homeTitle: "Qwen Code home",
+                homeFolder: ".qwen", homeEnvironmentVariable: "QWEN_HOME", hosting: .terminal,
+                defaultBundleIdentifier: "", requiresBundleIdentifier: false,
+                usesUserDataDirectory: true, defaultUserDataDirectory: nil, requiresUserDataDirectory: false,
+                userDataTitle: "Qwen runtime folder", userDataPlaceholder: "Same as the Qwen Code home",
+                userDataNote: "Set this only if QWEN_RUNTIME_DIR or advanced.runtimeOutputDir moved Qwen's session files: the folder that holds projects/. Live status always reads sessions/ in the home above.",
+                reportsDelegation: true, delegationOrigin: "a Qwen Code subagent",
+                editEvidence: "Qwen Code's successful edit, write_file and notebook_edit calls", worktreeFolder: ".qwen")
         }
     }
 
@@ -158,6 +177,8 @@ extension GrokActivityProvider: HistoryAdapter {}
 extension CopilotActivityProvider: HistoryAdapter {}
 extension OpenCodeActivityProvider: HistoryAdapter {}
 extension CursorActivityProvider: HistoryAdapter {}
+extension GeminiActivityProvider: HistoryAdapter {}
+extension QwenActivityProvider: HistoryAdapter {}
 
 /// Builds each assistant's readers. One exhaustive switch per reader kind, so
 /// a new assistant cannot be left out of scans, cache flushes or live status.
@@ -170,6 +191,8 @@ enum AssistantRegistry {
         case .copilot: return CopilotActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .opencode: return OpenCodeActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .cursor: return CursorActivityProvider(cacheURL: cacheURL, resolver: resolver)
+        case .gemini: return GeminiActivityProvider(cacheURL: cacheURL, resolver: resolver)
+        case .qwen: return QwenActivityProvider(cacheURL: cacheURL, resolver: resolver)
         }
     }
 
@@ -193,6 +216,12 @@ enum AssistantRegistry {
             return { reader.scan(sources: $0, now: $1) }
         case .cursor:
             let reader = CursorLiveActivityProvider()
+            return { reader.scan(sources: $0, now: $1) }
+        case .gemini:
+            // Gemini CLI writes no live state to disk.
+            return nil
+        case .qwen:
+            let reader = QwenLiveActivityProvider()
             return { reader.scan(sources: $0, now: $1) }
         }
     }

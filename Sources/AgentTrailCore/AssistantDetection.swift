@@ -45,6 +45,18 @@ public enum AssistantDetection {
         case .cursor:
             if nonEmptyFolder("\(home)/.cursor/chats") { return true }
             return FileStat.of("\(home)/Library/Application Support/Cursor/User/globalStorage/state.vscdb")?.kind == .regular
+        case .gemini:
+            // ~/.cache/.gemini is where the CLI writes under the macOS sandbox (Seatbelt).
+            return ["\(home)/.gemini/tmp", "\(home)/.cache/.gemini/tmp"].contains { tmp in
+                guard FileStat.of(tmp)?.kind == .directory,
+                      let folders = try? FileManager.default.contentsOfDirectory(atPath: tmp) else { return false }
+                return folders.contains { nonEmptyFolder("\(tmp)/\($0)/chats") }
+            }
+        case .qwen:
+            let projects = "\(home)/.qwen/projects"
+            guard FileStat.of(projects)?.kind == .directory,
+                  let folders = try? FileManager.default.contentsOfDirectory(atPath: projects) else { return false }
+            return folders.contains { nonEmptyFolder("\(projects)/\($0)/chats") }
         }
     }
 
