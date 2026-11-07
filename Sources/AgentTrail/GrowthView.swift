@@ -138,6 +138,18 @@ enum GrowthText {
 
     static let streakHelp = "Local days (05:00–05:00) with at least one recorded edit, in saved history. "
         + "Today counts once it has an edit; until then yesterday keeps the streak."
+    /// "Edits first recorded in a Claude subagent or a spawned Codex thread. Grok does not report them."
+    static var delegationNote: String {
+        let kinds = AssistantKind.allCases.map(\.descriptor)
+        let origins = kinds.compactMap { $0.reportsDelegation ? $0.delegationOrigin : nil }
+        let silent = kinds.filter { !$0.reportsDelegation }.map(\.displayName)
+        var note = "Edits first recorded in \(AssistantKind.listed(origins, conjunction: "or"))."
+        if !silent.isEmpty {
+            note += " \(AssistantKind.listed(silent)) \(silent.count == 1 ? "does" : "do") not report them."
+        }
+        return note
+    }
+
     static let sessionsHelp = "Sessions mean different things per assistant: a Claude Desktop session can span "
         + "many hours; Codex counts every thread. Don't compare across assistants."
 }
@@ -695,14 +707,13 @@ private struct GrowthAboutText: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             paragraph("What counts as an edit",
-                      "Claude's Edit and Write tools, Codex's completed file changes, and Grok's completed write and "
-                      + "search-replace calls. One operation is one edit. Shell commands don't count.")
+                      AssistantKind.listed(AssistantKind.allCases.map(\.descriptor.editEvidence))
+                      + ". One operation is one edit. Shell commands don't count.")
             paragraph("Local activity days",
                       "Days start at 05:00 (\(zoneName)), so late-night work counts toward the evening it began.")
             paragraph("Sessions",
                       "Sessions count on the day they started, and a session means different things per assistant.")
-            paragraph("Delegated edits",
-                      "Edits first recorded in a Claude subagent or a spawned Codex thread. Grok does not report them.")
+            paragraph("Delegated edits", GrowthText.delegationNote)
             paragraph("Saved history",
                       "Totals cover only what assistants still keep on disk, so totals and streaks can shrink. "
                       + "Changes appear only when saved history reaches back over the previous period.")

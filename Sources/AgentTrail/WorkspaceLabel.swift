@@ -1,4 +1,5 @@
 import Foundation
+import AgentTrailCore
 
 /// How a session's working folder relates to the project it is counted on.
 /// A worktree is a separate checkout of the project; a subfolder is inside it;
@@ -22,13 +23,15 @@ enum WorkspaceLabel: Equatable {
         return .launchedFrom(path: workspace)
     }
 
-    /// `.claude/worktrees/<name>`, `.codex/worktrees/<name>`, or
+    /// An assistant's `<folder>/worktrees/<name>` (`.claude`, `.codex`), or
     /// `.worktrees/<name>` inside the project; the name follows the marker.
+    private static let assistantFolders = Set(AssistantKind.allCases.compactMap(\.descriptor.worktreeFolder))
+
     private static func worktreeName(_ relative: String) -> String? {
         let components = relative.split(separator: "/").map(String.init)
         for index in components.indices {
             let isMarker = components[index] == ".worktrees"
-                || (components[index] == "worktrees" && index > 0 && [".claude", ".codex"].contains(components[index - 1]))
+                || (components[index] == "worktrees" && index > 0 && assistantFolders.contains(components[index - 1]))
             if isMarker, index + 1 < components.count { return components[index + 1] }
         }
         return nil

@@ -120,8 +120,10 @@ public struct StatsIndex: Sendable {
             guard let name = configured[id]?.name, !name.isEmpty else { return "Unknown profile" }
             return name
         }
-        // Grok records no subagents; an unconfigured ID keeps the default assistant.
-        let reportsDelegation: [Bool] = order.map { (id: String) -> Bool in configured[id]?.assistant != .grok }
+        // Some assistants record no subagents; an unconfigured ID keeps the default assistant.
+        let reportsDelegation: [Bool] = order.map { (id: String) -> Bool in
+            configured[id]?.assistant.descriptor.reportsDelegation ?? true
+        }
         return StatsIndex(calendar: calendar, today: today, sourceOrder: order, projectPaths: paths,
                           trends: summary.trends, pulse: summary.pulse,
                           historyStart: historyStart.map(DayKey.init(index:)), edits: edits, sessions: sessions,

@@ -63,6 +63,11 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
         let configuration: ProfileConfiguration
         do {
             configuration = try JSONDecoder().decode(ProfileConfiguration.self, from: data)
+        } catch let DecodingError.dataCorrupted(context) where context.codingPath.last?.stringValue == "assistant" {
+            // Written by a newer Agent Trail. Fail closed rather than drop the
+            // profile, which the next save would erase.
+            throw ProfileConfigurationError.reading(path: url.path,
+                reason: "\(context.debugDescription). Check the profile's assistant value; if a newer Agent Trail wrote it, update Agent Trail or remove that profile from this file.")
         } catch {
             throw ProfileConfigurationError.reading(path: url.path,
                 reason: "Invalid JSON or missing profile fields. Check sources, refreshInterval and each profile's id, name, assistant, configDirectory, userDataDirectory and bundleIdentifier.")
@@ -98,14 +103,20 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
             guard Self.isLabel(source.name), source.name.count <= 80 else {
                 throw ProfileConfigurationError.invalid("\(label) (\(source.id)): set name to 1–80 characters without leading/trailing whitespace or control characters.")
             }
-            if source.assistant == .claude {
+            let descriptor = source.assistant.descriptor
+            // Another assistant's required app would be focused for this profile.
+            let foreign = AssistantKind.allCases.first {
+                $0 != source.assistant && $0.descriptor.requiresBundleIdentifier
+                    && $0.descriptor.defaultBundleIdentifier == source.bundleIdentifier
+            }
+            if descriptor.requiresBundleIdentifier {
                 guard Self.isLabel(source.bundleIdentifier),
                       source.bundleIdentifier.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
                       source.bundleIdentifier.count <= 255 else {
-                    throw ProfileConfigurationError.invalid("\(source.name): set a nonempty bundleIdentifier without spaces (Claude uses com.anthropic.claudefordesktop).")
+                    throw ProfileConfigurationError.invalid("\(source.name): set a nonempty bundleIdentifier without spaces (\(descriptor.displayName) uses \(descriptor.defaultBundleIdentifier)).")
                 }
-            } else if source.bundleIdentifier == "com.anthropic.claudefordesktop" {
-                throw ProfileConfigurationError.invalid("\(source.name): leave bundleIdentifier empty or set that assistant's own app. Claude's bundle identifier would focus the wrong app.")
+            } else if let foreign {
+                throw ProfileConfigurationError.invalid("\(source.name): leave bundleIdentifier empty or set that assistant's own app. \(foreign.displayName)'s bundle identifier would focus the wrong app.")
             } else if !source.bundleIdentifier.isEmpty {
                 guard Self.isLabel(source.bundleIdentifier),
                       source.bundleIdentifier.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
@@ -118,9 +129,11 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
                 throw ProfileConfigurationError.invalid("\(source.name) and \(other) share a configDirectory. Set distinct folders so their activity can be attributed correctly.")
             }
             configPaths[config] = source.name
-            if source.assistant != .claude {
+            guard descriptor.usesUserDataDirectory else {
                 guard source.userDataDirectory == nil else {
-                    throw ProfileConfigurationError.invalid("\(source.name): userDataDirectory applies to Claude profiles only. Remove it for \(source.assistant.displayName).")
+                    let users = AssistantKind.listed(AssistantKind.allCases
+                        .filter(\.descriptor.usesUserDataDirectory).map(\.displayName))
+                    throw ProfileConfigurationError.invalid("\(source.name): userDataDirectory applies to \(users) profiles only. Remove it for \(source.assistant.displayName).")
                 }
                 continue
             }

@@ -1501,7 +1501,8 @@ struct ProfileMixCard: View, Equatable {
                     .frame(width: GrowthMixColumn.change, alignment: .trailing)
             }
             GrowthDelegationCell(color: ProfileColor.color(share.sourceID, sources: profiles), edits: share.edits,
-                                 delegated: share.delegatedEdits, reported: share.delegationReported)
+                                 delegated: share.delegatedEdits, reported: share.delegationReported,
+                                 assistant: profiles.first { $0.id == share.sourceID }?.assistant)
                 .frame(width: GrowthMixColumn.delegation, alignment: .leading)
             Text(since(share))
                 .font(Theme.Typeface.micro)
@@ -1587,12 +1588,13 @@ private enum GrowthMixColumn {
 }
 
 /// The delegation capsule: direct edits solid, delegated edits hatched; a dashed
-/// outline with "not reported" for Grok, which records no subagents.
+/// outline with "not reported" for an assistant that records no subagents (Grok).
 private struct GrowthDelegationCell: View {
     let color: Color
     let edits: Int
     let delegated: Int
     let reported: Bool
+    let assistant: AssistantKind?
 
     private var fraction: Double {
         edits > 0 ? min(1, Double(delegated) / Double(edits)) : 0
@@ -1631,9 +1633,10 @@ private struct GrowthDelegationCell: View {
     }
 
     private var help: String {
-        if !reported { return "Grok does not report delegated edits" }
+        if !reported { return "\(assistant?.displayName ?? "This assistant") does not report delegated edits" }
         guard edits > 0 else { return "No recorded edits in this period" }
-        return "\(PercentFormat.share(fraction)) delegated: first recorded in a subagent (Claude) or a spawned thread (Codex)"
+        let origins = AssistantKind.allCases.map(\.descriptor).compactMap { $0.reportsDelegation ? $0.delegationOrigin : nil }
+        return "\(PercentFormat.share(fraction)) delegated: first recorded in \(AssistantKind.listed(origins, conjunction: "or"))"
     }
 }
 

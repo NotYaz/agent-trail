@@ -8,12 +8,7 @@ import Foundation
 /// decided when folding, so learned project locations never force a reparse.
 public final class CodexActivityProvider: ActivityProvider {
     static let cacheVersion = 4
-    private let cacheURL: URL?
-    private var cache: [String: CodexFile] = [:]
-    /// True when `cache` differs from the saved file.
-    private var cacheDirty = false
-    private var lastCacheSave = Date.distantPast
-    private var cacheLoadNotice: String?
+    private let cache: HistoryCache<CodexFile>
     private let files = FileManager.default
     private let resolver: GitProjectResolver
     private let ownsResolver: Bool
@@ -29,23 +24,9 @@ public final class CodexActivityProvider: ActivityProvider {
 
     /// A shared resolver is reset by its owner once per scan.
     init(cacheURL: URL?, resolver: GitProjectResolver, ownsResolver: Bool = false) {
-        self.cacheURL = cacheURL
+        cache = HistoryCache(url: cacheURL, version: Self.cacheVersion, name: "Codex")
         self.resolver = resolver
         self.ownsResolver = ownsResolver
-        guard let cacheURL, files.fileExists(atPath: cacheURL.path) else { return }
-        do {
-            let data = try Data(contentsOf: cacheURL)
-            let header = try JSONDecoder().decode(CacheHeader.self, from: data)
-            if header.version == Self.cacheVersion {
-                cache = try JSONDecoder().decode(SavedCache.self, from: data).files
-            } else {
-                cacheLoadNotice = "Codex edit history is being rebuilt once for the current indexer."
-                cacheDirty = true
-            }
-        } catch {
-            cacheLoadNotice = "The Codex activity cache could not be read; change history will be rebuilt."
-            cacheDirty = true
-        }
     }
 
     /// A quick listing that reads session headers and reuses edit evidence
@@ -70,8 +51,7 @@ public final class CodexActivityProvider: ActivityProvider {
     public func scan(sources: [AgentSource], progress: ((ScanResult, Int, Int) -> Void)?) -> ScanResult {
         if ownsResolver { resolver.reset() }
         let discovered = discover(sources: sources)
-        var notices = cacheLoadNotice.map { [$0] } ?? []
-        cacheLoadNotice = nil
+        var notices = cache.takeLoadNotice().map { [$0] } ?? []
         let tasks = discovered.files
         var parsed: [String: CodexFile] = [:]
         var lastProgress = Date.distantPast
@@ -84,8 +64,7 @@ public final class CodexActivityProvider: ActivityProvider {
                     parse(line, file: file, fallbackID: task.url.deletingPathExtension().lastPathComponent)
                 }
                 // Parsed evidence changes only with the tail, so an unchanged tail needs no save.
-                if cached == nil || file.tail != before { cacheDirty = true }
-                cache[task.url.path] = file
+                cache.store(file, at: task.url.path, changed: cached == nil || file.tail != before)
                 parsed[task.url.path] = file
                 if file.tail.malformedLines > 0 {
                     notices.append("\(task.source.name): skipped unreadable records in a Codex session history.")
@@ -102,15 +81,8 @@ public final class CodexActivityProvider: ActivityProvider {
                 lastProgress = Date()
             }
         }
-        let active = Set(tasks.map { $0.url.path })
-        let kept = cache.filter { active.contains($0.key) }
-        if kept.count != cache.count {
-            cache = kept
-            cacheDirty = true
-        }
-        if Date().timeIntervalSince(lastCacheSave) >= historyCacheSaveInterval, let notice = saveCache() {
-            notices.append(notice)
-        }
+        cache.prune(keeping: Set(tasks.map { $0.url.path }))
+        if let notice = cache.saveIfDue() { notices.append(notice) }
         return fold(files: discovered, parsed: parsed, notices: notices)
     }
 
@@ -118,18 +90,7 @@ public final class CodexActivityProvider: ActivityProvider {
     /// notice when it could not be saved; a later scan tries again.
     @discardableResult
     public func saveCache() -> String? {
-        guard cacheDirty, let cacheURL else { return nil }
-        do {
-            try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(SavedCache(version: Self.cacheVersion, files: cache))
-            try data.write(to: cacheURL, options: .atomic)
-            try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
-            cacheDirty = false
-            lastCacheSave = Date()
-            return nil
-        } catch {
-            return "The Codex activity cache could not be saved; the next launch may reindex change history."
-        }
+        cache.save()
     }
 
     private struct Rollout {
@@ -347,10 +308,3 @@ private final class CodexFile: Codable {
         edits = [:]
     }
 }
-
-private struct SavedCache: Codable {
-    var version: Int
-    var files: [String: CodexFile]
-}
-
-private struct CacheHeader: Decodable { let version: Int }

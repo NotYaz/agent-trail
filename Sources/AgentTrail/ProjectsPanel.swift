@@ -387,7 +387,7 @@ struct AgentTrailPanel: View {
             return "Projects appear here when an assistant reports a matching live state. Idle sessions do not establish an outstanding request for input."
         }
         if sharedOnly { return "A project appears here when more than one profile works in the same folder." }
-        return "Projects appear when Claude, Codex, or Grok saves a local coding session. Check the profile notices below for details."
+        return "Projects appear when \(AssistantKind.listedNames(conjunction: "or")) saves a local coding session. Check the profile notices below for details."
     }
 
     private var hasActiveFilters: Bool { sharedOnly || workingOnly || waitingOnly || !search.isEmpty }

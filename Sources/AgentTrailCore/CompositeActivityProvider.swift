@@ -1,7 +1,7 @@
 import Foundation
 
-/// Routes each profile to the adapter for its assistant and merges projects
-/// that share a canonical folder. Codex and Grok scans do not read Claude's cache.
+/// Routes each profile to the adapter for its assistant (`AssistantRegistry`)
+/// and merges projects that share a canonical folder. Each adapter keeps its own cache.
 ///
 /// It also owns the project location catalog. Each scan first follows folders
 /// that moved, then folds every adapter against one filesystem view, then
@@ -9,9 +9,8 @@ import Foundation
 /// pointing at a checkout root, so grouping survives the link's removal.
 /// Use one instance from one serial queue.
 public final class CompositeActivityProvider: ActivityProvider {
-    private let claude: ClaudeActivityProvider
-    private let codex: CodexActivityProvider
-    private let grok: GrokActivityProvider
+    /// One adapter per assistant, in `AssistantKind.allCases` order.
+    private let adapters: [(kind: AssistantKind, adapter: any HistoryAdapter)]
     private let resolver: GitProjectResolver
     private let locationsURL: URL?
     private var registry: ProjectLocationRegistry
@@ -36,16 +35,12 @@ public final class CompositeActivityProvider: ActivityProvider {
         self.registry = registry
         registryWritable = writable
         savedRegistry = try? registry.encoded()
-        resolver = GitProjectResolver(locations: registry)
-        claude = ClaudeActivityProvider(cacheURL: cacheURL, resolver: resolver)
-        func adapterCache(_ assistant: AssistantKind) -> URL? {
-            guard let cacheURL else { return nil }
-            let stem = cacheURL.deletingPathExtension().lastPathComponent
-            return cacheURL.deletingLastPathComponent()
-                .appendingPathComponent("\(stem)-\(assistant.rawValue).json")
+        let resolver = GitProjectResolver(locations: registry)
+        self.resolver = resolver
+        adapters = AssistantKind.allCases.map { kind in
+            (kind, AssistantRegistry.history(kind, cacheURL: AssistantRegistry.cacheURL(kind, base: cacheURL),
+                                             resolver: resolver))
         }
-        codex = CodexActivityProvider(cacheURL: adapterCache(.codex), resolver: resolver)
-        grok = GrokActivityProvider(cacheURL: adapterCache(.grok), resolver: resolver)
     }
 
     public var projectLocations: ProjectLocationRegistry { registry }
@@ -76,11 +71,9 @@ public final class CompositeActivityProvider: ActivityProvider {
 
     public func metadata(sources: [AgentSource]) -> ScanResult {
         resolver.reset(locations: registry)
-        return finish(merge([
-            claude.metadata(sources: sources.filter { $0.assistant == .claude }),
-            codex.metadata(sources: sources.filter { $0.assistant == .codex }),
-            grok.metadata(sources: sources.filter { $0.assistant == .grok })
-        ]), learn: false)
+        return finish(merge(adapters.map { kind, adapter in
+            adapter.metadata(sources: sources.filter { $0.assistant == kind })
+        }), learn: false)
     }
 
     public func scan(sources: [AgentSource]) -> ScanResult {
@@ -90,19 +83,17 @@ public final class CompositeActivityProvider: ActivityProvider {
     public func scan(sources: [AgentSource], progress: ((ScanResult, Int, Int) -> Void)?) -> ScanResult {
         registry.refresh()
         resolver.reset(locations: registry)
-        let claudeSources = sources.filter { $0.assistant == .claude }
-        let codexSources = sources.filter { $0.assistant == .codex }
-        let grokSources = sources.filter { $0.assistant == .grok }
+        let matching = Dictionary(uniqueKeysWithValues: adapters.map { kind, _ in
+            (kind, sources.filter { $0.assistant == kind })
+        })
         var pending: [AssistantKind: ScanResult] = [:]
         if progress != nil {
-            pending[.claude] = claude.metadata(sources: claudeSources)
-            pending[.codex] = codex.metadata(sources: codexSources)
-            pending[.grok] = grok.metadata(sources: grokSources)
+            for (kind, adapter) in adapters { pending[kind] = adapter.metadata(sources: matching[kind] ?? []) }
         }
         var completed: [ScanResult] = []
-        func run(_ assistant: AssistantKind, _ matched: [AgentSource],
-                 _ scan: ([AgentSource], ((ScanResult, Int, Int) -> Void)?) -> ScanResult) {
-            guard !matched.isEmpty else { return }
+        for (assistant, adapter) in adapters {
+            let matched = matching[assistant] ?? []
+            guard !matched.isEmpty else { continue }
             // Current/completed scans replace their metadata; only adapters that
             // have not started retain metadata in progressive results.
             pending.removeValue(forKey: assistant)
@@ -112,16 +103,7 @@ public final class CompositeActivityProvider: ActivityProvider {
                     outer(self.finish(self.merge(completed + [partial] + waiting), learn: false), done, total)
                 }
             }
-            completed.append(scan(matched, callback))
-        }
-        run(.claude, claudeSources) { matched, callback in
-            self.claude.scan(sources: matched, progress: callback)
-        }
-        run(.codex, codexSources) { matched, callback in
-            self.codex.scan(sources: matched, progress: callback)
-        }
-        run(.grok, grokSources) { matched, callback in
-            self.grok.scan(sources: matched, progress: callback)
+            completed.append(adapter.scan(sources: matched, progress: callback))
         }
         return finish(merge(completed), learn: true)
     }
@@ -129,9 +111,7 @@ public final class CompositeActivityProvider: ActivityProvider {
     /// Saves every adapter cache a scan changed but has not written yet.
     /// Scans write them at most every few minutes; call this before quitting.
     public func flushCaches() {
-        claude.saveCache()
-        codex.saveCache()
-        grok.saveCache()
+        for (_, adapter) in adapters { adapter.saveCache() }
     }
 
     private func merge(_ results: [ScanResult]) -> ScanResult {

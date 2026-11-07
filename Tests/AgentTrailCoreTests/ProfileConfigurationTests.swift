@@ -187,8 +187,12 @@ final class ProfileConfigurationTests: XCTestCase {
         claudeBundle.bundleIdentifier = "com.anthropic.claudefordesktop"
         assertInvalid(ProfileConfiguration(sources: [claudeBundle]), containing: "bundle identifier")
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("{\"sources\":[{\"id\":\"codex\",\"name\":\"Codex\",\"configDirectory\":\"~/.codex\",\"bundleIdentifier\":\"\",\"assistant\":\"gemini\"}]}".utf8).write(to: file)
-        XCTAssertThrowsError(try ProfileConfiguration.load(from: file))
+        try Data("{\"sources\":[{\"id\":\"codex\",\"name\":\"Codex\",\"configDirectory\":\"~/.codex\",\"bundleIdentifier\":\"\",\"assistant\":\"future-agent\"}]}".utf8).write(to: file)
+        // A newer build's assistant fails closed and is named, so the profile is never dropped on save.
+        XCTAssertThrowsError(try ProfileConfiguration.load(from: file)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Unknown assistant 'future-agent'"), error.localizedDescription)
+            XCTAssertTrue(error.localizedDescription.contains("update Agent Trail"), error.localizedDescription)
+        }
     }
 
     func testOnlyKnownPrimaryCanOmitDesktopFolder() throws {

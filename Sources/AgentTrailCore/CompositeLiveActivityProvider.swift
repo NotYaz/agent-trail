@@ -6,14 +6,11 @@ public final class CompositeLiveActivityProvider {
     private let readers: [AssistantKind: ([AgentSource], Date) -> LiveSnapshot]
 
     public init() {
-        let claude = LiveActivityProvider()
-        let codex = CodexLiveActivityProvider()
-        let grok = GrokLiveActivityProvider()
-        readers = [
-            .claude: { claude.scan(sources: $0, now: $1) },
-            .codex: { codex.scan(sources: $0, now: $1) },
-            .grok: { grok.scan(sources: $0, now: $1) }
-        ]
+        var readers: [AssistantKind: ([AgentSource], Date) -> LiveSnapshot] = [:]
+        for kind in AssistantKind.allCases {
+            readers[kind] = AssistantRegistry.live(kind)
+        }
+        self.readers = readers
     }
 
     init(readers: [AssistantKind: ([AgentSource], Date) -> LiveSnapshot]) {
