@@ -43,7 +43,9 @@ final class ReadOnlySQLite {
         }
     }
 
-    enum Failure: Error { case open, busy, query(String) }
+    /// `busy`: another connection holds a lock; `interrupted`: the query hit
+    /// its deadline. Both mean "try again on the next scan", never "unreadable".
+    enum Failure: Error { case open, busy, interrupted, query(String) }
 
     private var handle: OpaquePointer?
 
@@ -102,6 +104,7 @@ final class ReadOnlySQLite {
             let prepared = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
             guard prepared == SQLITE_OK, let statement else {
                 if prepared == SQLITE_BUSY || prepared == SQLITE_LOCKED { throw Failure.busy }
+                if prepared == SQLITE_INTERRUPT { throw Failure.interrupted }
                 throw Failure.query(message)
             }
             defer { sqlite3_finalize(statement) }
@@ -121,6 +124,7 @@ final class ReadOnlySQLite {
                 let step = sqlite3_step(statement)
                 if step == SQLITE_DONE { return }
                 if step == SQLITE_BUSY || step == SQLITE_LOCKED { throw Failure.busy }
+                if step == SQLITE_INTERRUPT { throw Failure.interrupted }
                 guard step == SQLITE_ROW else { throw Failure.query(message) }
                 let row = (0..<sqlite3_column_count(statement)).map { column(statement, $0, cap: maximumColumnBytes) }
                 guard try body(row) else { return }
