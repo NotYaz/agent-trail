@@ -186,8 +186,12 @@ enum HistoryFold {
                 if owner != item.base { item.checkouts.insert(owner) }
             } else if targets.allSatisfy({ CheckoutPath.contains(root: cwd, path: $0) }) {
                 // Files outside any single checkout but inside the working
-                // directory stay with the folder the session was started in.
-                item.edits.append((id, item.base, stored))
+                // directory stay with the folder the session was started in,
+                // unless that is a checkout they are not in: a declared folder
+                // beside it (a multi-root window) keeps its own edits.
+                let project = item.baseIsCheckout && !CheckoutPath.contains(root: item.base, path: workspace)
+                    ? workspace : item.base
+                item.edits.append((id, project, stored))
                 if !item.baseIsCheckout {
                     for target in targets where !resolver.exists(target) {
                         if let folder = missingRoot(target, below: launch, resolver: resolver) {

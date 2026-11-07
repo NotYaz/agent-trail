@@ -92,8 +92,8 @@ extension AssistantKind {
                 defaultBundleIdentifier: "", requiresBundleIdentifier: false,
                 usesUserDataDirectory: true, defaultUserDataDirectory: "~/Library/Application Support/Code",
                 requiresUserDataDirectory: false, userDataTitle: "VS Code user-data folder",
-                userDataPlaceholder: "Default VS Code data folder",
-                userDataNote: "Copilot Chat sessions are read from this VS Code folder, and Copilot CLI sessions from the home above. Leave blank for VS Code's default folder; Insiders uses ~/Library/Application Support/Code - Insiders.",
+                userDataPlaceholder: "VS Code's default folder, with the default home",
+                userDataNote: "Copilot Chat sessions are read from this VS Code folder, and Copilot CLI sessions from the home above. With the default ~/.copilot home, leave it blank to read VS Code's default folder; with another home, enter the VS Code folder whose chats to read. Insiders uses ~/Library/Application Support/Code - Insiders.",
                 reportsDelegation: true, delegationOrigin: "a Copilot subagent",
                 editEvidence: "Copilot's applied edit and create-file calls", worktreeFolder: nil)
         }

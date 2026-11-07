@@ -185,6 +185,117 @@ final class CopilotActivityProviderTests: XCTestCase {
         XCTAssertTrue(result.notices.contains { $0.contains("format this version doesn't read") }, "\(result.notices)")
     }
 
+    func testOneUndoRevertsEditsSinceTheFileWasLastKept() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("foo.swift").path
+        // r1 edits, the user keeps it, r2 edits, the user undoes, r3 follows.
+        // The state-2 entry and r3's Undo event are one action: only r2 is reverted.
+        try f.chat("s1", lines: [
+            f.snapshot("s1", created: 0),
+            f.pushRequest("r1", started: 10), f.pushParts(0, [f.editCall("a", file: file)]), f.setModelState(0, completed: 20),
+            f.pushRequest("r2", started: 30, kept: [file]), f.pushParts(1, [f.editCall("b", file: file)]),
+            f.setModelState(1, completed: 40),
+            f.pushRequest("r3", started: 50, undone: [file]), f.setModelState(2, completed: 60)
+        ])
+        try f.editing("s1", operations: [f.operation("r1", file: file, epoch: 1), f.operation("r2", file: file, epoch: 3)],
+                      currentEpoch: 4, rejected: [("r2", file)])
+        XCTAssertEqual(f.provider().scan(sources: [f.source]).projects.first?.recordedEditCount, 1)
+
+        // Without a Keep, Undo goes back to the original: both requests are reverted.
+        let g = try ChatFixture()
+        defer { g.remove() }
+        let other = g.project.appendingPathComponent("foo.swift").path
+        try g.chat("s1", lines: [
+            g.snapshot("s1", created: 0),
+            g.pushRequest("r1", started: 10), g.pushParts(0, [g.editCall("a", file: other)]), g.setModelState(0, completed: 20),
+            g.pushRequest("r2", started: 30), g.pushParts(1, [g.editCall("b", file: other)]), g.setModelState(1, completed: 40)
+        ])
+        try g.editing("s1", operations: [g.operation("r1", file: other, epoch: 1), g.operation("r2", file: other, epoch: 3)],
+                      currentEpoch: 4, rejected: [("r2", other)])
+        XCTAssertEqual(g.provider().scan(sources: [g.source]).projects.first?.recordedEditCount, 0)
+    }
+
+    func testRejectedCreatedFileLeavesNoEntryAndDoesNotCount() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("new.swift").path
+        try f.chat("s1", lines: [f.snapshot("s1", created: 0), f.pushRequest("r1", started: 10),
+                                 f.pushParts(0, [f.editCall("a", file: file)]), f.setModelState(0, completed: 20)])
+        var create = f.operation("r1", file: file, epoch: 1)
+        create["type"] = "create"
+        try f.editing("s1", operations: [create, f.operation("r1", file: file, epoch: 2)], currentEpoch: 3)
+        XCTAssertEqual(f.provider().scan(sources: [f.source]).projects.first?.recordedEditCount, 0)
+        // Kept: the entry stays, so it counts.
+        try f.editing("s1", operations: [create, f.operation("r1", file: file, epoch: 2)], currentEpoch: 3,
+                      entries: [(file, 1, "r1")])
+        XCTAssertEqual(f.provider().scan(sources: [f.source]).projects.first?.recordedEditCount, 1)
+    }
+
+    func testDeniedSkippedAndFailedCallsNeverCount() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("a.txt").path
+        var denied = f.editCall("denied", file: file)
+        denied["isConfirmed"] = ["type": 0]
+        var skipped = f.editCall("skipped", file: file)
+        skipped["isConfirmed"] = ["type": 5]
+        var failed = f.editCall("failed", file: file)
+        failed["resultError"] = "Could not apply"
+        var legacy = f.editCall("legacy", file: file)
+        legacy["isConfirmed"] = false
+        try f.chat("s1", lines: [f.snapshot("s1", created: 0), f.pushRequest("r1", started: 10),
+                                 f.pushParts(0, [denied, skipped, failed, legacy, f.editCall("ran", file: file)]),
+                                 f.setModelState(0, completed: 20)])
+        try f.editing("s1", operations: [f.operation("r1", file: file, epoch: 1)], currentEpoch: 2)
+        XCTAssertEqual(f.provider().scan(sources: [f.source]).projects.first?.recordedEditCount, 1)
+    }
+
+    func testChatCopiedToAnotherWorkspaceIsOneSession() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("a.txt").path
+        let lines = [f.snapshot("s1", created: 0), f.pushRequest("r1", started: 10),
+                     f.pushParts(0, [f.editCall("a", file: file)]), f.setModelState(0, completed: 20)]
+        try f.chat("s1", lines: lines, storage: "old")
+        try f.editing("s1", operations: [f.operation("r1", file: file, epoch: 1)], currentEpoch: 2, storage: "old")
+        try f.chat("s1", lines: lines, storage: "new")
+        try f.editing("s1", operations: [f.operation("r1", file: file, epoch: 1)], currentEpoch: 2, storage: "new")
+        let project = try XCTUnwrap(f.provider().scan(sources: [f.source]).projects.first)
+        XCTAssertEqual(project.sessionCount, 1)
+        XCTAssertEqual(project.recordedEditCount, 1)
+    }
+
+    func testMultiRootEditBesideACheckoutStaysWithItsOwnFolder() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        try f.makeCheckout(f.project)
+        let notes = f.root.appendingPathComponent("notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        let workspaceFile = f.root.appendingPathComponent("pair.code-workspace")
+        try "{\"folders\": [{\"path\": \"project\"}, {\"path\": \"notes\"}]}".write(to: workspaceFile, atomically: true, encoding: .utf8)
+        let file = notes.appendingPathComponent("plan.md").path
+        try f.chat("s1", lines: [f.snapshot("s1", created: 0), f.pushRequest("r1", started: 10),
+                                 f.pushParts(0, [f.editCall("a", file: file)]), f.setModelState(0, completed: 20)],
+                   workspace: ["workspace": URL(fileURLWithPath: workspaceFile.path).absoluteString])
+        try f.editing("s1", operations: [f.operation("r1", file: file, epoch: 1)], currentEpoch: 2)
+        let result = f.provider().scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first { $0.path == canonicalPath(notes.path) }?.recordedEditCount, 1)
+        XCTAssertEqual(result.projects.first { $0.path == canonicalPath(f.project.path) }?.recordedEditCount ?? 0, 0)
+    }
+
+    func testYAMLScalars() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        let url = f.root.appendingPathComponent("w.yaml")
+        try "a: plain\nb: 'it''s'\nc: \"x\\ty\"\nd: |\n  block\ne: \"unterminated\n".write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(CopilotActivityProvider.yamlScalar("a", in: url), "plain")
+        XCTAssertEqual(CopilotActivityProvider.yamlScalar("b", in: url), "it's")
+        XCTAssertEqual(CopilotActivityProvider.yamlScalar("c", in: url), "x\ty")
+        XCTAssertNil(CopilotActivityProvider.yamlScalar("d", in: url))
+        XCTAssertNil(CopilotActivityProvider.yamlScalar("e", in: url))
+    }
+
     // MARK: Copilot CLI
 
     func testCLISuccessfulEditsCountAndFailuresShellAndReplaysDoNot() throws {
@@ -292,18 +403,25 @@ final class ChatFixture {
     }
 
     func request(_ id: String, started: TimeInterval, completed: TimeInterval? = nil, parts: [[String: Any]] = [],
-                 undone: [String] = []) -> [String: Any] {
+                 undone: [String] = [], kept: [String] = []) -> [String: Any] {
         var request: [String: Any] = ["requestId": id, "timestamp": ms(started), "response": parts,
                                       "message": ["text": "PRIVATE_PROMPT_MARKER"]]
         if let completed { request["modelState"] = ["value": 1, "completedAt": ms(completed)] }
-        if !undone.isEmpty {
-            request["editedFileEvents"] = undone.map { ["uri": ["$mid": 1, "scheme": "file", "path": $0], "eventKind": 2] }
-        }
+        let events = undone.map { ["uri": ["$mid": 1, "scheme": "file", "path": $0], "eventKind": 2] as [String: Any] }
+            + kept.map { ["uri": ["$mid": 1, "scheme": "file", "path": $0], "eventKind": 1] as [String: Any] }
+        if !events.isEmpty { request["editedFileEvents"] = events }
         return request
     }
 
-    func pushRequest(_ id: String, started: TimeInterval, undone: [String] = []) -> [String: Any] {
-        ["kind": 2, "k": ["requests"], "v": [request(id, started: started, undone: undone)]]
+    func pushRequest(_ id: String, started: TimeInterval, undone: [String] = [], kept: [String] = []) -> [String: Any] {
+        ["kind": 2, "k": ["requests"], "v": [request(id, started: started, undone: undone, kept: kept)]]
+    }
+
+    func makeCheckout(_ folder: URL) throws {
+        let metadata = folder.appendingPathComponent(".git")
+        try FileManager.default.createDirectory(at: metadata.appendingPathComponent("objects"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: metadata.appendingPathComponent("refs"), withIntermediateDirectories: true)
+        try Data("ref: refs/heads/main\n".utf8).write(to: metadata.appendingPathComponent("HEAD"))
     }
 
     func pushParts(_ index: Int, _ parts: [[String: Any]], truncate: Int? = nil) -> [String: Any] {
@@ -346,11 +464,13 @@ final class ChatFixture {
     }
 
     func editing(_ id: String, operations: [[String: Any]], currentEpoch: Int, rejected: [(String, String)] = [],
-                 version: Int = 2, storage: String = "hash1") throws {
+                 entries extra: [(String, Int, String)] = [], version: Int = 2, storage: String = "hash1") throws {
         let folder = userData.appendingPathComponent("User/workspaceStorage/\(storage)/chatEditingSessions/\(id)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let entries: [[String: Any]] = rejected.map { request, path in
             ["resource": URL(fileURLWithPath: path).absoluteString, "state": 2, "telemetryInfo": ["requestId": request]]
+        } + extra.map { path, state, request in
+            ["resource": URL(fileURLWithPath: path).absoluteString, "state": state, "telemetryInfo": ["requestId": request]]
         }
         let object: [String: Any] = ["version": version,
             "initialFileContents": [["file:///x", "PRIVATE_CONTENT_MARKER"]],

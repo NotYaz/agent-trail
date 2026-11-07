@@ -87,6 +87,47 @@ final class CopilotLiveActivityProviderTests: XCTestCase {
         XCTAssertEqual(status(provider, f), .idle)
     }
 
+    func testFailedTurnsSubagentsHookRepliesAndOtherHolders() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        let lock = try setUp(f)
+        let provider = provider(lock)
+        // A failed turn writes session.error and no turn_end.
+        try events(f, lock, [("assistant.turn_start", [:]), ("session.error", ["errorType": "model"])])
+        XCTAssertEqual(status(provider, f), .idle)
+        try events(f, lock, [("session.error", ["errorType": "notification"])], from: 3)
+        XCTAssertEqual(status(provider, f), .idle)
+        // A hook reply writes a message outside any turn.
+        try events(f, lock, [("user.message", [:]), ("assistant.message", [:])], from: 4)
+        XCTAssertEqual(status(provider, f), .idle)
+        // Another holder's shutdown, then this holder keeps working.
+        try events(f, lock, [("session.shutdown", ["shutdownType": "routine"])], from: 6)
+        XCTAssertNil(status(provider, f))
+        try events(f, lock, [("assistant.turn_start", [:]), ("permission.requested", ["requestId": "p9"])], from: 7)
+        XCTAssertEqual(status(provider, f), .waiting)
+    }
+
+    func testMainAndSubagentTurnsAreTrackedApart() throws {
+        let f = try ChatFixture()
+        defer { f.remove() }
+        let lock = try setUp(f)
+        let provider = provider(lock)
+        let created = FileStat.of(lock.path)!.created
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func line(_ type: String, _ second: TimeInterval, agent: String? = nil) -> [String: Any] {
+            var event: [String: Any] = ["type": type, "data": [:] as [String: Any],
+                                        "timestamp": formatter.string(from: created.addingTimeInterval(second))]
+            if let agent { event["agentId"] = agent }
+            return event
+        }
+        try f.cli(id, events: [line("assistant.turn_start", 1), line("assistant.turn_start", 2, agent: "sub"),
+                               line("assistant.turn_end", 3)], append: true)
+        XCTAssertEqual(status(provider, f), .working, "the subagent's turn is still open")
+        try f.cli(id, events: [line("subagent.completed", 4, agent: "sub")], append: true)
+        XCTAssertEqual(status(provider, f), .idle)
+    }
+
     func testLockNames() {
         XCTAssertEqual(CopilotLiveActivityProvider.lockPID("inuse.123.lock"), 123)
         XCTAssertNil(CopilotLiveActivityProvider.lockPID("inuse..lock"))

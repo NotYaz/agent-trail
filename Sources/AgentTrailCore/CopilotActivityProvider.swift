@@ -24,7 +24,7 @@ import Foundation
 /// Shell commands and file modification times are never evidence. The cache
 /// keeps ids, times and file paths only: no prompts, code or file content.
 public final class CopilotActivityProvider: ActivityProvider {
-    static let cacheVersion = 1
+    static let cacheVersion = 2
     private let cache: HistoryCache<CopilotFile>
     private let files = FileManager.default
     private let resolver: GitProjectResolver
@@ -71,11 +71,16 @@ public final class CopilotActivityProvider: ActivityProvider {
             do {
                 switch task.kind {
                 case .chatLog:
-                    try JSONLTail.read(url: task.url, state: &file.tail, reset: { file.chat = ChatLog() }) { line in
+                    // Parse into copies, so a read that fails halfway leaves
+                    // the cached evidence and its offset in step.
+                    var tail = file.tail
+                    var chat = file.chat ?? ChatLog()
+                    try JSONLTail.read(url: task.url, state: &tail, reset: { chat = ChatLog() }) { line in
                         guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { return false }
-                        if file.chat == nil { file.chat = ChatLog() }
-                        return file.chat!.apply(object)
+                        return chat.apply(object)
                     }
+                    file.tail = tail
+                    file.chat = chat
                 case .chatSnapshot:
                     try readWhole(task.url, file: file) { object in
                         var chat = ChatLog()
@@ -87,11 +92,14 @@ public final class CopilotActivityProvider: ActivityProvider {
                         file.editing = EditingState(object)
                     }
                 case .cliEvents:
-                    try JSONLTail.read(url: task.url, state: &file.tail, reset: { file.cli = CLILog() }) { line in
+                    var tail = file.tail
+                    var cli = file.cli ?? CLILog()
+                    try JSONLTail.read(url: task.url, state: &tail, reset: { cli = CLILog() }) { line in
                         guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { return false }
-                        if file.cli == nil { file.cli = CLILog() }
-                        return file.cli!.apply(object)
+                        return cli.apply(object)
                     }
+                    file.tail = tail
+                    file.cli = cli
                 }
                 // Parsed evidence changes only with the tail or stamp.
                 cache.store(file, at: task.url.path, changed: cached == nil || file.tail != before.0 || file.stamp != before.1)
@@ -136,10 +144,11 @@ public final class CopilotActivityProvider: ActivityProvider {
         file.stamp = stamp
         file.tail.oversizedLines = 0
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            // Possibly mid-write; the next scan rereads it.
-            file.stamp = nil
+            // Caught mid-write, or broken: the next change rereads it.
+            file.tail.malformedLines = 1
             return
         }
+        file.tail.malformedLines = 0
         parse(object)
     }
 
@@ -275,10 +284,16 @@ public final class CopilotActivityProvider: ActivityProvider {
         guard let stat = FileStat.of(url.path), stat.kind == .regular, stat.size <= 262_144,
               let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) where line.hasPrefix("\(key):") {
-            var value = line.dropFirst(key.count + 1).trimmingCharacters(in: .whitespaces)
-            if value.count >= 2, let first = value.first, first == "\"" || first == "'", value.last == first {
-                value = String(value.dropFirst().dropLast())
+            let value = line.dropFirst(key.count + 1).trimmingCharacters(in: .whitespaces)
+            // Block scalars span lines; this reader does not follow them.
+            if value.hasPrefix("|") || value.hasPrefix(">") { return nil }
+            if value.count >= 2, value.first == "'", value.last == "'" {
+                return String(value.dropFirst().dropLast()).replacingOccurrences(of: "''", with: "'")
             }
+            if value.count >= 2, value.first == "\"", value.last == "\"" {
+                return (try? JSONSerialization.jsonObject(with: Data(value.utf8), options: .fragmentsAllowed)) as? String
+            }
+            if value.first == "\"" || value.first == "'" { return nil }
             return value.isEmpty ? nil : value
         }
         return nil
@@ -289,12 +304,22 @@ public final class CopilotActivityProvider: ActivityProvider {
     private func result(_ discovered: Discovered, parsed: [String: CopilotFile], notices: [String]) -> ScanResult {
         var sessions: [HistorySession] = []
         var unreadableStates = 0
+        // VS Code copies a chat when a window changes workspace; copies are one session.
+        var chatIndex: [String: Int] = [:]
         for chat in discovered.chats {
             guard let log = parsed[chat.log.path]?.chat, !log.requests.isEmpty else { continue }
             let editingFile = chat.editing.flatMap { parsed[$0.path] }
-            if editingFile != nil, editingFile?.editing == nil, editingFile?.stamp != nil { unreadableStates += 1 }
+            if let editingFile, editingFile.editing == nil, editingFile.stamp != nil, editingFile.tail.malformedLines == 0 {
+                unreadableStates += 1
+            }
             guard let session = Self.session(chat, log: log, editing: editingFile?.editing) else { continue }
-            sessions.append(session)
+            let key = session.sourceID + "\u{0}" + session.sessionID
+            guard let index = chatIndex[key] else {
+                chatIndex[key] = sessions.count
+                sessions.append(session)
+                continue
+            }
+            sessions[index] = Self.merged(sessions[index], session)
         }
         for cli in discovered.cli {
             if let session = Self.session(cli, logs: cli.events.compactMap { parsed[$0.path]?.cli }) {
@@ -309,6 +334,20 @@ public final class CopilotActivityProvider: ActivityProvider {
         return ScanResult(projects: ProjectSummary.merge(folded.activity), notices: Array(Set(notices)).sorted(),
             sessionProjects: folded.associations, missingFolders: folded.missingFolders,
             sessionTrails: SessionTrail.merge(folded.trails))
+    }
+
+    /// Two copies of one chat: their evidence together. Copies that started in
+    /// different folders keep the first folder and never move.
+    private static func merged(_ first: HistorySession, _ second: HistorySession) -> HistorySession {
+        var result = first
+        result.edits.merge(second.edits) { $0.earlier(than: $1) }
+        result.delegatedEdits.formUnion(second.delegatedEdits)
+        if second.recordedWorkspace != first.recordedWorkspace { result.canMove = false }
+        return HistorySession(sourceID: first.sourceID, sessionID: first.sessionID,
+            recordedWorkspace: first.recordedWorkspace, roots: Array(Set(first.roots + second.roots)).sorted(),
+            createdAt: min(first.createdAt, second.createdAt), latestActivity: max(first.latestActivity, second.latestActivity),
+            edits: result.edits, parentSessionID: first.parentSessionID, canMove: result.canMove,
+            delegatedEdits: result.delegatedEdits)
     }
 
     private static func session(_ chat: ChatSession, log: ChatLog, editing: EditingState?) -> HistorySession? {
@@ -331,25 +370,31 @@ public final class CopilotActivityProvider: ActivityProvider {
     /// edit. Applied files no call names (older logs) count once per request.
     static func confirmedEdits(_ log: ChatLog, editing: EditingState?, roots: [String]) -> [(String, StoredEdit, Bool)] {
         guard let editing else { return [] }
-        var applied: [Int: Set<String>] = [:]
-        for (index, request) in log.requests.enumerated() {
-            var paths = Set(editing.confirmed[request.id] ?? [])
-            paths.subtract(editing.rejected[request.id] ?? [])
-            if !paths.isEmpty { applied[index] = paths }
+        let confirmed = log.requests.map { Set(editing.confirmed[$0.id] ?? []) }
+        var applied = confirmed
+        // A rejection (the file's snapshot entry) and the next request's Undo
+        // event record one action: reverting the file to its last kept content.
+        // Its anchor is the latest request that edited the file; every edit
+        // since the file was last kept is undone.
+        var reverts: Set<String> = []
+        func revert(_ path: String, anchor: Int) {
+            guard reverts.insert("\(anchor)\u{0}\(path)").inserted else { return }
+            let kept = (0...anchor).last { log.requests[$0].kept.contains(path) } ?? 0
+            for index in kept...anchor { applied[index].remove(path) }
         }
-        // An Undo in a later request reverts the latest earlier request's edits to that file.
         for (index, request) in log.requests.enumerated() {
+            for path in editing.rejected[request.id] ?? [] where confirmed[index].contains(path) {
+                revert(path, anchor: index)
+            }
             for path in request.undone {
-                if let earlier = applied.keys.filter({ $0 < index && applied[$0]!.contains(path) }).max() {
-                    applied[earlier]!.remove(path)
-                }
+                if let anchor = (0..<index).last(where: { confirmed[$0].contains(path) }) { revert(path, anchor: anchor) }
             }
         }
         var result: [(String, StoredEdit, Bool)] = []
-        for (index, paths) in applied.sorted(by: { $0.key < $1.key }) where !paths.isEmpty {
+        for (index, paths) in applied.enumerated() where !paths.isEmpty {
             let request = log.requests[index]
             var covered: Set<String> = []
-            for (position, call) in request.calls.sorted(by: { $0.key < $1.key }) {
+            for (position, call) in request.calls.sorted(by: { $0.key < $1.key }) where call.ran {
                 let targets = call.paths.filter { paths.contains($0) }
                 guard !targets.isEmpty, let date = call.completed ?? request.completed ?? request.started else { continue }
                 covered.formUnion(targets)
@@ -525,8 +570,9 @@ struct ChatRequest: Codable, Equatable {
     var parts = 0
     /// Edit tool calls by their index in the response.
     var calls: [Int: ChatEditCall] = [:]
-    /// Files the user undid when sending this request (editedFileEvents).
+    /// Files the user undid, and kept, before sending this request (editedFileEvents).
     var undone: [String] = []
+    var kept: [String] = []
 
     init(_ value: Any) {
         guard let object = value as? [String: Any] else { return }
@@ -534,7 +580,9 @@ struct ChatRequest: Codable, Equatable {
         started = RecordedDate.milliseconds(object["timestamp"])
         completed = Self.completion(object["modelState"])
         setParts(object["response"] as? [Any] ?? [], from: 0)
-        undone = Self.undone(object["editedFileEvents"] as? [Any] ?? [])
+        let events = object["editedFileEvents"] as? [Any] ?? []
+        undone = Self.files(events, kind: 2)
+        kept = Self.files(events, kind: 1)
     }
 
     mutating func set(_ path: [ChatKey], _ value: Any?) {
@@ -564,7 +612,10 @@ struct ChatRequest: Codable, Equatable {
                 calls[index]?.update(Array(path.dropFirst(2)), value)
             }
         case .key("editedFileEvents")?:
-            if path.count == 1 { undone = Self.undone(value as? [Any] ?? []) }
+            if path.count == 1 {
+                undone = Self.files(value as? [Any] ?? [], kind: 2)
+                kept = Self.files(value as? [Any] ?? [], kind: 1)
+            }
         default:
             break
         }
@@ -575,7 +626,8 @@ struct ChatRequest: Codable, Equatable {
         case [.key("response")]:
             setParts(values, from: truncate.map { min(max($0, 0), parts) } ?? parts)
         case [.key("editedFileEvents")]:
-            undone += Self.undone(values)
+            undone += Self.files(values, kind: 2)
+            kept += Self.files(values, kind: 1)
         default:
             break
         }
@@ -596,10 +648,10 @@ struct ChatRequest: Codable, Equatable {
         (value as? [String: Any]).flatMap { RecordedDate.milliseconds($0["completedAt"]) }
     }
 
-    /// ChatRequestEditedFileEventKind 2 is Undo.
-    private static func undone(_ events: [Any]) -> [String] {
+    /// ChatRequestEditedFileEventKind: 1 Keep, 2 Undo, 3 user modification.
+    private static func files(_ events: [Any], kind: Int) -> [String] {
         events.compactMap { event in
-            guard let object = event as? [String: Any], (object["eventKind"] as? NSNumber)?.intValue == 2 else { return nil }
+            guard let object = event as? [String: Any], (object["eventKind"] as? NSNumber)?.intValue == kind else { return nil }
             return VSCodeURI.localPath(object["uri"])
         }
     }
@@ -610,6 +662,8 @@ struct ChatEditCall: Codable, Equatable {
     var paths: [String]
     var completed: Date?
     var delegated: Bool
+    /// False when VS Code records the call as denied, skipped or failed.
+    var ran = true
 
     init?(_ value: Any) {
         guard let object = value as? [String: Any], object["kind"] as? String == "toolInvocationSerialized",
@@ -618,6 +672,21 @@ struct ChatEditCall: Codable, Equatable {
         paths = Array(Set(Self.paths(object["invocationMessage"]) + Self.paths(object["pastTenseMessage"]))).sorted()
         completed = RecordedDate.milliseconds(object["completedAt"])
         delegated = object["subAgentInvocationId"].map { !($0 is NSNull) } ?? false
+        ran = Self.ran(confirmation: object["isConfirmed"], error: object["resultError"])
+    }
+
+    /// ToolConfirmKind 0 is Denied and 5 Skipped; older logs store false. A
+    /// result error means the call failed.
+    private static func ran(confirmation: Any?, error: Any?) -> Bool {
+        if let error, !(error is NSNull) {
+            if let number = error as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { if number.boolValue { return false } }
+            else { return false }
+        }
+        if let number = confirmation as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
+        if let object = confirmation as? [String: Any], let type = (object["type"] as? NSNumber)?.intValue {
+            return type != 0 && type != 5
+        }
+        return true
     }
 
     mutating func update(_ path: [ChatKey], _ value: Any?) {
@@ -629,6 +698,10 @@ struct ChatEditCall: Codable, Equatable {
             completed = RecordedDate.milliseconds(value)
         case "subAgentInvocationId":
             delegated = value.map { !($0 is NSNull) } ?? false
+        case "isConfirmed":
+            ran = Self.ran(confirmation: value, error: nil)
+        case "resultError":
+            if !Self.ran(confirmation: nil, error: value) { ran = false }
         default:
             break
         }
@@ -653,6 +726,9 @@ struct EditingState: Codable, Equatable {
     init?(_ object: [String: Any]) {
         guard let version = (object["version"] as? NSNumber)?.intValue, (1...2).contains(version) else { return nil }
         var confirmed: [String: Set<String>] = [:]
+        // Each file's latest applied operation, and whether its request created the file.
+        var latest: [String: (epoch: Int, request: String, created: Bool)] = [:]
+        var createdIn: Set<String> = []
         if let timeline = object["timeline"] as? [String: Any] {
             // Operations at or after the current epoch were undone by restoring a checkpoint.
             let current = (timeline["currentEpoch"] as? NSNumber)?.intValue ?? Int.max
@@ -662,14 +738,31 @@ struct EditingState: Codable, Equatable {
                       let epoch = (operation["epoch"] as? NSNumber)?.intValue, epoch < current,
                       let path = VSCodeURI.localPath(operation["uri"] ?? operation["newUri"]) else { continue }
                 confirmed[request, default: []].insert(path)
+                if type == "create" { createdIn.insert(request + "\u{0}" + path) }
+                if epoch >= (latest[path]?.epoch ?? Int.min) {
+                    latest[path] = (epoch, request, false)
+                }
             }
+            for (path, last) in latest { latest[path]?.created = createdIn.contains(last.request + "\u{0}" + path) }
         }
         var rejected: [String: Set<String>] = [:]
-        let entries = (object["recentSnapshot"] as? [String: Any])?["entries"] as? [Any] ?? []
-        for case let entry as [String: Any] in entries where (entry["state"] as? NSNumber)?.intValue == 2 {
-            guard let path = VSCodeURI.localPath(entry["resource"]),
+        let snapshot = object["recentSnapshot"] as? [String: Any]
+        let entries = snapshot?["entries"] as? [Any] ?? []
+        var listed: Set<String> = []
+        for case let entry as [String: Any] in entries {
+            guard let path = VSCodeURI.localPath(entry["resource"]) else { continue }
+            listed.insert(path)
+            guard (entry["state"] as? NSNumber)?.intValue == 2,
                   let request = (entry["telemetryInfo"] as? [String: Any])?["requestId"] as? String else { continue }
             rejected[request, default: []].insert(path)
+        }
+        // Rejecting a file the same request created deletes it, and its entry
+        // with it. A created file whose last change has no entry was rejected
+        // (or deleted outside VS Code); either way it is gone.
+        if snapshot != nil {
+            for (path, last) in latest where last.created && !listed.contains(path) {
+                rejected[last.request, default: []].insert(path)
+            }
         }
         self.confirmed = confirmed.mapValues { $0.sorted() }
         self.rejected = rejected.mapValues { $0.sorted() }

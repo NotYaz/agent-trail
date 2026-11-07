@@ -306,7 +306,8 @@ struct ProfileSettingsView: View {
         let previous = draftSources[index].assistant
         draftSources[index].assistant = kind
         draftSources[index].bundleIdentifier = kind.descriptor.defaultBundleIdentifier
-        if !kind.descriptor.usesUserDataDirectory { draftSources[index].userDataDirectory = nil }
+        // A data folder belongs to one app: Claude Desktop's is never VS Code's.
+        draftSources[index].userDataDirectory = nil
         let previousHome = previous.defaultHome(home: "~")
         if draftSources[index].configDirectory.isEmpty || draftSources[index].configDirectory == previousHome {
             draftSources[index].configDirectory = kind.defaultHome(home: "~")
