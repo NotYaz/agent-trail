@@ -338,6 +338,7 @@ final class CursorActivityProviderTests: XCTestCase {
         ])
         try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path))])
         XCTAssertEqual(CursorActivityProvider.usesWAL(f.database), true)
+        XCTAssertEqual(CursorActivityProvider.open(f.database).limits, .wal)
         let provider = f.provider()
         XCTAssertEqual(provider.scan(sources: [f.source]).projects.first?.recordedEditCount, 1)
         XCTAssertNil(provider.saveCache())
@@ -355,6 +356,214 @@ final class CursorActivityProviderTests: XCTestCase {
         let warm = f.provider().scan(sources: [f.source])
         XCTAssertEqual(warm.projects.first?.recordedEditCount, 1)
         XCTAssertEqual(warm.notices, [])
+    }
+
+    // MARK: Rollback-journal databases
+
+    func testRollbackDatabaseIsReadInShortStatementsAndHugeValuesAreSkipped() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("a.txt").path
+        let huge = String(repeating: "x", count: 9 * 1_048_576)
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: ["t1", "t2"], created: 0, updated: 30)),
+            ("bubbleId:c1:t1", f.tool("t1", name: "edit_file_v2", call: "tool_1", path: file, at: 10, result: f.applied())),
+            // Cursor 2.x parameters carry the whole new file.
+            ("bubbleId:c1:t2", f.tool("t2", name: "edit_file_v2", call: "tool_2", path: file, at: 20, result: f.applied(),
+                                      params: ["contentsAfterEdit": huge])),
+            // Cursor 2.x chats embed the original text of every file they touched.
+            ("composerData:c2", f.composer("c2", bubbles: ["u1"], created: 0, updated: 30,
+                                           extra: ["originalFileStates": [URL(fileURLWithPath: file).absoluteString: ["content": huge]]])),
+            ("bubbleId:c2:u1", f.userBubble("u1", at: 5))
+        ])
+        try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path)), ("c2", nil, f.head("c2", folder: f.project.path))])
+        // Bytes 18 and 19 of the header say rollback journal: every statement
+        // stays far below Cursor's 1 s busy timeout.
+        XCTAssertEqual(CursorActivityProvider.usesWAL(f.database), false)
+        let opened = CursorActivityProvider.open(f.database)
+        XCTAssertNotNil(opened.reader)
+        XCTAssertFalse(opened.wal)
+        XCTAssertEqual(opened.limits, .rollback)
+        XCTAssertLessThanOrEqual(opened.limits.deadline, 0.25)
+        XCTAssertLessThanOrEqual(opened.limits.batchSize, 8)
+        XCTAssertLessThanOrEqual(opened.limits.maximumValueBytes, 8 * 1_048_576)
+
+        let result = f.provider().scan(sources: [f.source])
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.recordedEditCount, 1)
+        XCTAssertEqual(project.sessionCount, 1)
+        XCTAssertEqual(result.notices, ["Cursor: a Cursor chat record was too large to index safely."])
+    }
+
+    func testRollbackDatabaseIsLeftAloneRightAfterAWrite() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("a.txt").path
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: ["t1"], created: 0, updated: 30)),
+            ("bubbleId:c1:t1", f.tool("t1", name: "edit_file_v2", call: "tool_1", path: file, at: 10, result: f.applied()))
+        ])
+        try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path))])
+        // Cursor may be launching: its first write gives up after 1 s busy and one retry.
+        XCTAssertTrue(CursorActivityProvider.recentlyWritten(f.database, within: 60))
+        XCTAssertNil(CursorActivityProvider.open(f.database, quietInterval: 60).reader)
+        let provider = f.provider()
+        provider.rollbackQuietInterval = 60
+        let waiting = provider.scan(sources: [f.source])
+        XCTAssertEqual(waiting.projects, [])
+        XCTAssertEqual(waiting.notices, ["Cursor: Cursor's chat database was busy; the next refresh tries again."])
+
+        // The database has been quiet for two minutes.
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -120)], ofItemAtPath: f.database.path)
+        XCTAssertFalse(CursorActivityProvider.recentlyWritten(f.database, within: 60))
+        let read = provider.scan(sources: [f.source])
+        XCTAssertEqual(read.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(read.notices, [])
+    }
+
+    func testStatementPastItsDeadlineStopsThePassAndKeepsTheCache() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        func path(_ name: String) -> String { f.project.appendingPathComponent(name).path }
+        try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path))])
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: ["u1", "t1"], created: 0, updated: 20)),
+            ("bubbleId:c1:u1", f.userBubble("u1", at: 1)),
+            ("bubbleId:c1:t1", f.tool("t1", name: "edit_file_v2", call: "tool_1", path: path("a.txt"), at: 10, result: f.applied()))
+        ])
+        let provider = f.provider()
+        XCTAssertEqual(provider.scan(sources: [f.source]).projects.first?.recordedEditCount, 1)
+
+        // A long chat: reading its bubble list takes more than one deadline
+        // check (every 1,000 SQLite steps), and the deadline has passed.
+        let long = ["u1", "t1"] + (1...600).map { "n\($0)" } + ["t2"]
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: long, created: 0, updated: 40)),
+            ("bubbleId:c1:t2", f.tool("t2", name: "edit_file_v2", call: "tool_2", path: path("b.txt"), at: 30, result: f.applied()))
+        ])
+        provider.rollbackLimits.deadline = -1
+        let stopped = provider.scan(sources: [f.source])
+        XCTAssertEqual(stopped.projects.first?.recordedEditCount, 1, "the cache keeps what it had")
+        XCTAssertEqual(stopped.notices, ["Cursor: Cursor's chat database was busy; the next refresh reads the rest."],
+                       "interrupted, never unreadable")
+
+        provider.rollbackLimits = .rollback
+        let resumed = provider.scan(sources: [f.source])
+        XCTAssertEqual(resumed.projects.first?.recordedEditCount, 2)
+        XCTAssertEqual(resumed.notices, [])
+    }
+
+    // MARK: Placeholder bubbles, listing cost, headers
+
+    func testEmptyBubbleThatBecomesAnEditCallIsReadAgain() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("a.txt").path
+        try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path))])
+        // Cursor flushed the chat right after a read: its last bubble is the
+        // empty one the next tool call is written into.
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: ["u1", "r1", "m1"], created: 0, updated: 20)),
+            ("bubbleId:c1:u1", f.userBubble("u1", at: 1)),
+            ("bubbleId:c1:r1", f.tool("r1", name: "read_file_v2", call: "tool_1", path: file, at: 10, result: [:])),
+            ("bubbleId:c1:m1", f.placeholder("m1", at: 20))
+        ])
+        let provider = f.provider()
+        XCTAssertEqual(provider.scan(sources: [f.source]).projects.first?.recordedEditCount, 0)
+
+        // The edit lands in the same bubble id, keeping its time, and a new empty bubble follows.
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: ["u1", "r1", "m1", "m2"], created: 0, updated: 40)),
+            ("bubbleId:c1:m1", f.tool("m1", name: "edit_file_v2", call: "tool_2", path: file, at: 20, result: f.applied())),
+            ("bubbleId:c1:m2", f.placeholder("m2", at: 30))
+        ])
+        let result = provider.scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(result.projects.first?.activities.first?.editMoments.map(\.date), [f.date(20)])
+        XCTAssertNil(provider.saveCache())
+        XCTAssertEqual(f.provider().scan(sources: [f.source]).projects.first?.recordedEditCount, 1)
+    }
+
+    func testListingParsesOnlyNewChangedOrRecentChats() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path)), ("c2", nil, f.head("c2", folder: f.project.path))])
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: ["u1"], created: 0, updated: 30)),
+            ("bubbleId:c1:u1", f.userBubble("u1", at: 10))
+        ])
+        let provider = f.provider()
+        var result = provider.scan(sources: [f.source])
+        XCTAssertEqual(result.sessionTrails.map(\.latestActivity), [f.date(30)])
+
+        // An old chat changes without changing its value's length, and a new chat appears.
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: ["u1"], created: 0, updated: 39)),
+            ("composerData:c2", f.composer("c2", bubbles: ["u1"], created: 0, updated: 50)),
+            ("bubbleId:c2:u1", f.userBubble("u1", at: 45))
+        ])
+        result = provider.scan(sources: [f.source])
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "c2" }?.latestActivity, f.date(50))
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "c1" }?.latestActivity, f.date(30),
+                       "a chat whose value kept its length is not parsed again")
+
+        // The hourly full listing parses every chat.
+        provider.fullRelistInterval = 0
+        try f.put([("unrelated.key", "x")], table: "ItemTable")
+        result = provider.scan(sources: [f.source])
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "c1" }?.latestActivity, f.date(39))
+
+        var composer = CursorComposer()
+        composer.length = 100
+        composer.updated = f.date(0)
+        let later = f.date(2 * 86_400)
+        XCTAssertFalse(CursorActivityProvider.needsParse(composer, length: 100, headerUpdated: nil, now: later))
+        XCTAssertFalse(CursorActivityProvider.needsParse(composer, length: 100, headerUpdated: f.date(0), now: later))
+        XCTAssertTrue(CursorActivityProvider.needsParse(nil, length: 100, headerUpdated: nil, now: later), "new")
+        XCTAssertTrue(CursorActivityProvider.needsParse(composer, length: 101, headerUpdated: nil, now: later), "length changed")
+        XCTAssertTrue(CursorActivityProvider.needsParse(composer, length: nil, headerUpdated: nil, now: later), "length unknown")
+        XCTAssertTrue(CursorActivityProvider.needsParse(composer, length: 100, headerUpdated: f.date(5), now: later), "header moved")
+        XCTAssertTrue(CursorActivityProvider.needsParse(composer, length: 100, headerUpdated: nil, now: f.date(3_600)), "recent")
+        composer.length = nil
+        XCTAssertTrue(CursorActivityProvider.needsParse(composer, length: 100, headerUpdated: nil, now: later), "reread due")
+    }
+
+    func testHeadersAreReducedInsideSQLite() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        var rows: [(String, Any?)] = []
+        for id in ["c1", "c2", "c3", "c4"] {
+            rows.append(("composerData:\(id)", f.composer(id, bubbles: ["u1"], created: 0, updated: 20)))
+            rows.append(("bubbleId:\(id):u1", f.userBubble("u1", at: 10)))
+        }
+        try f.put(rows)
+        var titled = f.head("c1", folder: f.project.path)
+        titled["subtitle"] = "Edited PRIVATE_TITLE_MARKER.swift"
+        var cloud = f.head("c2", folder: f.project.path)
+        cloud["createdFromBackgroundAgent"] = ["bcId": "bc-1"]
+        var local = f.head("c3", folder: f.project.path)
+        local["createdFromBackgroundAgent"] = [String: Any]()
+        try f.headerTable([("c1", nil, titled), ("c2", nil, cloud), ("c3", nil, local)])
+        // A malformed header leaves the others alone.
+        try f.insert("INSERT OR REPLACE INTO composerHeaders (composerId, workspaceId, isArchived, isSubagent, value) VALUES (?, ?, 0, 0, ?)",
+                     rows: [["c9", nil, "{broken"]])
+        // Cursor 3.0's list in ItemTable.
+        let list: [String: Any] = ["allComposers": [f.head("c4", folder: f.project.path)]]
+        try f.put([("composer.composerHeaders", list)], table: "ItemTable")
+
+        let result = f.provider().scan(sources: [f.source])
+        XCTAssertEqual(result.projects.map(\.path), [canonicalPath(f.project.path)])
+        XCTAssertEqual(result.projects.first?.sessionCount, 3, "c2 came from a cloud agent")
+        XCTAssertEqual(result.notices, [])
+
+        // Only ids, folders, times and flags leave SQLite.
+        let reader = try XCTUnwrap(ReadOnlySQLite(url: f.database))
+        let returned = try reader.rows(CursorActivityProvider.headerTableSQL)
+            + reader.rows(CursorActivityProvider.headerListSQL, bindings: [.text("composer.composerHeaders")])
+        XCTAssertEqual(returned.count, 5)
+        for value in returned.flatMap({ $0 }) {
+            XCTAssertFalse(value.string?.contains("PRIVATE_TITLE_MARKER") ?? false)
+        }
     }
 
     // MARK: Cursor CLI
@@ -430,6 +639,8 @@ final class CursorFixture {
     func provider() -> CursorActivityProvider {
         let provider = CursorActivityProvider(cacheURL: cache)
         provider.minimumRelistInterval = 0
+        // The fixture writes its rollback-journal databases just before each scan.
+        provider.rollbackQuietInterval = 0
         return provider
     }
 
@@ -480,6 +691,11 @@ final class CursorFixture {
 
     func textBubble(_ id: String, at seconds: TimeInterval) -> [String: Any] {
         ["_v": 3, "type": 2, "bubbleId": id, "text": "PRIVATE_PROMPT_MARKER", "createdAt": iso(seconds)]
+    }
+
+    /// The empty bubble Cursor appends after each tool call; the next call is written into it.
+    func placeholder(_ id: String, at seconds: TimeInterval) -> [String: Any] {
+        ["_v": 3, "type": 2, "bubbleId": id, "text": "", "codeBlocks": [], "createdAt": iso(seconds)]
     }
 
     /// A successful 3.x edit result: content-store ids.

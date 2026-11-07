@@ -7,13 +7,44 @@ import Foundation
 /// `User/globalStorage/state.vscdb`, a SQLite database Cursor keeps open while
 /// it runs. Its `cursorDiskKV` table holds `composerData:<id>`, one chat with
 /// its ordered bubble list `fullConversationHeadersOnly`, and
-/// `bubbleId:<id>:<bubble>`, one message or tool call. Only key lookups and
-/// key ranges are queried, values are reduced with `json_extract` inside
-/// SQLite, and only the bubbles a chat lists are read, so prompts, code and
-/// file contents never reach this process. Each query is short, so a
-/// rollback-journal database is never held for long. A database in WAL mode is
-/// opened only while its `-wal` and `-shm` files exist (Cursor is using it),
-/// because a read-only connection would otherwise create a `-shm` file there.
+/// `bubbleId:<id>:<bubble>`, one message or tool call. `cursorDiskKV` and
+/// `ItemTable` are queried by key and key range only. The `composerHeaders`
+/// table has no key range and is read in full. Every value is reduced with
+/// `json_extract` inside SQLite (a header to its folder, parent, times and
+/// flags), and only the bubbles a chat lists are read, so prompts, chat
+/// titles, code and file contents never reach this process.
+///
+/// A listing reads each chat key with `octet_length(value)`, which SQLite
+/// (3.43 and later) answers from the record header without loading the value.
+/// It parses a chat's value only when the chat is new, its value's length
+/// changed, its header's `lastUpdatedAt` moved past the recorded one, or it was
+/// updated within the last day. The first listing after launch, and one an
+/// hour after that, parses every chat.
+///
+/// The database header's bytes 18 and 19 give the journal mode: 2 for WAL, 1
+/// for a rollback journal.
+/// - WAL (Cursor 3.x): readers never block Cursor's writes. The database is
+///   opened only while its `-wal` and `-shm` files exist (Cursor is using it),
+///   because a read-only connection would otherwise create a `-shm` file
+///   there. A statement may run 10 s, look up 64 keys and read values up to
+///   64 MB.
+/// - Rollback journal (Cursor 2.x, or 3.x with WAL off): a statement holds a
+///   shared lock that blocks Cursor's commits while it runs. Cursor gives up on
+///   a write after 1 s busy, and a failed write makes it rebuild state.vscdb
+///   without its chats when it quits; at launch it replaces the file with its
+///   backup. So the database is read whether or not Cursor is open, but never
+///   within 5 s of a change to it or to its `-journal` file (Cursor may be
+///   launching or committing), checked before the listing and before each
+///   chat. Each statement is interrupted after 200 ms (SQLite checks the
+///   deadline every 1,000 steps), looks up at most 8 keys, and fails before
+///   loading any value over 8 MB, which is reported as too large to index. No
+///   lock is held between statements. Pre-3.0 workspace databases are read
+///   the same way.
+/// A busy database, or a statement interrupted at its deadline, stops the pass
+/// for that database: nothing is marked unreadable, the cache keeps what it
+/// had, and the next scan lists the database again. A chat whose reread was
+/// interrupted waits behind the others next time. File modification times only
+/// schedule reads; they never date or confirm an edit.
 ///
 /// A chat's folder is, in order: the header's or chat's
 /// `workspaceIdentifier` (a folder, or a `.code-workspace` file's folders),
@@ -28,9 +59,13 @@ import Foundation
 /// `codeBlockData` entry for the bubble's code block with a `diffId` and
 /// `lastAppliedAt`, not later rejected; else the file in `newlyCreatedFiles`.
 /// `completed` alone is not proof. The edit id is the `toolCallId`, so copies of
-/// one call in forked chats count once. The time is the bubble's `createdAt`
-/// (when the call started), else the code block's `lastAppliedAt`, else the
-/// nearest earlier bubble's `createdAt`, else the chat's `lastUpdatedAt`.
+/// one call in forked chats count once. The time is the bubble's `createdAt`,
+/// else the code block's `lastAppliedAt`, else the nearest earlier bubble's
+/// `createdAt`, else the chat's `lastUpdatedAt`. Cursor writes a new tool call
+/// into the chat's last bubble while that bubble is still empty, so the call
+/// keeps the `createdAt` the empty bubble got when the previous call started,
+/// and a bubble with no tool name among a chat's last `pendingTail` is read
+/// again with the chat's next change.
 ///
 /// The Cursor CLI, under the profile's home (`~/.cursor`):
 /// `chats/<md5>/<chatId>/meta.json` gives each session's folder (`cwd`) and
@@ -39,16 +74,34 @@ import Foundation
 /// Shell commands and file modification times are never evidence. The cache
 /// keeps ids, times, hashes and file paths only.
 public final class CursorActivityProvider: ActivityProvider {
-    static let cacheVersion = 1
+    /// 2: nameless bubbles near a chat's end stay pending, and chats record
+    /// their value's length.
+    static let cacheVersion = 2
     /// Cursor's edit tools as its bubble store names them.
     static let editTools: Set<String> = ["edit_file_v2", "delete_file"]
     /// Tool statuses after which a bubble no longer changes.
     static let finalStatuses: Set<String> = ["completed", "error", "cancelled", "aborted", "rejected"]
-    /// Keys per batched lookup.
-    static let batchSize = 64
-    /// A listed bubble whose row is missing this close to the end of its chat
-    /// may still be on its way, so it is read again with the chat's next change.
+    /// A listed bubble this close to the end of its chat may still change: its
+    /// row may be on its way, or Cursor may still write a tool call into it
+    /// while it has none. It is read again with the chat's next change.
     static let pendingTail = 16
+    /// A chat updated this recently is parsed on every listing, since a change
+    /// can keep its value's length.
+    static let recentChat: TimeInterval = 86_400
+
+    /// How hard one pass may read a database.
+    struct ReadLimits: Equatable {
+        /// Per statement. SQLite checks it every 1,000 steps.
+        var deadline: TimeInterval
+        /// Keys per batched lookup.
+        var batchSize: Int
+        /// The connection's largest value. A larger one fails before it is loaded.
+        var maximumValueBytes: Int32
+
+        static let wal = ReadLimits(deadline: 10, batchSize: 64, maximumValueBytes: 64 * 1_048_576)
+        /// Far below Cursor's 1 s busy timeout: see the type's comment.
+        static let rollback = ReadLimits(deadline: 0.2, batchSize: 8, maximumValueBytes: 8 * 1_048_576)
+    }
 
     private let cache: HistoryCache<CursorFile>
     private let files = FileManager.default
@@ -57,7 +110,17 @@ public final class CursorActivityProvider: ActivityProvider {
     /// A database that changed is listed again at most this often. An open
     /// Cursor writes its database often; a listing reads every chat's header.
     var minimumRelistInterval: TimeInterval = 30
+    /// Every chat is parsed again this often, beside the first listing after launch.
+    var fullRelistInterval: TimeInterval = 3_600
+    /// How a pass reads a rollback-journal database.
+    var rollbackLimits = ReadLimits.rollback
+    /// A rollback-journal database changed this recently is left alone: Cursor
+    /// may be launching or committing.
+    var rollbackQuietInterval: TimeInterval = 5
     private var lastListing: [String: Date] = [:]
+    private var lastFullListing: [String: Date] = [:]
+    /// Chats whose reread hit its deadline, by cache key: they are reread last.
+    private var deferrals: [String: Int] = [:]
 
     public var projectLocations: ProjectLocationRegistry {
         get { resolver.locations }
@@ -109,10 +172,19 @@ public final class CursorActivityProvider: ActivityProvider {
         for (index, task) in tasks.enumerated() {
             let listing = listings[task.0]
             if !interrupted.contains(task.0) {
+                let key = Self.composerKey(listing.store.database, task.1.id)
                 do {
+                    // Cursor may be launching or committing: leave the database alone.
+                    if listing.rollback, Self.recentlyWritten(listing.store.database, within: rollbackQuietInterval) {
+                        throw ReadOnlySQLite.Failure.busy
+                    }
                     try reread(task.1, in: listing)
+                    deferrals[key] = nil
                 } catch {
-                    // Busy: the rest of this database waits for the next refresh.
+                    // Busy, or past a statement's deadline: the rest of this
+                    // database waits for the next refresh, and a chat that ran
+                    // out of time waits behind the others.
+                    if case .interrupted? = error as? ReadOnlySQLite.Failure { deferrals[key, default: 0] += 1 }
                     interrupted.insert(task.0)
                     notices.append("\(listing.store.source.name): Cursor's chat database was busy; the next refresh reads the rest.")
                 }
@@ -253,21 +325,59 @@ public final class CursorActivityProvider: ActivityProvider {
 
     // MARK: Opening Cursor's databases
 
+    /// One of Cursor's databases, opened for one pass, with the limits that
+    /// pass reads it under.
+    struct OpenedDatabase {
+        var reader: ReadOnlySQLite?
+        var limits = ReadLimits.wal
+        /// False for a rollback journal.
+        var wal = false
+        /// Nothing was opened: a WAL database without its `-wal` and `-shm` files.
+        var closedWAL = false
+        /// Nothing was opened: a rollback-journal database that just changed.
+        var settling = false
+    }
+
     /// Opens one of Cursor's databases read-only. A database in WAL mode is
     /// opened only while its `-wal` and `-shm` files exist: without them a
     /// read-only connection would create a `-shm` file in Cursor's folder, or
-    /// fail to open. `closedWAL` is true when that is why nothing was opened.
-    static func open(_ url: URL) -> (reader: ReadOnlySQLite?, closedWAL: Bool) {
-        guard let wal = usesWAL(url) else { return (nil, false) }
+    /// fail to open. A rollback-journal database is opened under `rollback`'s
+    /// value cap, unless it changed within `quietInterval`.
+    static func open(_ url: URL, rollback: ReadLimits = .rollback, quietInterval: TimeInterval = 0) -> OpenedDatabase {
+        guard let wal = usesWAL(url) else { return OpenedDatabase() }
         if wal {
             guard FileStat.of(url.path + "-wal")?.kind == .regular,
-                  FileStat.of(url.path + "-shm")?.kind == .regular else { return (nil, true) }
+                  FileStat.of(url.path + "-shm")?.kind == .regular else { return OpenedDatabase(wal: true, closedWAL: true) }
+            return OpenedDatabase(reader: ReadOnlySQLite(url: url, maximumValueBytes: ReadLimits.wal.maximumValueBytes),
+                                  limits: .wal, wal: true)
         }
-        return (ReadOnlySQLite(url: url), false)
+        if recentlyWritten(url, within: quietInterval) { return OpenedDatabase(limits: rollback, settling: true) }
+        return OpenedDatabase(reader: ReadOnlySQLite(url: url, maximumValueBytes: rollback.maximumValueBytes), limits: rollback)
     }
 
-    /// True when the database header says WAL mode (bytes 18 and 19 are 2);
-    /// nil when the file is not a SQLite database.
+    /// True when a rollback-journal database or its `-journal` file changed
+    /// within `interval`, so Cursor may be launching or committing. This only
+    /// schedules a read; no edit is ever dated or confirmed by a file time.
+    static func recentlyWritten(_ url: URL, within interval: TimeInterval, now: Date = Date()) -> Bool {
+        guard interval > 0 else { return false }
+        return [url.path, url.path + "-journal"].contains { path in
+            guard let modified = FileStat.of(path)?.modified else { return false }
+            return abs(now.timeIntervalSince(modified)) < interval
+        }
+    }
+
+    /// Busy, or interrupted at a statement's deadline: stop the pass, keep the
+    /// cache, and try again on the next scan. Never "unreadable".
+    static func isTransient(_ error: Error) -> Bool {
+        switch error as? ReadOnlySQLite.Failure {
+        case .busy?, .interrupted?: return true
+        default: return false
+        }
+    }
+
+    /// True when the database header says WAL mode (bytes 18 and 19 are 2),
+    /// false for a rollback journal (1); nil when the file is not a SQLite
+    /// database.
     static func usesWAL(_ url: URL) -> Bool? {
         guard FileStat.of(url.path)?.kind == .regular, let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
@@ -284,14 +394,27 @@ public final class CursorActivityProvider: ActivityProvider {
         let reader: ReadOnlySQLite
         let stamp: CursorStoreStamp
         let tasks: [ComposerTask]
+        let limits: ReadLimits
+        /// A rollback-journal database: each chat waits while Cursor writes.
+        let rollback: Bool
     }
 
     private struct ComposerTask {
         let id: String
         let fingerprint: UInt64
+        /// The value's length, recorded once the reread finishes.
+        let length: Int64?
     }
 
-    /// One chat's header, from the `composerHeaders` table or ItemTable list.
+    /// A chat key the database lists. `length` is nil when this SQLite cannot
+    /// tell it without loading the value.
+    private struct ListedChat {
+        let id: String
+        let length: Int64?
+    }
+
+    /// One chat's header, from the `composerHeaders` table or ItemTable list,
+    /// as `headerTableSQL` and `headerListSQL` reduce it.
     private struct Header {
         var identifier: Any?
         var location: Any?
@@ -302,16 +425,20 @@ public final class CursorActivityProvider: ActivityProvider {
         var updated: Date?
         var background = false
 
-        init(_ object: [String: Any], workspaceID: String?) {
-            identifier = object["workspaceIdentifier"]
-            location = ((object["agentLocation"] as? [String: Any])?["environment"] as? [String: Any])?["uri"]
-            repo = ((object["trackedGitRepos"] as? [Any])?.first as? [String: Any])?["repoPath"] as? String
-            parent = ((object["subagentInfo"] as? [String: Any])?["parentComposerId"] as? String)
-                .flatMap { CursorActivityProvider.isSafeID($0) ? $0 : nil }
-            created = RecordedDate.milliseconds(object["createdAt"])
-            updated = RecordedDate.milliseconds(object["lastUpdatedAt"])
-            if let origin = object["createdFromBackgroundAgent"] as? [String: Any], !origin.isEmpty { background = true }
-            if object["unifiedMode"] as? String == "background" { background = true }
+        /// `values`: the header's fields in the SQL's path order. `origin`:
+        /// its `createdFromBackgroundAgent` is a non-empty object.
+        init(_ values: [Any], origin: Bool, workspaceID: String?) {
+            func field(_ index: Int) -> Any? {
+                guard index < values.count, !(values[index] is NSNull) else { return nil }
+                return values[index]
+            }
+            identifier = field(0)
+            location = field(1)
+            repo = field(2) as? String
+            parent = (field(3) as? String).flatMap { CursorActivityProvider.isSafeID($0) ? $0 : nil }
+            created = RecordedDate.milliseconds(field(4))
+            updated = RecordedDate.milliseconds(field(5))
+            background = origin || field(6) as? String == "background"
             var ids: [String] = []
             if let workspaceID, !workspaceID.isEmpty { ids.append(workspaceID) }
             if let id = (identifier as? [String: Any])?["id"] as? String, !id.isEmpty, !ids.contains(id) { ids.append(id) }
@@ -373,28 +500,49 @@ public final class CursorActivityProvider: ActivityProvider {
         let key = store.database.path
         guard let stamp = CursorStoreStamp(store.database), previous?.stamp != stamp else { return nil }
         if let last = lastListing[key], Date().timeIntervalSince(last) < minimumRelistInterval { return nil }
-        let opened = Self.open(store.database)
+        let opened = Self.open(store.database, rollback: rollbackLimits, quietInterval: rollbackQuietInterval)
+        let busy = "\(store.source.name): Cursor's chat database was busy; the next refresh tries again."
         guard let reader = opened.reader else {
             if previous == nil {
-                notices.append(opened.closedWAL
-                    ? "\(store.source.name): Cursor's chat history is read while Cursor is open. Open Cursor once to index it."
-                    : "\(store.source.name): Cursor's chat database could not be opened.")
+                if opened.closedWAL {
+                    notices.append("\(store.source.name): Cursor's chat history is read while Cursor is open. Open Cursor once to index it.")
+                } else if opened.settling {
+                    notices.append(busy)
+                } else {
+                    notices.append("\(store.source.name): Cursor's chat database could not be opened.")
+                }
             }
             return nil
         }
-        lastListing[key] = Date()
-        let ids: [String]
+        let limits = opened.limits
+        let now = Date()
+        lastListing[key] = now
+        let full = lastFullListing[key].map { now.timeIntervalSince($0) >= fullRelistInterval } ?? true
+        let chats: [ListedChat]
         let headers: [String: Header]
         let listed: KeyedRows
+        // Chats whose value is parsed this time, and those too large to load.
+        var parse: Set<String> = []
+        var tooLarge: Set<String> = []
         do {
-            ids = try reader.rows(Self.composerKeysSQL, maximumColumnBytes: 4_096)
-                .compactMap { $0.first?.string }.filter { Self.isSafeID($0) }
-            headers = try readHeaders(reader)
-            listed = try Self.keyedRows(reader, keys: ids.map { "composerData:" + $0 }, sql: Self.composerSQL)
-        } catch ReadOnlySQLite.Failure.busy {
-            if previous == nil {
-                notices.append("\(store.source.name): Cursor's chat database was busy; the next refresh tries again.")
+            chats = try Self.listComposers(reader, limits: limits)
+            headers = try readHeaders(reader, limits: limits)
+            var keys: [String] = []
+            for chat in chats {
+                let cached = cache[Self.composerKey(store.database, chat.id)]?.composer
+                guard full || Self.needsParse(cached, length: chat.length, headerUpdated: headers[chat.id]?.updated, now: now) else {
+                    continue
+                }
+                parse.insert(chat.id)
+                if let length = chat.length, length > Int64(limits.maximumValueBytes) {
+                    tooLarge.insert(chat.id)
+                } else {
+                    keys.append("composerData:" + chat.id)
+                }
             }
+            listed = try Self.keyedRows(reader, keys: keys, sql: Self.composerSQL, limits: limits)
+        } catch let error where Self.isTransient(error) {
+            if previous == nil { notices.append(busy) }
             return nil
         } catch ReadOnlySQLite.Failure.query(let message) where message.contains("no such table") {
             notices.append("\(store.source.name): Cursor's chat database has a layout this version doesn't read.")
@@ -403,19 +551,34 @@ public final class CursorActivityProvider: ActivityProvider {
             notices.append("\(store.source.name): Cursor's chat database could not be read.")
             return nil
         }
+        if full { lastFullListing[key] = now }
 
         var tasks: [ComposerTask] = []
         var next: [String] = []
         var unreadable = 0
-        for id in ids {
+        var oversized = 0
+        for chat in chats {
+            let id = chat.id
             let dataKey = "composerData:" + id
             let composerKey = Self.composerKey(store.database, id)
             let cached = cache[composerKey]
+            guard parse.contains(id) else {
+                // Unchanged since its value was last parsed.
+                next.append(id)
+                continue
+            }
             guard let row = listed.rows[dataKey] else {
-                if listed.failed.contains(dataKey) || listed.oversized.contains(dataKey) {
-                    unreadable += 1
-                    // Keep what an earlier scan recorded for this chat.
-                    if cached?.composer != nil { next.append(id) }
+                let large = tooLarge.contains(id) || listed.oversized.contains(dataKey)
+                if large || listed.failed.contains(dataKey) {
+                    if large { oversized += 1 } else { unreadable += 1 }
+                    // Keep what an earlier scan recorded for this chat, and parse it again next time.
+                    if let file = cached, var composer = file.composer {
+                        let changed = composer.length != nil
+                        composer.length = nil
+                        file.composer = composer
+                        cache.store(file, at: composerKey, changed: changed)
+                        next.append(id)
+                    }
                 }
                 continue
             }
@@ -448,12 +611,19 @@ public final class CursorActivityProvider: ActivityProvider {
             composer.hasHeaders = fields.hasBubbles
             if skipped != nil {
                 composer.fingerprint = fingerprint
+                composer.length = chat.length
             } else if !fields.hasBubbles {
                 // An emptied chat (a draft, or one cleared) is no session.
                 composer.resetBubbles()
                 composer.fingerprint = fingerprint
+                composer.length = chat.length
             } else if composer.fingerprint != fingerprint {
-                tasks.append(ComposerTask(id: id, fingerprint: fingerprint))
+                // The length is recorded when the reread finishes, so a chat
+                // whose reread was interrupted is parsed again next time.
+                composer.length = nil
+                tasks.append(ComposerTask(id: id, fingerprint: fingerprint, length: chat.length))
+            } else {
+                composer.length = chat.length
             }
             file.composer = composer
             cache.store(file, at: composerKey, changed: before != composer)
@@ -465,45 +635,75 @@ public final class CursorActivityProvider: ActivityProvider {
         var state = beforeState ?? CursorStoreState()
         state.composers = next
         state.unreadable = unreadable
+        state.oversized = oversized
         entry.store = state
         cache.store(entry, at: key, changed: beforeState != state)
-        return StoreListing(store: store, reader: reader, stamp: stamp, tasks: tasks)
+        if !deferrals.isEmpty {
+            // A chat whose reread ran out of time goes after the others.
+            tasks = tasks.enumerated().sorted { left, right in
+                let a = deferrals[Self.composerKey(store.database, left.element.id)] ?? 0
+                let b = deferrals[Self.composerKey(store.database, right.element.id)] ?? 0
+                return a != b ? a < b : left.offset < right.offset
+            }.map(\.element)
+        }
+        return StoreListing(store: store, reader: reader, stamp: stamp, tasks: tasks, limits: limits, rollback: !opened.wal)
+    }
+
+    /// The chats the database lists, each with its value's length, which
+    /// `octet_length` reads from the record header (SQLite 3.43 and later).
+    /// A deleted chat (a NULL value) is left out. On an older SQLite the
+    /// lengths are unknown, so every listing parses every chat.
+    private static func listComposers(_ reader: ReadOnlySQLite, limits: ReadLimits) throws -> [ListedChat] {
+        do {
+            let rows = try reader.rows(Self.composerListSQL, maximumColumnBytes: 4_096, deadline: limits.deadline)
+            return rows.compactMap { row -> ListedChat? in
+                guard row.count == 2, let id = row[0].string, Self.isSafeID(id), let length = row[1].int else { return nil }
+                return ListedChat(id: id, length: length)
+            }
+        } catch ReadOnlySQLite.Failure.query(let message) where message.contains("no such function") {
+            return try reader.rows(Self.composerKeysSQL, maximumColumnBytes: 4_096, deadline: limits.deadline)
+                .compactMap { $0.first?.string }.filter { Self.isSafeID($0) }.map { ListedChat(id: $0, length: nil) }
+        }
+    }
+
+    /// Whether a listing parses this chat's value: it is new, its length
+    /// changed or is unknown, its header's `lastUpdatedAt` passed the recorded
+    /// time, or it was updated within `recentChat`.
+    static func needsParse(_ cached: CursorComposer?, length: Int64?, headerUpdated: Date?, now: Date) -> Bool {
+        guard let cached, let length, cached.length == length else { return true }
+        if let headerUpdated, headerUpdated > (cached.updated ?? .distantPast) { return true }
+        guard let latest = cached.updated ?? cached.created else { return true }
+        return now.timeIntervalSince(latest) < recentChat
     }
 
     /// Chat headers: Cursor 3.0 to about 3.9 keep a list in ItemTable; later
-    /// versions keep a `composerHeaders` table, which wins.
-    private func readHeaders(_ reader: ReadOnlySQLite) throws -> [String: Header] {
+    /// versions keep a `composerHeaders` table, which wins. Both are reduced
+    /// inside SQLite, so titles and subtitles stay there.
+    private func readHeaders(_ reader: ReadOnlySQLite, limits: ReadLimits) throws -> [String: Header] {
         var headers: [String: Header] = [:]
+        func add(_ id: ReadOnlySQLite.Value, workspaceID: String?, fields: ReadOnlySQLite.Value, origin: ReadOnlySQLite.Value) {
+            guard let id = id.string, Self.isSafeID(id) else { return }
+            let values = fields.string.flatMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [Any] } ?? []
+            headers[id] = Header(values, origin: origin.int == 1, workspaceID: workspaceID)
+        }
         do {
-            let rows = try reader.rows("SELECT value FROM ItemTable WHERE key = ?",
-                                       bindings: [.text("composer.composerHeaders")], maximumColumnBytes: 32 * 1_048_576)
-            for row in rows {
-                guard let text = row.first?.string,
-                      let object = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] else { continue }
-                for case let head as [String: Any] in object["allComposers"] as? [Any] ?? [] {
-                    guard let id = head["composerId"] as? String, Self.isSafeID(id) else { continue }
-                    headers[id] = Header(head, workspaceID: nil)
-                }
+            let rows = try reader.rows(Self.headerListSQL, bindings: [.text("composer.composerHeaders")],
+                                       maximumColumnBytes: 65_536, deadline: limits.deadline)
+            for row in rows where row.count == 3 {
+                add(row[0], workspaceID: nil, fields: row[1], origin: row[2])
             }
-        } catch ReadOnlySQLite.Failure.busy {
-            throw ReadOnlySQLite.Failure.busy
+        } catch let error where Self.isTransient(error) {
+            throw error
         } catch {
             // No ItemTable or no list: nothing to add.
         }
         do {
-            let rows = try reader.rows("SELECT composerId, workspaceId, value FROM composerHeaders",
-                                       maximumColumnBytes: 1_048_576)
-            for row in rows {
-                guard row.count == 3, let id = row[0].string, Self.isSafeID(id) else { continue }
-                var object: [String: Any] = [:]
-                if let text = row[2].string,
-                   let parsed = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] {
-                    object = parsed
-                }
-                headers[id] = Header(object, workspaceID: row[1].string)
+            let rows = try reader.rows(Self.headerTableSQL, maximumColumnBytes: 65_536, deadline: limits.deadline)
+            for row in rows where row.count == 4 {
+                add(row[0], workspaceID: row[1].string, fields: row[2], origin: row[3])
             }
-        } catch ReadOnlySQLite.Failure.busy {
-            throw ReadOnlySQLite.Failure.busy
+        } catch let error where Self.isTransient(error) {
+            throw error
         } catch {
             // Databases from before the table existed.
         }
@@ -649,9 +849,13 @@ public final class CursorActivityProvider: ActivityProvider {
             let key = database.path
             context.legacyKeys.insert(key)
             let entry = cache[key] ?? CursorFile()
-            if entry.legacy?.stamp != stamp, let reader = Self.open(database).reader {
+            // Cursor 2.x keeps these databases in rollback-journal mode, under the same limits.
+            let opened = entry.legacy?.stamp != stamp
+                ? Self.open(database, rollback: rollbackLimits, quietInterval: rollbackQuietInterval) : nil
+            if let opened, let reader = opened.reader {
                 do {
-                    let rows = try reader.rows(Self.legacySQL, bindings: [.text("composer.composerData")], maximumColumnBytes: 4_096)
+                    let rows = try reader.rows(Self.legacySQL, bindings: [.text("composer.composerData")], maximumColumnBytes: 4_096,
+                                               deadline: opened.limits.deadline)
                     let composers = rows.compactMap { $0.first?.string }.filter { Self.isSafeID($0) }
                     entry.legacy = CursorLegacyIndex(stamp: stamp, composers: Array(Set(composers)).sorted())
                     cache.store(entry, at: key, changed: true)
@@ -659,7 +863,7 @@ public final class CursorActivityProvider: ActivityProvider {
                     entry.legacy = CursorLegacyIndex(stamp: stamp, composers: [])
                     cache.store(entry, at: key, changed: true)
                 } catch {
-                    // Busy or unreadable: keep what it listed before.
+                    // Busy, interrupted or unreadable: keep what it listed before.
                 }
             }
             for composer in entry.legacy?.composers ?? [] where index[composer] == nil { index[composer] = name }
@@ -671,33 +875,36 @@ public final class CursorActivityProvider: ActivityProvider {
 
     /// Rereads one chat that changed: its bubble list, its proofs of applied
     /// code blocks and created files, and the bubbles it gained, plus the
-    /// bubbles still in flight. Throws only when the database is busy.
+    /// bubbles still in flight or near the end. Throws only when the database
+    /// is busy or a statement hit its deadline.
     private func reread(_ task: ComposerTask, in listing: StoreListing) throws {
         let key = Self.composerKey(listing.store.database, task.id)
         let file = cache[key] ?? CursorFile()
         let before = file.composer
         var composer = before ?? CursorComposer()
         let reader = listing.reader
+        let deadline = listing.limits.deadline
         let dataKey: ReadOnlySQLite.Value = .text("composerData:" + task.id)
         var ids: [String] = []
         var blocks: [String: CursorBlockProof] = [:]
         var created: Set<String> = []
         do {
-            for row in try reader.rows(Self.bubbleListSQL, bindings: [dataKey], maximumColumnBytes: 4_096) {
+            for row in try reader.rows(Self.bubbleListSQL, bindings: [dataKey], maximumColumnBytes: 4_096, deadline: deadline) {
                 if let id = row.first?.string, Self.isSafeID(id) { ids.append(id) }
             }
-            for row in try reader.rows(Self.codeBlockSQL, bindings: [dataKey], maximumColumnBytes: 65_536) where row.count == 5 {
+            let blockRows = try reader.rows(Self.codeBlockSQL, bindings: [dataKey], maximumColumnBytes: 65_536, deadline: deadline)
+            for row in blockRows where row.count == 5 {
                 guard let block = row[0].string, let diff = row[2].string, !diff.isEmpty,
                       let milliseconds = row[3].double, let applied = RecordedDate.milliseconds(milliseconds) else { continue }
                 var path: String?
                 if let uri = row[1].string { path = Self.uriPath(uri) }
                 blocks[block] = CursorBlockProof(path: path, applied: applied, rejected: row[4].string == "rejected")
             }
-            for row in try reader.rows(Self.createdFilesSQL, bindings: [dataKey], maximumColumnBytes: 65_536) {
+            for row in try reader.rows(Self.createdFilesSQL, bindings: [dataKey], maximumColumnBytes: 65_536, deadline: deadline) {
                 if let uri = row.first?.string, let path = Self.uriPath(uri) { created.insert(path) }
             }
-        } catch ReadOnlySQLite.Failure.busy {
-            throw ReadOnlySQLite.Failure.busy
+        } catch let error where Self.isTransient(error) {
+            throw error
         } catch {
             // The chat's record no longer reads: keep what was recorded, and try
             // again when it changes.
@@ -717,7 +924,7 @@ public final class CursorActivityProvider: ActivityProvider {
         let queued = composer.pending.filter { listed.contains($0.id) }
         let fresh = Array(ids[composer.readCount...])
         let keys = (queued.map(\.id) + fresh).map { "bubbleId:\(task.id):\($0)" }
-        let fetched = try Self.keyedRows(reader, keys: keys, sql: Self.bubbleSQL)
+        let fetched = try Self.keyedRows(reader, keys: keys, sql: Self.bubbleSQL, limits: listing.limits)
         composer.blocks = blocks
         composer.createdFiles = created.sorted()
         composer.pending = []
@@ -725,6 +932,7 @@ public final class CursorActivityProvider: ActivityProvider {
 
         func absorb(_ id: String, before stamp: Date?, position: Int) -> Date? {
             let bubbleKey = "bubbleId:\(task.id):\(id)"
+            let nearEnd = position >= ids.count - Self.pendingTail
             if fetched.oversized.contains(bubbleKey) {
                 composer.oversized += 1
                 return nil
@@ -736,12 +944,17 @@ public final class CursorActivityProvider: ActivityProvider {
             }
             guard let row = fetched.rows[bubbleKey] else {
                 // Possibly listed before it was written.
-                if position >= ids.count - Self.pendingTail {
-                    composer.pending.append(CursorPendingBubble(id: id, before: stamp))
-                }
+                if nearEnd { composer.pending.append(CursorPendingBubble(id: id, before: stamp)) }
                 return nil
             }
-            return composer.absorb(row, bubble: id, composerID: task.id, before: stamp)
+            let time = composer.absorb(row, bubble: id, composerID: task.id, before: stamp)
+            // Cursor writes its next tool call into the chat's last bubble while
+            // that bubble is still empty, keeping its id: a bubble near the end
+            // with no tool name is read again with the chat's next change.
+            if nearEnd, row.first?.string == nil {
+                composer.pending.append(CursorPendingBubble(id: id, before: stamp))
+            }
+            return time
         }
 
         let positions = Dictionary(ids.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
@@ -756,6 +969,7 @@ public final class CursorActivityProvider: ActivityProvider {
         composer.readCount = ids.count
         composer.readHash = Self.hash(ids)
         composer.fingerprint = task.fingerprint
+        composer.length = task.length
         file.composer = composer
         cache.store(file, at: key, changed: before != composer)
     }
@@ -820,32 +1034,36 @@ public final class CursorActivityProvider: ActivityProvider {
         var oversized: Set<String> = []
     }
 
-    /// Runs `sql`, whose first column is the key, for `keys` in batches. A
-    /// batch that fails (one malformed or oversized value fails it) is read
-    /// again one key at a time. Throws only when the database is busy.
-    static func keyedRows(_ reader: ReadOnlySQLite, keys: [String], sql: String) throws -> KeyedRows {
+    /// Runs `sql`, whose first column is the key, for `keys` in batches of
+    /// `limits.batchSize`, each statement under `limits.deadline`. A batch
+    /// that fails (one malformed or oversized value fails it) is read again one
+    /// key at a time. Throws only when the database is busy or a statement hit
+    /// its deadline, never marking those keys failed.
+    static func keyedRows(_ reader: ReadOnlySQLite, keys: [String], sql: String, limits: ReadLimits) throws -> KeyedRows {
         var result = KeyedRows()
+        let size = max(1, limits.batchSize)
         var start = 0
         while start < keys.count {
-            let batch = Array(keys[start..<min(start + batchSize, keys.count)])
-            start += batchSize
+            let batch = Array(keys[start..<min(start + size, keys.count)])
+            start += size
             let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ", ")
             do {
                 let rows = try reader.rows(sql.replacingOccurrences(of: "%KEYS%", with: placeholders),
-                                           bindings: batch.map { .text($0) })
+                                           bindings: batch.map { .text($0) }, deadline: limits.deadline)
                 for row in rows {
                     guard let key = row.first?.string else { continue }
                     result.rows[key] = Array(row.dropFirst())
                 }
-            } catch ReadOnlySQLite.Failure.busy {
-                throw ReadOnlySQLite.Failure.busy
+            } catch let error where isTransient(error) {
+                throw error
             } catch {
                 for key in batch {
                     do {
-                        let rows = try reader.rows(sql.replacingOccurrences(of: "%KEYS%", with: "?"), bindings: [.text(key)])
+                        let rows = try reader.rows(sql.replacingOccurrences(of: "%KEYS%", with: "?"), bindings: [.text(key)],
+                                                   deadline: limits.deadline)
                         for row in rows { result.rows[key] = Array(row.dropFirst()) }
-                    } catch ReadOnlySQLite.Failure.busy {
-                        throw ReadOnlySQLite.Failure.busy
+                    } catch let error where isTransient(error) {
+                        throw error
                     } catch ReadOnlySQLite.Failure.query(let message) where message.contains("too big") {
                         result.oversized.insert(key)
                     } catch {
@@ -859,8 +1077,43 @@ public final class CursorActivityProvider: ActivityProvider {
 
     // MARK: SQL
 
-    /// Chat keys only: the key index alone answers it.
+    /// Chat keys only: the key index alone answers it. For SQLite before 3.43.
     static let composerKeysSQL = "SELECT substr(key, 14) FROM cursorDiskKV WHERE key >= 'composerData:' AND key < 'composerData;'"
+
+    /// Chat keys with each value's length in bytes. `octet_length` of a plain
+    /// column reads the length from the record header and never loads the
+    /// value, so this neither parses nor hits the value cap.
+    static let composerListSQL = """
+        SELECT substr(key, 14), octet_length(value) FROM cursorDiskKV
+        WHERE key >= 'composerData:' AND key < 'composerData;'
+        """
+
+    /// Per `composerHeaders` row: chat id, workspace id, the fields `Header`
+    /// reads (by position), and whether `createdFromBackgroundAgent` is a
+    /// non-empty object. Titles, subtitles and the rest stay in SQLite. The
+    /// table has no key range, so it is read in full; a malformed row reads
+    /// as empty.
+    static let headerTableSQL = """
+        SELECT composerId, workspaceId,
+            json_extract(v, '$.workspaceIdentifier', '$.agentLocation.environment.uri', '$.trackedGitRepos[0].repoPath',
+                '$.subagentInfo.parentComposerId', '$.createdAt', '$.lastUpdatedAt', '$.unifiedMode'),
+            coalesce(json_type(v, '$.createdFromBackgroundAgent') = 'object'
+                AND json_extract(v, '$.createdFromBackgroundAgent') <> '{}', 0)
+        FROM (SELECT composerId, workspaceId,
+                CASE WHEN json_valid(CAST(value AS TEXT)) THEN CAST(value AS TEXT) END AS v
+            FROM composerHeaders)
+        """
+
+    /// The same per header in ItemTable's `allComposers` list (Cursor 3.0 to about 3.9).
+    static let headerListSQL = """
+        SELECT json_extract(e.value, '$.composerId'),
+            json_extract(e.value, '$.workspaceIdentifier', '$.agentLocation.environment.uri', '$.trackedGitRepos[0].repoPath',
+                '$.subagentInfo.parentComposerId', '$.createdAt', '$.lastUpdatedAt', '$.unifiedMode'),
+            coalesce(json_type(e.value, '$.createdFromBackgroundAgent') = 'object'
+                AND json_extract(e.value, '$.createdFromBackgroundAgent') <> '{}', 0)
+        FROM ItemTable AS t, json_each(CAST(t.value AS TEXT), '$.allComposers') AS e
+        WHERE t.key = ? AND e.type = 'object'
+        """
 
     /// One small JSON array per chat. `ComposerFields` reads it by position.
     static let composerSQL = """
@@ -934,7 +1187,7 @@ public final class CursorActivityProvider: ActivityProvider {
             guard let state = cache[store.database.path]?.store else { continue }
             var unknown = 0
             var unreadable = state.unreadable
-            var oversized = 0
+            var oversized = state.oversized
             for id in state.composers {
                 guard let composer = cache[Self.composerKey(store.database, id)]?.composer else { continue }
                 if composer.skipped == "unknown", composer.hasHeaders { unknown += 1 }
@@ -1025,6 +1278,8 @@ struct CursorStoreState: Codable, Equatable {
     var composers: [String] = []
     /// Chat records the last listing could not read.
     var unreadable = 0
+    /// Chat records the last listing found too large to load.
+    var oversized = 0
 }
 
 struct CursorLegacyIndex: Codable, Equatable {
@@ -1074,6 +1329,9 @@ struct CursorBlockProof: Codable, Equatable {
 struct CursorComposer: Codable, Equatable {
     /// Hash of the chat's listing fields; a change triggers a reread.
     var fingerprint: UInt64 = 0
+    /// The byte length of the chat's value when `fingerprint` was recorded;
+    /// nil while a reread is due. A listing skips a chat whose length held.
+    var length: Int64?
     var roots: [String] = []
     /// Why the chat is not counted: remote, folderless, background or unknown.
     var skipped: String?
@@ -1092,7 +1350,8 @@ struct CursorComposer: Codable, Equatable {
     /// The listed bubbles read so far, and the hash of their ids.
     var readCount = 0
     var readHash: UInt64 = CursorActivityProvider.hash([String]())
-    /// Edit bubbles still in flight, unreadable ones, and missing ones near the end.
+    /// Edit bubbles still in flight, unreadable ones, and missing ones or ones
+    /// with no tool name near the end.
     var pending: [CursorPendingBubble] = []
     /// Completed edit tool calls by bubble id.
     var edits: [String: CursorEdit] = [:]
