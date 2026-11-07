@@ -104,9 +104,9 @@
     <section class="hero" id="top">
       <div class="wrap hero-grid">
         <div class="hero-copy">
-          <a class="pill" href="#assistants-title">
+          <a class="pill" href="#map-title">
             <span class="pill-tag">New</span>
-            <span>Claude Code in your terminal, too</span>
+            <span>The Map: branches, sessions, and merges</span>
             <svg width="16" height="16" aria-hidden="true"><use href="#i-arrow"/></svg>
           </a>
           <h1>Which agent touched this project last?</h1>
@@ -117,9 +117,9 @@
           </p>
           <div class="cta">
             <!-- Update with each release, along with the version in the meta line below. -->
-            <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.12">
+            <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.13">
               <svg width="18" height="18" aria-hidden="true"><use href="#i-download"/></svg>
-              Download 0.1.0-alpha.12
+              Download 0.1.0-alpha.13
             </a>
             <a class="btn btn-ghost" href="#install">Build from source</a>
           </div>
@@ -296,13 +296,14 @@
           <div class="feature-copy">
             <h3>Jump back to the session</h3>
             <p>Each card’s main button opens the session that most needs you, with its profile, title, and time in that state. The ⌄ menu lists every live session and opens the worktree in your editor, terminal, or Finder.</p>
+            <p>From any app, press <strong>⌃⌥J</strong> for a switcher with every live session, needs input first. Type to filter, then press Return or ⌘1–⌘9. An <code>agenttrail://jump</code> link opens the most urgent session from Shortcuts, Raycast, or a shell.</p>
             <ul class="checks">
               <li><strong>Claude Code</strong> sessions open through Claude’s session link. With several Claude instances, macOS gives that link only to the one launched first, so another instance’s sessions bring that instance forward with a hint naming the session.</li>
               <li><strong><code>claude</code> in a terminal</strong> brings that terminal forward, or the Claude window whose terminal pane runs it.</li>
               <li><strong>Codex</strong> threads open through <code>codex://threads</code> when the Codex app owns them.</li>
               <li><strong>Grok</strong> brings forward the terminal it runs in.</li>
             </ul>
-            <p class="fine">Agent Trail acts only when you click, and only on apps already running. It never launches, quits, or restarts an assistant, and needs no Automation or Accessibility permission.</p>
+            <p class="fine">Agent Trail acts only when you click, press the switcher’s shortcut, or open a link, and only on apps already running. It never launches, quits, or restarts an assistant, and needs no Automation or Accessibility permission.</p>
           </div>
           <div class="feature-media">
             <div class="jump-stack" aria-label="Jump button priority">
@@ -382,6 +383,29 @@
           </div>
         </div>
 
+        <div class="feature-row">
+          <div class="feature-copy">
+            <h3 id="map-title">The Map: branches, sessions, and merges</h3>
+            <p>A third tab (⌘3) draws one project’s Git branches, the sessions that edited each one, and where they merged, on a timeline with idle hours folded away. Switch between Lanes, Tree, Orbit, and Log, for today, 7 or 30 days, or all saved history.</p>
+            <ul class="checks">
+              <li>An edit counts for the branch of the next commit in its working tree within 12 hours, so work done before <code>checkout -b</code> lands on the new branch. A checkout of an existing branch or a reset before that commit leaves it on the branch it was made on.</li>
+              <li>Merge commits and squashed pull requests are matched to their branches. Claude worktrees map to their branches even after they are removed, and cloud sessions on claude.ai show through their commits.</li>
+              <li>In Lanes, a workflow’s agents, or three or more branches worked on side by side, share one row as strands that open on click.</li>
+              <li>Open it in a resizable window for a wider timeline and a details panel for what you hover or click.</li>
+            </ul>
+            <p class="fine">The Map reads Git only while it is on screen, with the <code>git</code> from Xcode, the Command Line Tools, or Homebrew, and never changes the repository. Author names and e-mail addresses are not kept.</p>
+          </div>
+          <div class="feature-media">
+            <div class="shot">
+              <picture>
+                <source srcset="assets/map-dark.webp" media="(prefers-color-scheme: dark)">
+                <img src="assets/map-light.webp" width="1200" height="1360" loading="lazy" decoding="async"
+                     alt="Agent Trail Map tab with synthetic data: branch lanes off main with each session’s runs of edits as profile-colored bars, merged pull requests as rings on main, a five-agent workflow folded into one row of strands, and idle hours folded into narrow seams.">
+              </picture>
+            </div>
+          </div>
+        </div>
+
         <div class="feature-wide">
           <div class="feature-copy">
             <h3>An activity portrait to share</h3>
@@ -439,7 +463,7 @@
           <article class="card">
             <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 9V7a3.5 3.5 0 017 0v2"/><rect x="4.5" y="9" width="11" height="8" rx="2"/></svg></span>
             <h3>Read-only</h3>
-            <p>It reads the assistants’ private on-disk formats and never writes them. No hooks, no injected code, and no edits to assistant data. Codex turn metadata is opened read-only.</p>
+            <p>It reads the assistants’ private on-disk formats and never writes them. No hooks, no injected code, and no edits to assistant data. Codex turn metadata is opened read-only, and the Map runs <code>git</code> read-only with network access turned off.</p>
           </article>
           <article class="card">
             <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="10" height="10" rx="2"/><path d="M8 2.5v2.5M12 2.5v2.5M8 15v2.5M12 15v2.5M2.5 8h2.5M2.5 12h2.5M15 8h2.5M15 12h2.5"/></svg></span>
@@ -490,12 +514,12 @@ open "dist/Agent Trail.app"</code></pre>
           <article class="card install-card">
             <div class="install-head">
               <h3>Download the alpha</h3>
-              <span class="badge badge-muted">0.1.0-alpha.12</span>
+              <span class="badge badge-muted">0.1.0-alpha.13</span>
             </div>
             <p>A universal ZIP for Apple Silicon and Intel Macs, with a SHA-256 checksum.</p>
             <p class="warn">Builds are ad-hoc signed and <strong>not notarized</strong>, so macOS stops the first launch. Close the warning, then choose <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security and enter your login password. <a href="https://github.com/NotYaz/agent-trail#install">All steps</a>.</p>
             <div class="cta">
-              <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.12">
+              <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.13">
                 <svg width="18" height="18" aria-hidden="true"><use href="#i-download"/></svg>
                 Latest release
               </a>

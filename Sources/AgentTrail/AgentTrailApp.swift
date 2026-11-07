@@ -6,17 +6,26 @@ import AgentTrailCore
 @main
 enum AgentTrailApp {
     private static let renderFlags = ["--render-demo", "--render-growth-demo", "--render-live-demo", "--render-share-demo",
-                                      "--render-status-demo", "--render-switcher-demo"]
+                                      "--render-status-demo", "--render-switcher-demo", "--render-map"]
     private static let usage = """
         Usage: AgentTrail --render-demo|--render-growth-demo|--render-live-demo|--render-share-demo|--render-status-demo|--render-switcher-demo OUTPUT.png [--light] [--height N] [--theme NAME]
+               AgentTrail --render-map SNAPSHOT.json OUTPUT.png [--mode lanes|tree|orbit|log] [--range today|7d|30d|all] [--all-branches] [--open-bundles] [--light] [--height N] [--window WxH] [--pin KIND] [--theme NAME]
+          SNAPSHOT.json comes from `AgentTrailInspect --map PROJECT`
           --light       render the light appearance (panels and the switcher; the share card is always dark)
           --height N    panel render height in points, 200-4000 (default 680; the width stays 600)
+          --window WxH  render the Map window's content at W x H points instead, from 640x640 to 4000x4000
           --theme NAME  classic, gentle, vivid or aurora (default classic); the saved choice is not used or changed
+          --pin KIND    pin an item as a click would: live, session, lane, trunk, commit, merge, group, bundle or fold
 
         """
 
     @MainActor static func main() {
         let application = NSApplication.shared
+        if CommandLine.arguments.contains("--benchmark-map-hover") {
+            application.setActivationPolicy(.accessory)
+            MapHoverBenchmark.run(arguments: CommandLine.arguments)
+            return
+        }
         if CommandLine.arguments.contains("--benchmark-scroll") {
             application.setActivationPolicy(.accessory)
             ScrollBenchmark.start(arguments: CommandLine.arguments)
@@ -25,12 +34,14 @@ enum AgentTrailApp {
         }
         if let index = CommandLine.arguments.firstIndex(where: { renderFlags.contains($0) }) {
             application.setActivationPolicy(.prohibited)
-            guard index + 1 < CommandLine.arguments.count else {
+            let kind = CommandLine.arguments[index]
+            let outputIndex = kind == "--render-map" ? index + 2 : index + 1
+            guard outputIndex < CommandLine.arguments.count else {
                 fputs(usage, stderr)
                 exit(2)
             }
             do {
-                try renderDemo(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]), kind: CommandLine.arguments[index])
+                try renderDemo(to: URL(fileURLWithPath: CommandLine.arguments[outputIndex]), kind: kind)
             } catch {
                 fputs("Could not render sample data: \(error.localizedDescription)\n", stderr)
                 exit(1)
@@ -116,19 +127,54 @@ enum AgentTrailApp {
         }
         // The former Live render flag stays an alias for Projects, which carries live status.
         store.panelSection = kind == "--render-growth-demo" ? .growth : .projects
-        let height = renderHeight()
-        let root = AgentTrailShell(store: store, animatesCharts: false, height: height)
-            .environment(\.rendersStill, true)
-            .environment(\.referenceNow, store.now)
-        let view = NSHostingView(rootView: root)
+        if kind == "--render-map" {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let path = CommandLine.arguments[CommandLine.arguments.firstIndex(of: kind)! + 1]
+            let snapshot = try decoder.decode(MapSnapshot.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+            store.sources = snapshot.sources
+            store.mapProjectPath = snapshot.projectPath
+            store.mapRange = renderRange()
+            store.mapShowsAllBranches = CommandLine.arguments.contains("--all-branches")
+            store.mapMode = renderMode()
+            let folds = store.mapMode == .lanes && !store.mapShowsAllBranches
+            store.projectMap = ProjectMap.build(snapshot, range: store.mapRange, calendar: .current,
+                                                collapseAbove: folds ? AppStore.mapFoldThreshold : nil)
+            if CommandLine.arguments.contains("--open-bundles") {
+                store.mapOpenBundles = Set(store.projectMap?.bundles.map(\.id) ?? [])
+            }
+            store.panelSection = .map
+        }
+        let view: NSView
+        var mapWindow: NSWindow?
+        if kind == "--render-map", let size = renderWindowSize() {
+            // A real, unshown Map window, so the content lays out under its title bar.
+            let hover = MapHoverModel()
+            hover.selected = renderPin(in: store.projectMap)
+            let root = MapWindowRoot(store: store, hover: hover)
+                .environment(\.rendersStill, true)
+                .environment(\.referenceNow, store.now)
+            let window = MapWindowController.makeWindow(root, size: size)
+            mapWindow = window
+            view = window.contentView ?? NSView()
+        } else {
+            let height = renderHeight()
+            if kind == "--render-map" { store.mapHover.selected = renderPin(in: store.projectMap) }
+            let root = AgentTrailShell(store: store, animatesCharts: false, height: height)
+                .environment(\.rendersStill, true)
+                .environment(\.referenceNow, store.now)
+            view = NSHostingView(rootView: root)
+            view.frame = NSRect(x: 0, y: 0, width: AgentTrailShell.panelWidth, height: height)
+        }
         view.appearance = NSAppearance(named: CommandLine.arguments.contains("--light") ? .aqua : .darkAqua)
-        view.frame = NSRect(x: 0, y: 0, width: AgentTrailShell.panelWidth, height: height)
         view.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             throw CocoaError(.fileWriteUnknown)
         }
         view.cacheDisplay(in: view.bounds, to: bitmap)
+        // The window owns the content view's layout until the bitmap is taken.
+        withExtendedLifetime(mapWindow) {}
         guard let png = bitmap.representation(using: .png, properties: [:]) else { throw CocoaError(.fileWriteUnknown) }
         try write(png, to: output)
     }
@@ -142,6 +188,54 @@ enum AgentTrailApp {
             exit(2)
         }
         return CGFloat(value.rounded())
+    }
+
+    /// `--window WxH` renders the Map window's content at that size instead of the panel.
+    /// A malformed size, or one below the window's minimum or above 4000, is a usage error.
+    @MainActor private static func renderWindowSize() -> NSSize? {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--window") else { return nil }
+        guard index + 1 < arguments.count, let size = MapWindowController.size(parsing: arguments[index + 1]) else {
+            fputs(usage, stderr)
+            exit(2)
+        }
+        return size
+    }
+
+    /// `--pin KIND` for Map renders: the item of that kind a click would pin, or nil when the
+    /// map has none. An unknown kind is a usage error.
+    @MainActor private static func renderPin(in map: ProjectMap?) -> MapHitID? {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--pin") else { return nil }
+        guard index + 1 < arguments.count, let kind = MapRenderPin(rawValue: arguments[index + 1]) else {
+            fputs(usage, stderr)
+            exit(2)
+        }
+        return map.flatMap(kind.id(in:))
+    }
+
+    /// `--mode lanes|tree|orbit|log` for Map renders. An unknown value is a usage error.
+    @MainActor private static func renderMode() -> MapMode {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--mode") else { return .lanes }
+        guard index + 1 < arguments.count, let mode = MapMode(rawValue: arguments[index + 1]) else {
+            fputs(usage, stderr)
+            exit(2)
+        }
+        return mode
+    }
+
+    /// `--range today|7d|30d|all` for Map renders. An unknown value is a usage error.
+    @MainActor private static func renderRange() -> MapRange {
+        let arguments = CommandLine.arguments
+        guard let index = arguments.firstIndex(of: "--range") else { return .week }
+        guard index + 1 < arguments.count,
+              let range = MapRange.allCases.first(where: { $0.rawValue.lowercased() == arguments[index + 1].lowercased() })
+        else {
+            fputs(usage, stderr)
+            exit(2)
+        }
+        return range
     }
 
     /// `--theme NAME` for renders. An unknown name is a usage error.
@@ -169,6 +263,7 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
     private var popover: NSPopover?
     private var store: AppStore?
     private var settingsWindow: NSWindow?
+    private var mapWindow: MapWindowController?
     private var switcher: SessionSwitcher?
     /// A link that arrived before launch finished, for the switcher once it exists.
     private var launchLink: URL?
@@ -181,6 +276,8 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         self.store = store
         store.showProfiles = { [weak self] in self?.showProfileSettings() }
         store.showPanel = { [weak self] in self?.showPanel() }
+        mapWindow = MapWindowController(store: store)
+        store.showMapWindow = { [weak self] in self?.showMapWindow() }
 
         let popover = NSPopover()
         popover.behavior = .transient
@@ -267,11 +364,26 @@ private final class AgentTrailApplicationDelegate: NSObject, NSApplicationDelega
         guard let button = statusController?.button, let popover else { return }
         // A hint under the icon would float over the popover's arrow.
         HintHUD.dismiss()
-        NSApp.activate()
-        if !popover.isShown {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        if mapWindow?.isOpen == true {
+            // The popover appears first, so activating finds a window on this
+            // Space instead of switching to the Map window's.
+            if !popover.isShown {
+                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            }
+            NSApp.activate()
+        } else {
+            NSApp.activate()
+            if !popover.isShown {
+                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            }
         }
         popover.contentViewController?.view.window?.makeKey()
+    }
+
+    /// The window counts as showing the Map before the popover closes, so no build is skipped.
+    private func showMapWindow() {
+        mapWindow?.show()
+        popover?.performClose(nil)
     }
 
     private func showProfileSettings() {
@@ -359,6 +471,11 @@ struct AgentTrailShell: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(growthTransition)
             }
+            if store.panelSection == .map {
+                MapView(store: store)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(growthTransition)
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { toasts }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -392,6 +509,9 @@ struct AgentTrailShell: View {
             Spacer(minLength: Theme.Space.xs)
             if store.demoMode && store.panelSection == .projects {
                 demoPill
+            }
+            if !store.demoMode && store.panelSection == .map {
+                mapWindowButton
             }
             refreshButton
             moreMenu
@@ -452,6 +572,7 @@ struct AgentTrailShell: View {
         switch section {
         case .projects: return "Projects (⌘1)"
         case .growth: return "Growth (⌘2)"
+        case .map: return "Map (⌘3)"
         }
     }
 
@@ -489,6 +610,20 @@ struct AgentTrailShell: View {
         .foregroundStyle(.secondary)
         .help(refreshHelp)
         .accessibilityLabel(store.isScanning ? "Refreshing local activity" : "Refresh")
+    }
+
+    /// Opens the Map in a resizable window; the panel's Map tab stays as it is.
+    private var mapWindowButton: some View {
+        Button { store.showMapWindow?() } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellIconButtonStyle())
+        .foregroundStyle(.secondary)
+        .help("Open the Map in a window")
+        .accessibilityLabel("Open the Map in a window")
     }
 
     private var refreshHelp: String {
@@ -622,13 +757,15 @@ struct AgentTrailShell: View {
 
     // MARK: Shortcuts
 
-    /// Invisible buttons that carry ⌘1, ⌘2, ⌘F and ⌘R while the panel is key.
+    /// Invisible buttons that carry ⌘1, ⌘2, ⌘3, ⌘F and ⌘R while the panel is key.
     private var shortcuts: some View {
         ZStack {
             Button("Show Projects") { select(.projects) }
                 .keyboardShortcut("1", modifiers: .command)
             Button("Show Growth") { select(.growth) }
                 .keyboardShortcut("2", modifiers: .command)
+            Button("Show Map") { select(.map) }
+                .keyboardShortcut("3", modifiers: .command)
             Button("Find a project") { findProject() }
                 .keyboardShortcut("f", modifiers: .command)
             Button("Refresh") { store.refresh() }

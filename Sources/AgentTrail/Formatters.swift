@@ -135,6 +135,13 @@ enum DayFormat {
     }
 }
 
+/// Moments in a time zone, such as "Tue 21:49" for the Map's inspector.
+enum MomentFormat {
+    static func string(_ date: Date, template: String, timeZone: TimeZone) -> String {
+        FormatterCache.shared.string(from: date, template: template, timeZone: timeZone)
+    }
+}
+
 /// Compact counts for axes and tight tiles: "950", "1.2K", "12K".
 enum CompactNumber {
     static func string(_ value: Int) -> String {

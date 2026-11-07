@@ -34,6 +34,7 @@ enum HistoryFold {
         var activity: [ProjectActivity] = []
         var associations: [SessionProjectAssociation] = []
         var missingFolders: [MissingFolder] = []
+        var trails: [SessionTrail] = []
     }
 
     private struct Attributed {
@@ -66,7 +67,8 @@ enum HistoryFold {
         }
 
         var result = Result()
-        var edits: [String: (source: String, project: String, id: String, edit: StoredEdit, delegated: Bool)] = [:]
+        var edits: [String: (source: String, project: String, id: String, edit: StoredEdit, delegated: Bool,
+                             session: String, sessionCreated: Date)] = [:]
         var missing: [String: (sourceID: String, project: String, folder: String, edits: Int, directories: Set<String>)] = [:]
         for item in attributed {
             let session = item.session
@@ -82,7 +84,8 @@ enum HistoryFold {
                 let key = session.sourceID + "\u{0}" + entry.project + "\u{0}" + entry.id
                 let entryDelegated = isDelegated || session.delegatedEdits.contains(entry.id)
                 guard let old = edits[key] else {
-                    edits[key] = (session.sourceID, entry.project, entry.id, entry.edit, entryDelegated)
+                    edits[key] = (session.sourceID, entry.project, entry.id, entry.edit, entryDelegated, session.sessionID,
+                                  session.createdAt)
                     continue
                 }
                 // The same winner `earlier(than:)` keeps. A spawned thread's
@@ -91,7 +94,15 @@ enum HistoryFold {
                     || (entry.edit.date == old.edit.date && entry.edit.workspace < old.edit.workspace)
                 let identical = entry.edit.date == old.edit.date && entry.edit.workspace == old.edit.workspace
                 let delegated = incomingWins ? entryDelegated : (identical ? (old.delegated && entryDelegated) : old.delegated)
-                edits[key] = (session.sourceID, entry.project, entry.id, old.edit.earlier(than: entry.edit), delegated)
+                // The trail that keeps the edit follows the same rule. Identical
+                // copies with the same delegation go to the session that began
+                // first, as a resumed session's copy is younger than the original.
+                let earlierSession = (session.createdAt, session.sessionID) < (old.sessionCreated, old.session)
+                let incomingOwns = incomingWins || (identical && old.delegated && !entryDelegated)
+                    || (identical && old.delegated == entryDelegated && earlierSession)
+                edits[key] = (session.sourceID, entry.project, entry.id, old.edit.earlier(than: entry.edit), delegated,
+                              incomingOwns ? session.sessionID : old.session,
+                              incomingOwns ? session.createdAt : old.sessionCreated)
             }
             for (folder, directories) in item.missing {
                 let key = session.sourceID + "\u{0}" + item.base + "\u{0}" + folder
@@ -124,6 +135,21 @@ enum HistoryFold {
                           sampleDirectories: Array($0.directories.sorted().prefix(32)))
         }.sorted { ($0.projectPath, $0.path, $0.sourceID) < ($1.projectPath, $1.path, $1.sourceID) }
         result.associations.sort { ($0.sourceID, $0.sessionID) < ($1.sourceID, $1.sessionID) }
+        let trailEdits = Dictionary(grouping: edits.values, by: { $0.source + "\u{0}" + $0.session })
+        result.trails = attributed.map { item in
+            let session = item.session
+            let edits = (trailEdits[session.sourceID + "\u{0}" + session.sessionID] ?? []).map { record in
+                // A working folder outside the checkout (a sibling repository
+                // edited from here) says nothing about where the file landed.
+                let workspace = CheckoutPath.contains(root: record.project, path: record.edit.workspace)
+                    ? record.edit.workspace : record.project
+                return TrailEdit(date: record.edit.date, projectPath: record.project, workspacePath: workspace,
+                                 delegated: record.delegated)
+            }
+            return SessionTrail(sourceID: session.sourceID, sessionID: session.sessionID, projectPath: item.home,
+                createdAt: session.createdAt, latestActivity: session.latestActivity,
+                parentSessionID: session.parentSessionID, edits: edits)
+        }
         return result
     }
 

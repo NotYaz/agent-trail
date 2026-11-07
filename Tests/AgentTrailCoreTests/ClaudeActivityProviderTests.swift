@@ -143,6 +143,67 @@ final class ClaudeActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.projects.first { $0.path == sibling.path }?.recordedEditCount, 1)
         // The latest edit landed in a Claude worktree, and the card names it.
         XCTAssertTrue(home.activities.contains { $0.latestEditWorkspacePath == worktree.path })
+        // The session's trail keeps the same three edits, each where it landed.
+        let trail = try XCTUnwrap(result.sessionTrails.first)
+        XCTAssertEqual(result.sessionTrails.count, 1)
+        XCTAssertEqual(trail.projectPath, fixture.project.path)
+        XCTAssertEqual(trail.edits.map(\.date), [fixture.date(10), fixture.date(11), fixture.date(13)])
+        XCTAssertEqual(trail.edits.map(\.projectPath), [fixture.project.path, sibling.path, fixture.project.path])
+        XCTAssertEqual(trail.edits.map(\.workspacePath), [fixture.project.path, sibling.path, worktree.path])
+    }
+
+    func testAResumedSessionsCopyOfAnEditStaysWithTheOriginal() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try fixture.git(fixture.project)
+        let path = fixture.project.appendingPathComponent("shared.swift").path
+        let later = fixture.project.appendingPathComponent("later.swift").path
+        let shared = [fixture.request("shared", path: path), fixture.response("shared", seconds: 10, path: path)]
+        try fixture.write([fixture.head("cli", seconds: 0)] + shared,
+                          to: fixture.projectLogs.appendingPathComponent("original.jsonl"))
+        // `claude --resume` copies the earlier records into a new, more recently active log.
+        try fixture.write([fixture.head("cli", seconds: 50)] + shared
+                          + [fixture.request("later", path: later), fixture.response("later", seconds: 60, path: later)],
+                          to: fixture.projectLogs.appendingPathComponent("resumed.jsonl"))
+        let result = ClaudeActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        let trails = Dictionary(uniqueKeysWithValues: result.sessionTrails.map { ($0.sessionID, $0.edits.map(\.date)) })
+        XCTAssertEqual(trails["original"], [fixture.date(10)])
+        XCTAssertEqual(trails["resumed"], [fixture.date(60)])
+    }
+
+    func testDesktopTrailKeepsItsEditsBranchesAndCLIIDs() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let worktree = fixture.project.appendingPathComponent(".claude/worktrees/feature")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        try fixture.session(workspace: worktree, writtenBranches: [
+            worktree.path + "\u{0}worktree-feature", fixture.project.path + "\u{0}main", "no separator",
+            fixture.project.path + "\u{0}"])
+        let rootPath = fixture.project.appendingPathComponent("root.swift").path
+        let worktreePath = worktree.appendingPathComponent("feature.swift").path
+        try fixture.write([
+            fixture.request("root", path: rootPath, cwd: fixture.project.path),
+            fixture.response("root", seconds: 10, path: rootPath, cwd: fixture.project.path),
+            fixture.request("feature", path: worktreePath, cwd: worktree.path),
+            fixture.response("feature", seconds: 20, path: worktreePath, cwd: worktree.path)])
+        try fixture.write([fixture.request("worker", name: "Write", path: worktreePath, cwd: worktree.path),
+            fixture.response("worker", seconds: 30, path: worktreePath, cwd: worktree.path)],
+            to: fixture.projectLogs.appendingPathComponent("cli-session/subagents/agent-one.jsonl"))
+        let result = ClaudeActivityProvider().scan(sources: [fixture.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 3)
+        let trail = try XCTUnwrap(result.sessionTrails.first)
+        XCTAssertEqual(result.sessionTrails.count, 1)
+        XCTAssertEqual(trail.sessionID, "local_session")
+        XCTAssertEqual(trail.otherIDs, ["cli-session"])
+        XCTAssertEqual(trail.projectPath, fixture.project.path)
+        XCTAssertEqual(trail.edits, [
+            TrailEdit(date: fixture.date(10), projectPath: fixture.project.path, workspacePath: fixture.project.path),
+            TrailEdit(date: fixture.date(20), projectPath: fixture.project.path, workspacePath: worktree.path),
+            TrailEdit(date: fixture.date(30), projectPath: fixture.project.path, workspacePath: worktree.path, delegated: true)])
+        // Entries without a folder and a branch are dropped.
+        XCTAssertEqual(trail.writtenBranches, [WrittenBranch(workspacePath: worktree.path, branch: "worktree-feature"),
+                                               WrittenBranch(workspacePath: fixture.project.path, branch: "main")])
     }
 
     func testTerminalSessionIsFoundPastAnOversizedOpeningPrompt() throws {
@@ -544,11 +605,12 @@ final class ClaudeActivityProviderTests: XCTestCase {
         func date(_ seconds: Int) -> Date { Date(timeIntervalSince1970: TimeInterval(1000 + seconds)) }
         func stamp(_ seconds: Int) -> String { formatter.string(from: date(seconds)) }
 
-        func session(workspace: URL? = nil) throws {
+        func session(workspace: URL? = nil, writtenBranches: [String]? = nil) throws {
             let cwd = workspace ?? project
-            let record: [String: Any] = ["sessionId": "local_session", "cliSessionId": "cli-session",
+            var record: [String: Any] = ["sessionId": "local_session", "cliSessionId": "cli-session",
                 "cwd": cwd.path, "originCwd": project.path, "createdAt": 1_000_000, "lastActivityAt": 1_000_000,
                 "gitAnchors": [["gitRoot": project.path], ["gitRoot": cwd.path]]]
+            if let writtenBranches { record["writtenBranches"] = writtenBranches }
             try JSONSerialization.data(withJSONObject: record).write(to: metadata)
         }
 

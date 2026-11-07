@@ -8,7 +8,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
-**[0.1.0-alpha.12](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.12) · Public alpha · macOS 14+ · [MIT license](LICENSE) · [Changelog](CHANGELOG.md) · [Website](https://agent-trail.app/)**
+**[0.1.0-alpha.13](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.13) · Public alpha · macOS 14+ · [MIT license](LICENSE) · [Changelog](CHANGELOG.md) · [Website](https://agent-trail.app/)**
 
 [![CI](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml)
 
@@ -20,7 +20,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 ## Install
 
-**Download** `Agent-Trail-macOS-universal2.zip` from the [0.1.0-alpha.12 release](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.12), not the "Source code" archives: one app for Apple Silicon and Intel Macs on macOS 14 or later.
+**Download** `Agent-Trail-macOS-universal2.zip` from the [0.1.0-alpha.13 release](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.13), not the "Source code" archives: one app for Apple Silicon and Intel Macs on macOS 14 or later.
 
 1. Unzip it and move **Agent Trail** to your Applications folder.
 2. Open it. This alpha is ad-hoc signed and **not Apple-notarized**, so macOS stops the first launch. Close the warning without choosing **Move to Trash**. Within the next hour, open **System Settings › Privacy & Security**, click **Open Anyway** next to the Agent Trail message, then confirm with **Open Anyway** (**Open** on macOS 14) and your login password. You do this once per release. On macOS 14 you can instead Control-click the app, choose **Open**, and click **Open** again.
@@ -56,6 +56,7 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 - Each card shows a 30-day sparkline, its recorded edits with the change from the previous 30 days, and which profiles did the work.
 - Projects needing input sort first, followed by working projects; filter with **Needs input** or **Working**, or sort by edits, trend, or name.
 - Explore Growth: recorded edits per day with a 7-day average, a 26-week Trail calendar, when your edits land by hour and weekday, the profile mix with delegated edits, and where edits landed.
+- Map a project's branches: each session's runs of edits on the branch they landed in, with the commits and merges in your local Git history, as lanes, a tree, an orbit, or a log.
 - Export a PNG activity portrait with project and profile names hidden by default.
 - Keep everything local, with no account or telemetry.
 
@@ -63,7 +64,7 @@ Agent Trail shows each project once, bringing its reported live sessions togethe
 
 ## First run
 
-The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects** and **Growth** inside the same 600 × 680 panel (⌘1 and ⌘2; ⌘F searches and ⌘R refreshes). Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; live status checks run separately every 3 seconds.
+The app opens its panel immediately and keeps a connected-dots icon in the menu bar, with no Dock icon. Switch between **Projects**, **Growth**, and **Map** inside the same 600 × 680 panel (⌘1, ⌘2, and ⌘3; ⌘F searches and ⌘R refreshes). Click away to hide it; click the icon to return. The first history scan runs in the background. Later history scans are incremental, every 15 seconds by default; live status checks run separately every 3 seconds.
 
 Routine refreshes keep the last complete history visible while the next scan finishes. Tab changes and updates use gentle transitions that respect macOS Reduce Motion.
 
@@ -98,7 +99,7 @@ Launchers and scripts can open these links:
 | Link | Opens |
 |---|---|
 | `agenttrail://jump` | The most urgent live session |
-| `agenttrail://jump?project=agent-trail` | The most urgent live session in a project, by folder name (any case) or full path |
+| `agenttrail://jump?project=my-app` | The most urgent live session in a project, by folder name (any case) or full path |
 | `agenttrail://jump?session=ID` | One session, by the assistant's session or thread ID (`AgentTrailInspect --live` lists them) |
 | `agenttrail://switcher` | The session switcher |
 
@@ -325,13 +326,51 @@ From Growth, choose **Share** to preview the card, then **Export PNG…** to sav
 
 Review a card before sharing it. Hiding names does not hide dates, counts, or patterns of activity.
 
+## Map a project's branches
+
+Choose the **Map** tab (⌘3), then a project from the menu beside the title and a range: **Today**, **7D**, **30D**, or **All**. The Map draws that project's Git branches over time, each session's edits on the branch they landed in, and the commits and merges Git recorded. Edits come from the same saved history as the project cards, and only edits inside the project are drawn. Days start at 05:00, as in Growth.
+
+<img src="docs/assets/map.png" width="600" alt="Agent Trail Map tab in the Lanes view for a synthetic project: the main trunk with merge beads, branch lanes below it with session bars colored by profile, and folded idle stretches on the time axis">
+
+The icons beside the range pick one of four views:
+
+- **Lanes.** The trunk along the top and a lane for each branch below it, with time running left to right. See [Read the lanes](#read-the-lanes).
+- **Tree.** The branches as a tree off the trunk, with branches merged into an integration branch one step further right. Each node is a ring split by profile, each link is as wide as the edits that flowed back through it, related branches stack into one node until you click it, and a strip of days on the right keeps the dates.
+- **Orbit.** The range as a ring clock that runs clockwise to now at the top, with idle hours folded. Branches leave the ring as petals at their fork and come back at their merge, and sessions run as tracks inside the ring, around a dial with the totals or the item under the pointer.
+- **Log.** A vertical Git log, newest on top. Each branch is a column from its fork to its merge, sessions are thick segments on their branch's column, and a list names each branch at its tip, indented under the branch it merged into.
+
+Hover over a session, branch, commit, or idle stretch for its details in the strip under the map, and click to pin it. The strip offers **Jump** for a live session, **Open** for a cloud session, and **Copy** for a commit's SHA. Click a profile in the legend to dim the others.
+
+### Read the lanes
+
+- **Bars are runs of edits.** Each bar is one session's run of edits on one branch, brighter where edits were denser and hatched where subagents made them. A run ends when the session pauses for more than 20 minutes (Today), 30 minutes (7D), or an hour (30D and All). Runs that overlap on one lane stack, up to three deep. Spawned Codex threads join the session that started them.
+- **Which branch an edit counts for.** Uncommitted changes travel with the next commit, so an edit counts for the branch of the next commit in its working tree, when that commit follows within 12 hours. The carry passes through pulls, fast-forwards, and `checkout -b` to a new branch. Checking out an existing branch, a reset, or any other move before that commit leaves the edit on the branch that was checked out when it was made. In a linked worktree inside the project, such as Claude's `.claude/worktrees/<name>`, an edit counts for the branch its own Claude Desktop session recorded for that folder, so a worktree removed since keeps its branch. Otherwise the worktree's own reflog decides, then a branch another session recorded for the folder, then a branch named after the folder. A worktree whose branch cannot be found gets a lane named after its folder.
+- **Commits and merges.** Commits sit on the lane of the branch they were made on: from the reflog where they were made locally, otherwise from each branch's chain of first parents. A branch has merged at a merge commit that brings in one of its commits, at a trunk commit that records its head's tree (a squash merge), or at a trunk commit GitHub made whose subject is one of its commit subjects plus ` (#N)`. A landing on the trunk is a bead: a bold ring with a dot when it is matched to a branch's lane, and a hollow ring otherwise, as for a branch no session edited. A branch that others merged into keeps its own lane, with those branches below it.
+- **Idle time folds.** Pauses of more than about 40 minutes (Today), 75 minutes (7D), or 3.5 hours (30D and All) fold into narrow `//` seams, so bursts of work get the room; each run and commit keeps a few minutes of room on either side. The longest seams are labelled with their length, such as `4.5h` or `3d`, and hovering a seam shows its length. When work came before the repository's first commit, the trunk says **before Git** where there is room.
+- **Work side by side shares a row.** Branches a session worked on at the same time, such as a workflow's agents in their own worktrees, are drawn as thin strands of one row, a bundle: three or more branches, or two agents of one workflow run. The trunk and branches that others merged into keep rows of their own. Click a bundle's title to open it into a lane per strand, and click it again to fold it.
+- **Many branches fold into streams.** Past 14 branches, counting a bundle as one, related branches share one row: branches merged into the same integration branch, branches with the same prefix, such as `fix/`, or the agents of one workflow run. **Show all** draws every branch on its own lane, with no bundles or streams, and **Group** brings them back.
+- **Cloud sessions.** Claude Code sessions on claude.ai keep no history on your Mac. Their commits carry a `Claude-Session: https://claude.ai/code/session_…` trailer, so each one shows as pale bars across its commits on each branch, under **Cloud** in the legend. They count no edits, and commits GitHub made, such as a pull request's merge, do not count as their work. A project with only cloud work does not appear, since projects come from sessions and edits recorded on your Mac.
+- **Live sessions.** A session that is working or needs input draws a thread from its last edit to now, ending in its status glyph, and the line above the map shows it. A session started in the project with no edits in the range shows on its branch while it works or needs input. Hovering a session draws dotted threads where it moved from one branch to another.
+
+### The Map window
+
+On the Map tab, the expand icon next to Refresh opens the Map in its own window. It shares the panel's project, range, and view, and keeps its own hover and pin. Resize it freely, down to 640 × 640 points below the title bar; it remembers its size and position. There, Lanes takes the width its branches, commits, and labels need, up to 8,000 points, and scrolls sideways, opening at now.
+
+At 980 points wide or more, a details panel sits beside the map; the sidebar button beside the range shows or hides it. Its top part describes the project, the item under the pointer, or the item you pinned. A click pins an item and opens a fuller view with rows you can click; **Back** (⌘[) returns to the previous pin, and Esc unpins. A narrower window shows the strip under the map, as the panel does. ⌘R refreshes, and ⌘W closes the window.
+
+### What the Map reads
+
+The Map reads Git only while it is on screen, in the panel or its window, and never changes the repository. It reads Git again when you open it, change its project or range, or press Refresh, and when that project's sessions or live status change; otherwise it reads at most once a minute. Merges made on GitHub appear once you fetch them. Commits and merges need a real `git` from Xcode, the Command Line Tools, or Homebrew; without one, the Map still shows branches from the reflogs, with no commits. [Privacy](#privacy) lists what it reads and runs.
+
 ## Privacy
 
 Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs (a log Desktop does not list is opened to read the entrypoint and folder of its opening records, which stay in memory), Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records and, for each Claude session process, its children's parent, process group, start time, and run state (never their arguments); for `claude` in a terminal, once its process start is verified, its `TERM_PROGRAM` and `__CFBundleIdentifier` values to name the terminal, as for Grok; Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. After you click Jump with several instances of the host app running, it reads the parent process IDs of the session's ancestors to find the instance it runs under. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
 
-Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches, and the Claude cache for terminal sessions, also keep the parent folders of edited files. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
+Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches, and the Claude cache for terminal sessions, also keep the parent folders of edited files. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. A cache is written only after a scan changed it, at most every 5 minutes, and once more when Agent Trail quits. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
 
 `project-locations.json` (mode 0600) in the same folder remembers repositories Agent Trail attributed work to. It holds their current and earlier folder paths, which are learned from session evidence, plus a macOS bookmark and folder identity: device, inode, and creation date. It holds no prompts, commands, diffs, or conversation text, but the paths can still be sensitive; keep it private like the caches. An unreadable file is reported and never overwritten. With Agent Trail closed, deleting it forgets learned earlier locations; links still present are learned again.
+
+The Map reads Git only while it is on screen, and only for the project it shows. It reads that checkout's reflogs as files (`logs/HEAD` for the main working tree and for each linked worktree that still exists, plus each worktree's `HEAD`), skipping the name and e-mail address on each line; without a real Git, it also reads branch names and heads from the files under `refs/heads` and `refs/remotes` and from `packed-refs`. It then runs Git three times per build, all read-only: `for-each-ref` for branch, remote-tracking branch, and tag names; `log --all --reflog` for up to 4,000 commits, starting a day before the range or the project's first session or cloud commit, whichever is later; and a `log --grep` for the oldest commit with a `Claude-Session` trailer. It uses a real Git from the developer directory `xcode-select` points to, the Command Line Tools, Xcode, or Homebrew, never `/usr/bin/git`, which on a Mac without the developer tools asks to install them. Git runs with no terminal or prompts, with optional locks, the file-system monitor, signature display, hooks, replace objects, lazy fetches of missing objects, and every transport protocol turned off. Its environment holds only `HOME`, `PATH=/usr/bin:/bin`, `LC_ALL=C`, and the `GIT_*` variables for those switches, and it is stopped after 10 seconds (3 for the trailer search). From each commit the Map keeps its hash, parents, tree, committer date, subject, `Co-Authored-By` names without addresses, and the session ID of a `Claude-Session` link to claude.ai. The committer name is checked only to tell whether GitHub made the commit, and is not kept; author names and the author's and committer's e-mail addresses are not requested from Git, and the address in each `Co-Authored-By` trailer is dropped as the commit is read. From the Claude Desktop session records it already reads, the Map also uses the branch each session recorded for each folder it worked in (`writtenBranches`). The Map is built in memory, and nothing of it is cached or written to disk; only the Map window's size and position and whether its details panel shows are saved as preferences. A cloud session's claude.ai page opens in your browser only when you click **Open**.
 
 External links in the app open in your browser only when selected. See [security and reporting](SECURITY.md) before sharing an issue or diagnostic output.
 
@@ -352,6 +391,8 @@ swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 ```
 
 `--render-status-demo OUTPUT.png` draws the menu-bar icon states large and at real size (2x and 1x), with the nodes the working animation follows marked in order. `--render-switcher-demo OUTPUT.png` draws the session switcher with sample sessions. Add `--light` for the light appearance, `--height N` to render a taller panel for review, or `--theme classic|gentle|vivid|aurora` to render a color theme without changing your saved choice. Renders pin the clock to 30 October 2026, 18:40, so they are repeatable. The older `--render-live-demo` flag remains an alias for the combined Projects preview.
+
+Demo mode has no Map data, and its Map tab says so. `--render-map SNAPSHOT.json OUTPUT.png` draws the Map from a snapshot saved with `AgentTrailInspect --map` (see [Development](#development)). Add `--mode lanes|tree|orbit|log`, `--range today|7d|30d|all` (7d by default), `--all-branches` to turn off bundles and streams, `--open-bundles` to draw every bundle open, `--window WxH` to render the Map window's content instead of the panel, or `--pin KIND` to pin an item as a click would. Unlike the sample renders, a snapshot holds a real project's paths, branch names, and commit subjects, so keep snapshots and their images private.
 
 ## Development
 
@@ -375,6 +416,12 @@ swift run AgentTrailInspect --live
 # Show learned project locations and which sessions joined another project.
 # Reads project-locations.json (or the --locations file) and never writes it.
 swift run AgentTrailInspect --locations ~/Library/Application\ Support/AgentTrail/project-locations.json
+
+# Save what the Map draws for one project (session trails, Git history, live sessions) as JSON.
+swift run AgentTrailInspect --map ~/Developer/my-app > /tmp/my-app-map.json
+
+# Print the Map built from a snapshot: lanes, runs, commits, and merges.
+swift run AgentTrailInspect --map-summary /tmp/my-app-map.json --range 30d
 ```
 
 Each build creates `Agent Trail.app`, `Agent-Trail-macOS-<architecture>.zip`, and a matching `.sha256` file in the selected output folder. Architecture-specific ZIPs run on that architecture; `universal2` contains both arm64 and x86_64. Cross-architecture compilation does not validate execution on the other architecture.

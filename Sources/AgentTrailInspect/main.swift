@@ -26,6 +26,41 @@ if let index = cacheIndex, index + 1 >= arguments.count || arguments[index + 1].
     fputs("--cache requires a cache file path\n", stderr)
     exit(2)
 }
+// `--map-summary SNAPSHOT.json`: the Map built from a saved snapshot, as text.
+if let index = arguments.firstIndex(of: "--map-summary") {
+    guard index + 1 < arguments.count else {
+        fputs("--map-summary requires a snapshot path\n", stderr)
+        exit(2)
+    }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let snapshot = try decoder.decode(MapSnapshot.self, from: Data(contentsOf: URL(fileURLWithPath: arguments[index + 1])))
+    let rangeIndex = arguments.firstIndex(of: "--range")
+    let range = rangeIndex.flatMap { index in
+        MapRange.allCases.first { index + 1 < arguments.count && $0.rawValue.lowercased() == arguments[index + 1].lowercased() }
+    } ?? .week
+    let map = ProjectMap.build(snapshot, range: range, collapseAbove: arguments.contains("--all-branches") ? nil : 14)
+    let clock = DateFormatter()
+    clock.dateFormat = "MM-dd HH:mm"
+    func position(_ date: Date) -> String { String(format: "%.3f", map.axis.position(of: date)) }
+    print("\(range.title): edits \(map.editCount) sessions \(map.sessionCount) cloud \(map.cloudSessionCount) rows \(map.rowCount) gaps \(map.axis.gaps.count) outside \(map.outsideEdits) merges \(map.mergeCount) quiet \(map.quietMergeCount)")
+    for lane in map.lanes {
+        let merge = lane.merge.map { " merged \(clock.string(from: $0.date)) #\($0.pullRequest.map(String.init) ?? "-")" } ?? ""
+        let parent = lane.parentID.map { $0 == map.trunkID ? "" : " ⟵ \($0.dropFirst(7))" } ?? ""
+        let strand = lane.bundle.map { " strand \(lane.strand) of \(map.bundle($0)?.title ?? $0)" } ?? ""
+        print("row \(lane.row) \(lane.kind) \(lane.title) \(clock.string(from: lane.start))…\(clock.string(from: lane.end)) [\(position(lane.start))–\(position(lane.end))] edits \(lane.editCount)\(merge)\(lane.deleted ? " deleted" : "")\(parent)\(lane.isStream ? " members \(lane.members.count)" : "")\(strand)")
+    }
+    for bundle in map.bundles {
+        print("bundle \(bundle.title) · \(bundle.laneIDs.count) strands under \(bundle.parentID)")
+    }
+    for span in map.spans {
+        print("  \(span.sourceID) \(span.sessionID.prefix(10)) \(span.laneID) \(clock.string(from: span.start))…\(clock.string(from: span.end)) edits \(span.editCount) (\(span.delegated.count) delegated) slot \(span.slot)\(span.spawnedThreads > 0 ? " +\(span.spawnedThreads) threads" : "")\(span.live.map { " live \($0)" } ?? "")")
+    }
+    for marker in map.markers {
+        print("  * \(marker.kind) \(marker.laneID) \(clock.string(from: marker.date)) \(marker.subject.prefix(50))\(marker.quietBranch.map { " quiet:\($0)" } ?? "")\(marker.cloudSession != nil ? " cloud" : "")")
+    }
+    exit(0)
+}
 let sources = try ProfileConfiguration.load(from: profileURL).sources
 let started = Date()
 if arguments.contains("--live") {
@@ -66,6 +101,29 @@ let provider = CompositeActivityProvider(cacheURL: cacheURL, projectLocations: s
 let result = arguments.contains("--metadata-only")
     ? provider.metadata(sources: sources)
     : provider.scan(sources: sources)
+// `--map PATH`: one project's session trails, Git history and live sessions,
+// as the snapshot `AgentTrail --render-map` draws.
+if let index = arguments.firstIndex(of: "--map") {
+    guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
+        fputs("--map requires a project path\n", stderr)
+        exit(2)
+    }
+    let project = canonicalPath(arguments[index + 1])
+    let live = CompositeLiveActivityProvider().scan(sources: sources).sessions
+        .map { MapSnapshot.LiveMark(sourceID: $0.sourceID, sessionID: $0.sessionID, status: $0.status.rawValue) }
+    let trails = MapSnapshot.trails(result.sessionTrails, for: project)
+    // A day of history before the first session, local or cloud, shows where its branches started.
+    let first = (trails.map(\.createdAt) + [GitHistoryReader.firstCloudCommit(checkout: project)].compactMap { $0 }).min()
+    let since = (first ?? Date()).addingTimeInterval(-86_400)
+    let snapshot = MapSnapshot(projectPath: project, takenAt: Date(), sources: sources, trails: trails,
+                               git: GitHistoryReader.read(checkout: project, since: since), live: live)
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    FileHandle.standardOutput.write(try encoder.encode(snapshot))
+    FileHandle.standardOutput.write(Data([10]))
+    exit(0)
+}
 let formatter = ISO8601DateFormatter()
 let activityCalendar = ActivityCalendar.current
 let records: [[String: Any]] = result.projects.map { project in

@@ -24,6 +24,16 @@ swift run AgentTrail --render-share-demo /tmp/agent-trail-share.png
 
 These commands do not read assistant history or live process-registry data. The README previews use sample images at `docs/assets/demo.png`, `docs/assets/growth.png`, and `docs/assets/share-card.png`. Projects and Growth previews should show the same 600 × 680 floating-panel layout. Renders pin the clock, so they are repeatable; add `--light` to check the light appearance and `--height N` to see content below the fold. Check both appearances for Growth, which is no longer dark-only. `--render-live-demo` remains a compatibility alias for the merged Projects preview; do not add a separate Live-tab screenshot.
 
+The Map has no sample data. To check it against a project, save a snapshot and draw it:
+
+```sh
+swift run AgentTrailInspect --map ~/Developer/my-app > /tmp/my-app-map.json
+swift run AgentTrailInspect --map-summary /tmp/my-app-map.json --range 7d
+swift run AgentTrail --render-map /tmp/my-app-map.json /tmp/my-app-map.png --mode lanes --range 7d
+```
+
+`--map PATH` prints the project's session trails, Git history, and live sessions as JSON. `--map-summary SNAPSHOT` prints the lanes, bundles, runs, and commits built from it, for `--range today|7d|30d|all` (default 7d); `--all-branches` turns off bundles and streams. `--render-map SNAPSHOT OUTPUT.png` also takes `--mode lanes|tree|orbit|log`, `--window WxH` to render the Map window's content (640x640 to 4000x4000), `--pin KIND` to pin an item as a click would (live, session, lane, trunk, commit, merge, group, bundle, or fold), `--open-bundles`, `--all-branches`, `--light`, and `--theme NAME`. A snapshot of a real project contains its paths, profile folders, session IDs, branch names, and commit subjects: never commit one, or a render of one, and use synthetic data for any image in the repository. Map tests build synthetic `.git` folders in temporary directories (`GitHistoryTests`) or `GitHistory` values directly (`ProjectMapTests`).
+
 To measure scrolling, run the scroll benchmark from a release build. It opens the panel in a popover, scrolls it one step per display frame, and prints main-thread CPU per frame, frames over the frame budget, late frames, and what an idle open panel spends on live ticks:
 
 ```sh
