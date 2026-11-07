@@ -218,6 +218,96 @@ final class QwenActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "agent-plan-1" }?.parentSessionID, gone)
     }
 
+    func testCallsSkippedWithoutRunningDoNotCount() throws {
+        let f = try QwenFixture()
+        defer { f.remove() }
+        let a = f.project.appendingPathComponent("a.txt").path
+        let b = f.project.appendingPathComponent("b.txt").path
+        var ran = f.toolResult("e1", session: id, seconds: 10, file: a)
+        var info = ran["toolCallResult"] as? [String: Any] ?? [:]
+        info["executionStatus"] = "success"
+        ran["toolCallResult"] = info
+        // `qwen -p --json-schema` runs only `structured_output` and records its siblings as `success`.
+        var skipped = f.toolResult("w1", name: "write_file", session: id, seconds: 11, file: nil)
+        skipped["toolCallResult"] = ["callId": "w1", "status": "success", "executionStatus": "not_started",
+                                     "resultDisplay": "Skipped: this turn's structured_output contract took precedence."]
+        try f.chat(id, [
+            f.user(id, seconds: 1),
+            f.call("e1", session: id, seconds: 2, file: a),
+            ran,
+            f.call("w1", name: "write_file", session: id, seconds: 3, file: b),
+            skipped
+        ])
+        let result = f.provider().scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(result.projects.first?.activities.first?.editMoments.map(\.date), [f.date(10)])
+        XCTAssertEqual(result.notices, [])
+    }
+
+    func testExternalExecutorSubagentEnvelopesDoNotCount() throws {
+        let f = try QwenFixture()
+        defer { f.remove() }
+        let b = f.project.appendingPathComponent("b.txt").path
+        try f.chat(id, [f.user(id, seconds: 1)])
+        // A subagent run by another ACP agent answers every call with the same envelope, failed ones included.
+        func envelope(_ callID: String, seconds: TimeInterval, status: String, output: String) -> [String: Any] {
+            var record = f.toolResult(callID, session: id, seconds: seconds, file: nil)
+            let input: [String: Any] = ["file_path": b, "old_string": "PRIVATE_CONTENT_MARKER"]
+            let response: [String: Any] = ["input": input, "toolName": "edit", "output": output, "content": [Any](),
+                                           "status": status]
+            let function: [String: Any] = ["id": callID, "name": "edit", "response": response]
+            record["message"] = ["role": "user", "parts": [["functionResponse": function]]]
+            record["toolCallResult"] = ["callId": callID]
+            return record
+        }
+        try f.subagent(parent: id, agent: "reviewer-1", [
+            f.call("x1", session: id, seconds: 10, file: b),
+            envelope("x1", seconds: 11, status: "failed", output: "Error: Could not find the string to replace."),
+            f.call("x2", session: id, seconds: 12, file: b),
+            envelope("x2", seconds: 13, status: "completed", output: "PRIVATE_CONTENT_MARKER")
+        ])
+        let result = f.provider().scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 0)
+        XCTAssertEqual(result.projects.first?.sessionCount, 1)
+        XCTAssertEqual(result.notices, [])
+    }
+
+    func testEditsThroughTheToolCallBridgeCount() throws {
+        let f = try QwenFixture()
+        defer { f.remove() }
+        let a = f.project.appendingPathComponent("a.txt").path
+        let b = f.project.appendingPathComponent("b.txt").path
+        // A deferred tool is called as `tool_call {name, arguments}`, and its result is named `tool_call`.
+        func bridged(_ callID: String, target: String, seconds: TimeInterval, file: String) -> [String: Any] {
+            var record = f.record("assistant", session: id, seconds: seconds)
+            let arguments: [String: Any] = ["file_path": file, "old_string": "PRIVATE_CONTENT_MARKER",
+                                            "new_string": "PRIVATE_CONTENT_MARKER"]
+            let envelope: [String: Any] = ["name": target, "arguments": arguments]
+            let call: [String: Any] = ["id": callID, "name": "tool_call", "args": envelope]
+            record["message"] = ["role": "model", "parts": [["functionCall": call]]]
+            return record
+        }
+        try f.chat(id, [
+            f.user(id, seconds: 1),
+            bridged("t1", target: "edit", seconds: 2, file: a),
+            f.toolResult("t1", name: "tool_call", session: id, seconds: 10, file: a),
+            // Matched without regard to case; with no recorded path, the argument's folder is used.
+            bridged("t2", target: "Write_File", seconds: 3, file: b),
+            f.toolResult("t2", name: "tool_call", session: id, seconds: 11, file: nil),
+            // A refused or failed bridged call.
+            bridged("t3", target: "edit", seconds: 4, file: a),
+            f.toolResult("t3", name: "tool_call", status: "error", session: id, seconds: 12, file: nil, error: true),
+            // A bridged call to a tool that edits nothing.
+            bridged("t4", target: "web_fetch", seconds: 5, file: a),
+            f.toolResult("t4", name: "tool_call", session: id, seconds: 13, file: a)
+        ])
+        let result = f.provider().scan(sources: [f.source])
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.recordedEditCount, 2)
+        XCTAssertEqual(project.activities.first?.editMoments.map(\.date), [f.date(10), f.date(11)])
+        XCTAssertEqual(result.notices, [])
+    }
+
     func testArchivedSessionsAreRead() throws {
         let f = try QwenFixture()
         defer { f.remove() }

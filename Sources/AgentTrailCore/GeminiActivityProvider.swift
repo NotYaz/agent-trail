@@ -7,27 +7,32 @@ import Foundation
 ///
 /// Sessions live in `tmp/<folder>/chats/session-*.jsonl` (append-only since
 /// v0.39; a whole `session-*.json` before it). A subagent writes its own file
-/// in `chats/<root session id>/<agent id>.jsonl`; its edits join that session
-/// as delegated. A session names its folder only as `projectHash`, the SHA-256
-/// of the folder Gemini was started in. That folder comes from Gemini's own
-/// records (`tmp/<folder>/.project_root` and `projects.json`), accepted only
-/// when its hash matches; the folder name is never decoded.
+/// in `chats/<root session id>/<agent id>.jsonl` (a whole `.json` in v0.37
+/// and v0.38); its edits join that session as delegated. A session names its
+/// folder only as `projectHash`, the SHA-256 of the folder Gemini was started
+/// in. That folder comes from Gemini's own records (`tmp/<folder>/.project_root`
+/// and `projects.json`), accepted only when its hash matches; the folder name
+/// is never decoded.
 ///
 /// One confirmed edit is a `write_file` or `replace` tool call recorded with
-/// status `success`. Its file is the call's `resultDisplay.filePath` (v0.25
-/// and later), else its `file_path` argument; a relative argument (v0.20 to
-/// v0.24) is resolved against the session's folder. Its time is the call's
-/// own timestamp, written when its batch completed. Every update appends the
-/// whole message again, so calls are deduplicated by id. Rewinds and
-/// `$patch` removals are not replayed: they hide messages from the model, and
-/// the edits they hid still happened. Files under Gemini's own folders (plan
-/// mode writes plans there) never count.
+/// status `success` whose `resultDisplay` shows the change: a diff, or
+/// "Created <path>" for `replace` making a file. (ACP sessions, such as Zed's,
+/// record a call that returned an error as `success` with an "Error: …"
+/// display.) Its file is the diff's `filePath` (v0.25 and later), else its
+/// `file_path` argument; a relative argument (v0.20 to v0.24) is resolved
+/// against the session's folder. Its time is the call's own timestamp, written
+/// when its batch completed. Every update appends the whole message again, so
+/// calls are deduplicated by id. Rewinds and `$patch` removals are not
+/// replayed: they hide messages from the model, and the edits they hid still
+/// happened. A legacy `.json` rewritten in place is folded into what it showed
+/// before for the same reason. Files under Gemini's own folders (plan mode
+/// writes plans there) never count.
 ///
 /// Shell commands, failed or cancelled calls and file modification times are
 /// never evidence. The cache keeps ids, times and folder paths only: no
 /// prompts, code, diffs or file content.
 public final class GeminiActivityProvider: ActivityProvider {
-    static let cacheVersion = 1
+    static let cacheVersion = 2
     private let cache: HistoryCache<GeminiFile>
     private let files = FileManager.default
     private let resolver: GitProjectResolver
@@ -111,13 +116,17 @@ public final class GeminiActivityProvider: ActivityProvider {
 
     /// A legacy `session-*.json` is rewritten whole on every update, so it is
     /// reparsed only when its identity, size or modification time changes.
+    /// Rewritten in place (the same identity), what it now holds is folded
+    /// into what it held before: a rewind drops messages from the file, and
+    /// the edits they recorded still happened.
     private func readWhole(_ url: URL, file: GeminiFile) throws {
         let stat = try FileStat.required(url)
         let stamp = FileStamp(stat)
         guard stamp != file.stamp else { return }
+        let rewritten = file.stamp?.identity == stamp.identity
         guard stat.size <= UInt64(JSONLTail.maximumLineBytes) else {
             file.stamp = stamp
-            file.log = GeminiLog()
+            if !rewritten { file.log = GeminiLog() }
             file.tail.oversizedLines = 1
             return
         }
@@ -125,13 +134,19 @@ public final class GeminiActivityProvider: ActivityProvider {
         file.stamp = stamp
         file.tail.oversizedLines = 0
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            // Possibly mid-write; the next scan rereads it.
-            file.stamp = nil
+            // Caught mid-write, or broken: the next change to the file rereads it.
+            file.tail.malformedLines = 1
             return
         }
+        file.tail.malformedLines = 0
         var log = GeminiLog()
         log.apply(object)
-        file.log = log
+        let sameSession = file.log.sessionID == nil || log.sessionID == nil || file.log.sessionID == log.sessionID
+        if rewritten && sameSession {
+            file.log.merge(log)
+        } else {
+            file.log = log
+        }
     }
 
     // MARK: Discovery
@@ -213,9 +228,17 @@ public final class GeminiActivityProvider: ActivityProvider {
                     discovered.tasks.append(ScanTask(source: source, url: url, legacy: true, parentFolder: nil))
                 } else if Self.isSafeID(entry), FileStat.of(url.path)?.kind == .directory,
                           let nested = try? files.contentsOfDirectory(atPath: url.path) {
-                    for child in nested.sorted() where child.hasSuffix(".jsonl") && Self.isSafeID(String(child.dropLast(6))) {
-                        discovered.tasks.append(ScanTask(source: source, url: url.appendingPathComponent(child),
-                                                         legacy: false, parentFolder: entry))
+                    // `<agent id>.jsonl`, or a whole `<agent id>.json` from v0.37 and v0.38.
+                    let nestedLogs = Set(nested.filter { $0.hasSuffix(".jsonl") }.map { String($0.dropLast(6)) })
+                    for child in nested.sorted() {
+                        if child.hasSuffix(".jsonl"), Self.isSafeID(String(child.dropLast(6))) {
+                            discovered.tasks.append(ScanTask(source: source, url: url.appendingPathComponent(child),
+                                                             legacy: false, parentFolder: entry))
+                        } else if child.hasSuffix(".json"), Self.isSafeID(String(child.dropLast(5))),
+                                  !nestedLogs.contains(String(child.dropLast(5))) {
+                            discovered.tasks.append(ScanTask(source: source, url: url.appendingPathComponent(child),
+                                                             legacy: true, parentFolder: entry))
+                        }
                     }
                 }
             }
@@ -446,6 +469,24 @@ struct GeminiLog: Codable, Equatable {
         }
     }
 
+    /// Folds in a later parse of the same legacy file: edits and folders it
+    /// no longer holds are kept.
+    mutating func merge(_ newer: GeminiLog) {
+        sessionID = newer.sessionID ?? sessionID
+        projectHash = newer.projectHash ?? projectHash
+        kind = newer.kind ?? kind
+        started = [started, newer.started].compactMap { $0 }.min()
+        firstMessage = [firstMessage, newer.firstMessage].compactMap { $0 }.min()
+        latest = [latest, newer.latest].compactMap { $0 }.max()
+        hasTurn = hasTurn || newer.hasTurn
+        for path in newer.directories where directories.count < 64 && !directories.contains(path) {
+            directories.append(path)
+        }
+        for (id, edit) in newer.edits {
+            edits[id] = edits[id]?.earlier(than: edit) ?? edit
+        }
+    }
+
     private mutating func note(_ date: Date) {
         latest = max(latest ?? date, date)
     }
@@ -495,6 +536,18 @@ struct GeminiLog: Codable, Equatable {
         if let callDate { note(callDate) }
         guard let name = call["name"] as? String, Self.editTools.contains(name),
               call["status"] as? String == "success", let date = callDate ?? messageDate else { return }
+        // Only the display shows the file changed: a diff, or "Created <path>"
+        // for `replace` making a file. ACP sessions (Zed and other editors)
+        // record a call that returned an error as `success` with an "Error: …"
+        // display; that, any other text, or no display is not an edit.
+        var created: String?
+        if let diff = call["resultDisplay"] as? [String: Any] {
+            guard diff["fileDiff"] is String || diff["filePath"] is String else { return }
+        } else if let text = call["resultDisplay"] as? String, text.hasPrefix("Created ") {
+            created = String(text.dropFirst("Created ".count))
+        } else {
+            return
+        }
         var folders: [String] = []
         var relative: [String] = []
         if let display = call["resultDisplay"] as? [String: Any], let raw = display["filePath"] as? String,
@@ -509,6 +562,11 @@ struct GeminiLog: Codable, Equatable {
                     folders = [(path as NSString).deletingLastPathComponent]
                 }
             } else if !raw.hasPrefix("~"), !raw.contains("://") {
+                // Plan mode creates a relatively named file in its plans
+                // folder, outside the project, shown as "Created ../…": the
+                // argument does not name it. A display shortened to ".../<name>"
+                // cannot be told apart, so it does not count either.
+                if let created, created.hasPrefix("..") { return }
                 relative = [(raw as NSString).deletingLastPathComponent]
             }
         }

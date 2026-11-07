@@ -14,8 +14,11 @@ import Foundation
 /// progress can be read. Every session is reported as Unknown: running, state
 /// not reported. Nothing is inferred from history, file times or CPU use.
 /// Records of `kind: external` (other programs joining the registry) are
-/// skipped. A record's `ipcToken` and `ipcPath` are never kept, logged or
-/// used, and nothing is written to the Qwen home.
+/// skipped, and so are records written in another PID namespace or on
+/// another machine (a Linux container or VM sharing this home): a macOS
+/// writer records `pidNs` and `procStart` as null, and those PIDs name no
+/// process here. A record's `ipcToken` and `ipcPath` are never kept, logged
+/// or used, and nothing is written to the Qwen home.
 public final class QwenLiveActivityProvider {
     private let processStartTimes: (Set<Int32>) -> [Int32: UInt64]
     private let terminalHints: (Int32) -> ProcessIdentity.TerminalHints?
@@ -141,6 +144,9 @@ public final class QwenLiveActivityProvider {
         guard version == 1 else { return version > 1 ? .skipped : .unreadable }
         let kind = object["kind"] as? String ?? "tui"
         guard sessionKinds.contains(kind) else { return .skipped }
+        // Another PID namespace or machine: a macOS writer records neither.
+        if let namespace = object["pidNs"] as? NSNumber, CFGetTypeID(namespace) != CFBooleanGetTypeID() { return .skipped }
+        if let token = object["procStart"] as? String, !token.isEmpty { return .skipped }
         guard let recorded = integer(object["pid"]), recorded == Int64(pid),
               let sessionID = object["sessionId"] as? String, QwenActivityProvider.isSafeID(sessionID),
               let cwd = object["cwd"] as? String, cwd.hasPrefix("/"),

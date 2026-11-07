@@ -266,6 +266,146 @@ final class GeminiActivityProviderTests: XCTestCase {
         XCTAssertEqual(Set(trail.edits.map(\.projectPath)), [canonicalPath(f.project.path)])
     }
 
+    func testFailuresRecordedAsSuccessByACPDoNotCount() throws {
+        let f = try GeminiFixture()
+        defer { f.remove() }
+        let folder = try f.folder()
+        let file = f.project.appendingPathComponent("a.swift").path
+        // An ACP session (Zed, other editors) records a call that returned an error as `success`.
+        var undisplayed = f.call("c5", name: "write_file", seconds: 14, file: file)
+        undisplayed.removeValue(forKey: "resultDisplay")
+        try f.write([
+            f.header(sessionID), f.user("u1", seconds: 1),
+            f.reply("m1", seconds: 2, calls: [
+                f.call("c1", seconds: 10, file: file, display: "Error: Could not find an exact match for old_string in '\(file)'."),
+                f.call("c2", name: "write_file", seconds: 11, file: file, display: "Error: Path not in workspace."),
+                f.call("c3", seconds: 12, file: file, display: "Error writing file: EACCES: permission denied"),
+                f.call("c4", seconds: 13, file: file, display: ["summary": "PRIVATE_PROMPT_MARKER"]),
+                undisplayed,
+                // A diff shows the change.
+                f.call("c6", seconds: 15, file: file)
+            ])
+        ], to: fileName, in: folder)
+        let result = f.provider().scan(sources: [f.source])
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.recordedEditCount, 1)
+        XCTAssertEqual(project.activities.first?.editMoments.map(\.date), [f.date(15)])
+        XCTAssertEqual(result.notices, [])
+    }
+
+    func testPlanModeCreationFromARelativeNameDoesNotCount() throws {
+        let f = try GeminiFixture()
+        defer { f.remove() }
+        let folder = try f.folder()
+        let panel = f.project.appendingPathComponent("src/components/AuthenticationRefactorPanel.tsx").path
+        try f.write([
+            f.header(sessionID), f.user("u1", seconds: 1),
+            f.reply("m1", seconds: 2, calls: [
+                // Plan mode resolves a relative name in its plans folder, outside the project.
+                f.call("c1", seconds: 10, file: "plan.md", display: "Created ../../.gemini/tmp/project/\(sessionID)/plans/plan.md"),
+                f.call("c2", seconds: 11, file: "authentication-refactor-plan.md",
+                       display: "Created .../authentication-refactor-plan.md"),
+                // A relative creation inside the project still counts.
+                f.call("c3", seconds: 12, file: "src/new.swift", display: "Created src/new.swift"),
+                // An absolute argument names the file whatever the display shortens it to.
+                f.call("c4", seconds: 13, file: panel, display: "Created .../AuthenticationRefactorPanel.tsx")
+            ])
+        ], to: fileName, in: folder)
+        let result = f.provider().scan(sources: [f.source])
+        let trail = try XCTUnwrap(result.sessionTrails.first)
+        XCTAssertEqual(trail.edits.map(\.date), [f.date(12), f.date(13)])
+        XCTAssertEqual(Set(trail.edits.map(\.projectPath)), [canonicalPath(f.project.path)])
+    }
+
+    func testLegacyJSONRewrittenAfterARewindKeepsIndexedEdits() throws {
+        let f = try GeminiFixture()
+        defer { f.remove() }
+        let folder = try f.folder()
+        let a = f.project.appendingPathComponent("a.txt").path
+        let b = f.project.appendingPathComponent("b.txt").path
+        let url = folder.appendingPathComponent("chats/session-2026-04-01T10-00-5f0c2d1e.json")
+        let id = sessionID
+        func session(_ messages: [[String: Any]]) throws -> Data {
+            var object = f.header(id)
+            object["messages"] = messages
+            return try JSONSerialization.data(withJSONObject: object)
+        }
+        let first = [f.user("u1", seconds: 1), f.reply("m1", seconds: 2, calls: [f.call("c1", seconds: 10, file: a)])]
+        let second = [f.user("u2", seconds: 20), f.reply("m2", seconds: 21, calls: [f.call("c2", seconds: 22, file: b)])]
+        try session(first + second).write(to: url)
+        let provider = f.provider()
+        XCTAssertEqual(provider.scan(sources: [f.source]).projects.first?.recordedEditCount, 2)
+
+        // Before 0.39 a rewind rewrites the same file in place without the rewound messages.
+        let rewound = try session(first)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: rewound)
+        try handle.close()
+        var result = provider.scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        XCTAssertEqual(result.projects.first?.activities.first?.editMoments.map(\.date), [f.date(10), f.date(22)])
+
+        // A different file under that name starts over.
+        try rewound.write(to: url, options: .atomic)
+        result = provider.scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(result.notices, [])
+    }
+
+    func testLegacyJSONThatDoesNotParseIsReadOnceWithANotice() throws {
+        let f = try GeminiFixture()
+        defer { f.remove() }
+        let folder = try f.folder()
+        let url = folder.appendingPathComponent("chats/session-2026-04-01T10-00-5f0c2d1e.json")
+        // Cut short by a crash or a full disk while the CLI rewrote it.
+        try Data(#"{"sessionId": "5f0c2d1e-8a7b-4c3d-9e2f-1a2b3c4d5e6f", "messages": [{"id"#.utf8).write(to: url)
+        let provider = f.provider()
+        let unreadable = "Gemini: skipped unreadable records in a Gemini CLI session history."
+        XCTAssertEqual(provider.scan(sources: [f.source]).notices, [unreadable])
+        // Unchanged, it is not read again: a read would now fail.
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        XCTAssertEqual(provider.scan(sources: [f.source]).notices, [unreadable])
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        // The next write is read.
+        var record = f.header(sessionID)
+        record["messages"] = [f.user("u1", seconds: 1),
+                              f.reply("m1", seconds: 2, calls: [f.call("c1", seconds: 10, file: f.project.appendingPathComponent("a.txt").path)])]
+        try JSONSerialization.data(withJSONObject: record).write(to: url)
+        let result = provider.scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 1)
+        XCTAssertEqual(result.notices, [])
+    }
+
+    func testNestedSubagentJSONFromReleasesBeforeJSONLIsRead() throws {
+        let f = try GeminiFixture()
+        defer { f.remove() }
+        let folder = try f.folder()
+        let agentID = "k3x9q2"
+        var main = f.header(sessionID)
+        main["messages"] = [f.user("u1", seconds: 1),
+                            f.reply("m1", seconds: 2, calls: [f.call("c1", seconds: 10, file: f.project.appendingPathComponent("a.txt").path)])]
+        try JSONSerialization.data(withJSONObject: main)
+            .write(to: folder.appendingPathComponent("chats/session-2026-04-10T09-00-5f0c2d1e.json"))
+        // v0.37 and v0.38 write a subagent as a whole `<agent id>.json` beside the session.
+        var subagent = f.header(agentID, seconds: 15, kind: "subagent")
+        subagent["directories"] = [f.project.path]
+        subagent["messages"] = [f.user("s0", seconds: 16),
+                                f.reply("s1", seconds: 17, calls: [
+                                    f.call("c2", name: "write_file", seconds: 20, file: f.project.appendingPathComponent("b.txt").path)
+                                ])]
+        let nested = folder.appendingPathComponent("chats/\(sessionID)", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: subagent).write(to: nested.appendingPathComponent("\(agentID).json"))
+        let result = f.provider().scan(sources: [f.source])
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.recordedEditCount, 2)
+        XCTAssertEqual(project.sessionCount, 1)
+        XCTAssertEqual(project.activities.first?.editMoments.filter(\.delegated).map(\.date), [f.date(20)])
+        XCTAssertEqual(result.sessionTrails.map(\.sessionID), [sessionID])
+        XCTAssertEqual(result.notices, [])
+    }
+
     func testSubagentEditsJoinTheirRootSessionAsDelegated() throws {
         let f = try GeminiFixture()
         defer { f.remove() }
