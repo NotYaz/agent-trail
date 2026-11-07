@@ -9,6 +9,8 @@ public enum AssistantKind: String, Codable, CaseIterable, Sendable {
     case copilot
     case opencode
     case cursor
+    case gemini
+    case qwen
 
     public var displayName: String { descriptor.displayName }
 
