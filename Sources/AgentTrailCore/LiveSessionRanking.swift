@@ -24,6 +24,9 @@ public enum LiveSessionRanking {
         return left.id < right.id
     }
 
+    /// Status order alone: waiting, working, idle, unknown.
+    public static func order(_ status: LiveStatus) -> Int { rank(status) }
+
     private static func rank(_ status: LiveStatus) -> Int {
         switch status {
         case .waiting: return 0

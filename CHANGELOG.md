@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **GitHub Copilot.** A Copilot profile reads Copilot Chat in VS Code and the Copilot CLI (with the Copilot app and VS Code's Copilot CLI sessions, which write the same files), and their projects share cards with Claude, Codex, and Grok.
+  - **Copilot Chat in VS Code.** History only. An edit tool call counts once VS Code recorded applying it to a file in that request. Edits undone by restoring a checkpoint, rejected, or undone in the next request don't count. Chats in Remote-SSH windows, windows without a folder, and chats with no requests are skipped. VS Code writes these records about once a minute while idle, so the newest edits can show up to a minute late.
+  - **Copilot CLI.** History and live status. A successful edit counts, with its files from `fileEdits` or the tool's `path`, and subagent edits count as delegated. An open session is Working during a turn or tool call and Needs input while a permission request or a question to you is unanswered. Jump brings its terminal forward.
+  - One profile covers both: `configDirectory` is the Copilot CLI home (`~/.copilot`), and `userDataDirectory` is VS Code's user-data folder (VS Code's default when omitted for `~/.copilot`; set it for Insiders).
+- **Found on this Mac.** When an assistant has sessions on this Mac but no profile reads them, the Projects panel offers **Add profile**. **Not now** hides the offer for good. Nothing is added without your click.
+- A `profiles.json` that names an assistant this version doesn't know now says which one, instead of a generic JSON error. It still fails closed, so saving can't drop that profile.
+- Under the hood, each assistant is now described once, and its readers are registered in one place, so a new assistant can't be left out of scans or cache flushes.
+
 ## 0.1.0-alpha.13 — 2026-11-07
 
 - **The Map.** A third tab, Map (⌘3), draws one project's Git branches, the sessions that edited them, and the commits and merges Git recorded, on one timeline. Pick the project in its header and a range: Today, 7D (the default), 30D, or All. Days start at 05:00, and idle stretches fold into narrow seams, the longest labelled with their length.

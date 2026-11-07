@@ -2,9 +2,9 @@
 
 **Which agent touched this project last, and which one needs you now?**
 
-A read-only macOS menu-bar app. Each Git repository gets one card across Claude, Codex, and Grok: which agent edited it last, history from the logs already on your Mac, and which live session needs you. When Claude says a session is idle but a command it started is still running, the card says **Working in background**.
+A read-only macOS menu-bar app. Each Git repository gets one card across Claude, Codex, Grok, and GitHub Copilot: which agent edited it last, history from the logs already on your Mac, and which live session needs you. When Claude says a session is idle but a command it started is still running, the card says **Working in background**.
 
-**Works with** Claude Code in Claude Desktop's Code tab and `claude` in a terminal, Codex, and Grok. A Codex thread waiting for approval shows as Working. **Not supported:** Cursor, Gemini CLI, OpenCode. It can't answer prompts for you.
+**Works with** Claude Code in Claude Desktop's Code tab and `claude` in a terminal, Codex, Grok, and GitHub Copilot (Copilot Chat in VS Code, and the Copilot CLI). A Codex thread waiting for approval shows as Working. Copilot Chat in VS Code has history but no live status. **Not supported:** Cursor, Gemini CLI, OpenCode. It can't answer prompts for you.
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
@@ -40,15 +40,15 @@ A local build opens without the warning. To keep it, copy `dist/Agent Trail.app`
 
 Two assistant instances. The same project open in both. Different worktrees, conversations, and changes. Returning to work should not begin with guessing which window has the latest context.
 
-Agent Trail leaves each agent in its own app. It doesn't start, wrap, or drive any assistant, and it never touches your sign-ins. Claude keeps running in Claude Desktop or your terminal, Codex in Codex, and Grok in its terminal, each with its vendor's newest features. Agent Trail reads what they already record and takes you back to the right one. If Agent Trail stops working, your agents don't notice.
+Agent Trail leaves each agent in its own app. It doesn't start, wrap, or drive any assistant, and it never touches your sign-ins. Claude keeps running in Claude Desktop or your terminal, Codex in Codex, Grok in its terminal, and Copilot in VS Code or its terminal, each with its vendor's newest features. Agent Trail reads what they already record and takes you back to the right one. If Agent Trail stops working, your agents don't notice.
 
-Agent Trail shows each project once, bringing its reported live sessions together with the **last recorded edit** and **latest saved activity** where history is available. A project is the Git checkout where an assistant's confirmed edits actually landed, so Claude, Codex, and Grok working in the same repository share one card even when they were started in different folders. A Claude worktree stays connected to that original folder, and a repository you move keeps its history.
+Agent Trail shows each project once, bringing its reported live sessions together with the **last recorded edit** and **latest saved activity** where history is available. A project is the Git checkout where an assistant's confirmed edits actually landed, so Claude, Codex, Grok, and Copilot working in the same repository share one card even when they were started in different folders. A Claude worktree stays connected to that original folder, and a repository you move keeps its history.
 
 - Search by project path or profile name.
 - Filter to projects shared across profiles.
 - See worktree context alongside recorded edits, and where a session was started when that was outside the project.
 - Keep a project's history when you move its folder; earlier locations are remembered automatically.
-- Jump straight to the work: each card's main button opens the most urgent live session (needs input, then working, then idle) in Claude, Codex, or the terminal running `claude` or Grok.
+- Jump straight to the work: each card's main button opens the most urgent live session (needs input, then working, then idle) in Claude, Codex, or the terminal running `claude`, Grok, or the Copilot CLI.
 - Switch from the keyboard: ⌃⌥J opens a session switcher in any app, ⌃⌥⇧J jumps straight to the most urgent session, and `agenttrail://` links let Shortcuts, Raycast, or a Stream Deck do the same.
 - See live Needs input, Working, Idle, and Unknown counts inside each project card.
 - Keep long jobs in view: a Claude session whose background command is still running (a training run, a long build, a wait on another job) shows **Working in background**, not Idle.
@@ -76,6 +76,7 @@ Each card's main button opens the session that most needs you: one waiting for i
 - **Claude in a terminal:** brings forward the terminal app `claude` runs in, when the process environment identifies it, and names the folder of the tab to pick, since a terminal session has no title. In Claude Desktop's own terminal pane, that is the Claude instance holding the pane. It never sends a terminal session to a Claude Desktop Code session.
 - **Codex:** opens the thread with `codex://threads/<id>` when the Codex desktop app owns it; otherwise it brings the owning app forward.
 - **Grok:** brings forward the terminal app it runs in, when the process environment identifies it, including Claude Desktop's terminal pane.
+- **Copilot CLI:** brings forward the terminal app it runs in, the same way. Copilot Chat in VS Code reports no live sessions, so it has no Jump.
 - **Otherwise:** it brings the assistant's app forward, or shows the folder in your running editor or Finder.
 
 Agent Trail opens a session or brings an app forward only after you click, press the switcher's shortcut, or open an `agenttrail://` link (see [Switch from the keyboard](#switch-from-the-keyboard)), and only when that app is already running. It never launches, quits, kills, or restarts an assistant, and it needs no Automation or Accessibility permission. **Open in** menu items can open your editor or terminal.
@@ -122,13 +123,15 @@ Open **Profiles…** from the panel's ⋯ menu to add or adjust profiles. When `
 | Codex | `codex` | `~/.codex` | none |
 | Grok | `grok` | `~/.grok` | none |
 
-Custom `CODEX_HOME` or `GROK_HOME` launch variables do not change history-scanning defaults; set each profile’s `configDirectory` to that custom home.
+Custom `CODEX_HOME`, `GROK_HOME`, or `COPILOT_HOME` launch variables do not change history-scanning defaults; set each profile’s `configDirectory` to that custom home.
+
+Copilot is not a default profile. When Agent Trail finds Copilot sessions on this Mac (Copilot CLI sessions under `~/.copilot/session-state`, or Copilot Chat sessions in VS Code's storage) and no profile reads them, the Projects panel offers **Add profile**; **Not now** hides the offer for good. One Copilot profile reads both stores: the Copilot CLI home in `configDirectory` (default `~/.copilot`) and VS Code's user-data folder in `userDataDirectory` (default `~/Library/Application Support/Code` for the `~/.copilot` home; set it for VS Code Insiders or a custom `--user-data-dir`). The same offer appears for Claude, Codex, or Grok when they have sessions but no profile.
 
 ### Two Claude accounts
 
 Many people keep a work and a personal Claude Desktop instance open side by side, each with its own user-data folder and Claude config folder. The default **Claude · Second** profile covers the common layout; add any other instance in **Profiles…**. Both accounts' Code sessions then appear on the same project cards. macOS hands `claude://` links only to the Claude instance launched first, so **Jump** opens that instance's sessions directly and brings any other instance forward with a hint naming the session (see [Jump to the work](#jump-to-the-work)). Links go to whichever instance has been running longest: to jump straight into the account you use most, open its instance first, and note that restarting an instance (for example for an update) changes which one that is.
 
-A settings file that already exists is left as it is. Add Codex and Grok from **Profiles…**, or add the entries below and choose **Reload profiles**. Agent Trail does not merge new default profiles into a saved file.
+A settings file that already exists is left as it is. Add Codex, Grok, and Copilot from **Profiles…**, or add the entries below and choose **Reload profiles**. Agent Trail does not merge new default profiles into a saved file.
 
 Settings are stored at `~/Library/Application Support/AgentTrail/profiles.json`. This example shows the file structure:
 
@@ -164,20 +167,28 @@ Settings are stored at `~/Library/Application Support/AgentTrail/profiles.json`.
       "assistant": "grok",
       "configDirectory": "~/.grok",
       "bundleIdentifier": ""
+    },
+    {
+      "id": "copilot",
+      "name": "Copilot",
+      "assistant": "copilot",
+      "configDirectory": "~/.copilot",
+      "userDataDirectory": "~/Library/Application Support/Code",
+      "bundleIdentifier": ""
     }
   ]
 }
 ```
 
-Use unique, stable `id` values. A profile saved before `assistant` existed still loads as Claude. Each Claude profile needs its config directory and the matching desktop user-data folder. Only the main `~/.claude` profile may omit the desktop folder to use Claude's default. Codex and Grok profiles must omit `userDataDirectory`. Leave `bundleIdentifier` empty unless that assistant has its own app, and do not reuse Claude's bundle identifier. Set `refreshInterval` between 5 and 300 seconds. A complete [example configuration](docs/profiles.example.json) is included. Choose **Reload profiles** after editing this file by hand. Invalid settings are reported instead of silently scanning another configuration.
+Use unique, stable `id` values. A profile saved before `assistant` existed still loads as Claude. Each Claude profile needs its config directory and the matching desktop user-data folder. Only the main `~/.claude` profile may omit the desktop folder to use Claude's default. Codex and Grok profiles must omit `userDataDirectory`. A Copilot profile's `userDataDirectory` is the VS Code user-data folder whose Copilot Chat sessions it reads; it may be omitted for the default `~/.copilot` home, which then reads VS Code's default folder. Leave `bundleIdentifier` empty unless that assistant has its own app, and do not reuse Claude's bundle identifier. Set `refreshInterval` between 5 and 300 seconds. A complete [example configuration](docs/profiles.example.json) is included. Choose **Reload profiles** after editing this file by hand. Invalid settings are reported instead of silently scanning another configuration.
 
-Claude instance matching uses the bundle identity, process arguments, and `CLAUDE_CONFIG_DIR`. Codex and Grok homes match `CODEX_HOME` and `GROK_HOME` when those variables are set, and the default `~/.codex` or `~/.grok` when they are not. Matching a home does not focus a CLI process. An outlined profile dot means a unique running instance could not be identified. When identity is ambiguous or unavailable, Agent Trail reports the problem.
+Claude instance matching uses the bundle identity, process arguments, and `CLAUDE_CONFIG_DIR`. Codex, Grok, and Copilot CLI homes match `CODEX_HOME`, `GROK_HOME`, and `COPILOT_HOME` when those variables are set, and the default `~/.codex`, `~/.grok`, or `~/.copilot` when they are not. Matching a home does not focus a CLI process. An outlined profile dot means a unique running instance could not be identified. When identity is ambiguous or unavailable, Agent Trail reports the problem.
 
 ## What the timestamps mean
 
 | Label | Evidence |
 | --- | --- |
-| **Last recorded edit** | The newest confirmed file edit. Claude counts a successful `Edit` or `Write`. Codex counts one completed `FileChange` item. Grok counts one completed `write` or `search_replace`. |
+| **Last recorded edit** | The newest confirmed file edit. Claude counts a successful `Edit` or `Write`. Codex counts one completed `FileChange` item. Grok counts one completed `write` or `search_replace`. Copilot counts an edit tool call that VS Code applied, or a successful Copilot CLI edit. |
 | **Latest activity** | The newest saved session activity, including work that may not change a file. |
 | **Shared** | More than one configured profile worked in the same project, including across assistants. |
 
@@ -188,6 +199,10 @@ Codex history is read from rollout JSONL files under `~/.codex/sessions` and `ar
 Grok history uses `summary.json` under `~/.grok/sessions` (or the custom home set in `configDirectory`). The session was started in `info.cwd`. The encoded session-directory name is not decoded into a path. Completed `write` and `search_replace` calls in the sibling `updates.jsonl` count as one edit each, and a positive `SearchReplace.EditsApplied` result must identify the files, which count for the project they landed in (see below). The edit time is the update timestamp: an ISO-8601 string, Unix seconds, or Unix milliseconds. A session with no `updates.jsonl` still appears, with a notice that its edit history is unavailable. The active-session registry alone does not establish a live state.
 
 Claude history comes from the session logs under each profile's `projects` folder. A Claude Desktop session is matched to its log through Desktop's session index and counts for the checkout Desktop recorded. A log with no Desktop session counts as `claude` started in a terminal only when the first record that names its entrypoint and folder says `cli`; runs started by the SDK or `claude -p`, and logs Desktop no longer lists, are not counted. A terminal session starts in the folder (`cwd`) that record names, and its edits count for the project they landed in (see below), the same as Codex's. It belongs to the profile whose folder holds its log, so `claude` with the default `~/.claude` counts as Claude · Main, under the same avatar as that account's Desktop sessions. Edits recorded by a subagent count as delegated edits of the session that started it. Claude Code deletes terminal session logs after 30 days by default (`cleanupPeriodDays` in its settings), and their history leaves Agent Trail with them.
+
+Copilot Chat history is read from VS Code's storage: each window's `User/workspaceStorage/<hash>/workspace.json` names the folder or `.code-workspace` file it opened, `chatSessions/<id>.jsonl` holds the chat as an append-only change log (VS Code 1.109 and later; a whole `.json` snapshot before that), and `chatEditingSessions/<id>/state.json` lists the edits VS Code applied to files. An edit tool call (replace string, multi-replace, insert edit, create file, apply patch, edit notebook) counts once VS Code recorded applying it to a file in the same request. An edit undone by restoring a checkpoint, rejected with **Undo**, or undone in the next request does not count. The edit time is the tool call's completion when VS Code records one, else the request's. Each counts for the project its file landed in (see below). Chats in Remote-SSH and other remote windows are skipped, since their files are not on this Mac, and so are chats in windows without a folder and chats with no requests. Edits made with the Ask or Edit mode's **Apply** go through the same record and count too. VS Code writes these files about once a minute while it is idle, so the newest edits can appear a minute late.
+
+Copilot CLI history is read from `session-state/<id>/events.jsonl` under the Copilot home (`~/.copilot` or the custom home set in `configDirectory`); the Copilot app and VS Code's Copilot CLI sessions write the same files. The session starts in the folder its `session.start` context names (or `workspace.yaml`'s `cwd`). A `tool.execution_complete` with `success: true` is one edit: its `fileEdits` name the files it committed, or, in builds without `fileEdits`, the `path` argument of an `edit`, `create`, or `str_replace_editor` call does. Shell commands, failed or denied calls, and replayed `checkpoint` records do not count. Edits made by a subagent count as delegated. A `/rewind` that rewrites the journal removes those edits from history.
 
 These on-disk formats are private implementation details and can change without notice. Missing or unreadable data appears as a profile notice. This alpha has not been tested against every assistant version or installation layout.
 
@@ -207,7 +222,7 @@ Search also matches earlier locations and launch folders. **Forget earlier locat
 
 ## Check live status on a project
 
-Live status is available for Claude Desktop, `claude` in a terminal, loaded Codex threads, and registered Grok sessions. Each adapter requires runtime presence and explicit status or turn events; recent edits and file timestamps do not establish a live state.
+Live status is available for Claude Desktop, `claude` in a terminal, loaded Codex threads, registered Grok sessions, and open Copilot CLI sessions. Each adapter requires runtime presence and explicit status or turn events; recent edits and file timestamps do not establish a live state.
 
 The **Projects** tab shows live session counts directly inside each project card, both in total and by profile. Projects with a reported input request sort first, followed by projects with working sessions, under every sort. The Pulse strip shows needs-input and working counts. Use **Needs input** or **Working** to filter those projects. Selecting both includes projects with either state; search and **Shared** still apply.
 
@@ -222,7 +237,7 @@ The menu-bar icon shows the same at a glance:
 
 Right-click the icon for a list of live sessions grouped by state; choose one to jump to it, or choose **Session Switcher…** to open the switcher. The panel's ⋯ menu has **Session switcher** for the [keyboard shortcut](#switch-from-the-keyboard), **Menu bar** settings (animation, the working and needs-input counts), **Show session titles**, and **Theme**: Classic, Gentle (brighter surfaces, indigo sparklines and calendar), Vivid (Gentle plus brighter profile colors that stay apart for color-blind readers), or Aurora (Vivid plus an indigo Trail calendar and a stronger wash). Session titles and Claude's "needs you to…" sentence come from your conversations: they are read live, kept in memory only, and never cached, exported, or included in renders.
 
-Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. A Claude Desktop session requires a matching desktop session record, and `claude` in a terminal reports its own folder; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start. Unmatched sessions are omitted.
+Expand a card's live details with **Details** to see each session's recorded workspace, worktree context, and last-report age. Sessions are matched to your configured assistant homes. A Claude Desktop session requires a matching desktop session record, and `claude` in a terminal reports its own folder; Codex requires a thread-writer handle held open by a verified app-server; Grok requires a registered session with a matching process start; the Copilot CLI requires a session lock whose process is alive and started before the lock was made. Unmatched sessions are omitted.
 
 A session started outside a project joins the project its recorded edits landed in, so a Codex thread started in a parent folder appears on the repository's card. A Claude window still reporting a folder that has moved appears at the folder's current location.
 
@@ -230,18 +245,20 @@ A project can have a session needing input while another is working or idle, so 
 
 | Status | Meaning |
 | --- | --- |
-| **Needs input** | Claude reported `waiting`, or Grok reported an unresolved permission request. Codex input dialogs are not distinguished by the currently available state. |
-| **Working** | Claude reported `busy`, Codex has an `inProgress` turn on a loaded thread, or Grok has an active turn/working phase. Claude also counts while it reports `idle` but a command its last turn started is still running, or reports `shell` for that state itself, shown as **Working in background** (see [Long-running jobs](#long-running-jobs-and-background-commands)). |
-| **Idle** | Claude reported `idle`, or a loaded Codex/Grok session explicitly ended its turn. It does not establish that you need to reply. |
+| **Needs input** | Claude reported `waiting`, Grok reported an unresolved permission request, or a Copilot CLI session recorded a permission request without its answer, or an open question to you (`ask_user`, `exit_plan_mode`). Codex input dialogs are not distinguished by the currently available state. |
+| **Working** | Claude reported `busy`, Codex has an `inProgress` turn on a loaded thread, Grok has an active turn/working phase, or a Copilot CLI session has an open turn or tool call. Claude also counts while it reports `idle` but a command its last turn started is still running, or reports `shell` for that state itself, shown as **Working in background** (see [Long-running jobs](#long-running-jobs-and-background-commands)). |
+| **Idle** | Claude reported `idle`, or a loaded Codex/Grok session or an open Copilot CLI session ended its turn. It does not establish that you need to reply. |
 | **Unknown** | The status is unrecognized or cannot be verified under the applicable freshness checks. |
 
 Claude writes these registry reports when status changes, rather than sending a regular heartbeat. A waiting, busy, or idle report can remain valid while the same verified process is alive, even when the report is old. Agent Trail shows that report's age. If the process start cannot be verified, the fallback accepts only reports from the last 90 seconds; older reports become Unknown. Unrecognized or implausibly future-dated reports are also Unknown. Dead processes and reused process IDs are omitted.
 
-**Needs input requires an explicit request.** Claude uses its waiting signal for input requests, approvals, and other dialogs needing attention; Grok records permission requests. Inactivity and old activity dates do not turn Idle into Needs input. Request text is not retained. Check the corresponding assistant to respond.
+**Needs input requires an explicit request.** Claude uses its waiting signal for input requests, approvals, and other dialogs needing attention; Grok and the Copilot CLI record permission requests. Inactivity and old activity dates do not turn Idle into Needs input. Request text is not retained. Check the corresponding assistant to respond.
 
 Codex live status combines open thread-writer handles under `thread-writer-locks/` with the newest turn status in `thread_history_1.sqlite`, opened read-only. A leftover lock file or an old `inProgress` row without a verified app-server holding its writer handle is insufficient. Codex does not persist a distinct approval/input state in the inspected schema, so an in-progress turn can include time spent waiting for you. Its workspace is the recorded thread workspace; individual tool working directories are not separately tracked.
 
 Grok live status joins `active_sessions.json` to the matching session summary, verifies the registered PID and microsecond process-start time, and reads explicit lifecycle events from `events.jsonl`. A registered session without a recognized event is Unknown. Completed and cancelled turns become Idle; permission requests become Needs input until resolved.
+
+Copilot CLI live status reads `session-state/<id>/inuse.<pid>.lock`. The lock counts only while that process is alive and started no later than the lock was created, since locks outlive crashes and process IDs are reused. The state comes from events written to `events.jsonl` after the lock was created: an open turn or tool call is Working, an unanswered `permission.requested` or an open `ask_user` or `exit_plan_mode` call is Needs input, `session.shutdown` ends the session, and otherwise it is Idle. Copilot writes its own idle and input events only in memory, so none of them is used. Copilot Chat in VS Code has no live status.
 
 **Working describes a reported active turn, or a command that turn left running.** It does not claim that a file is being written or that work has succeeded. Recent edits, file modification times, and CPU usage do not determine live status; the only process fact used is whether a Claude session's own command is still running. Missing live reports do not establish that every assistant has stopped.
 
@@ -303,13 +320,13 @@ Choose the **Growth** tab in the floating panel, or click a Pulse tile or **Show
 - **Recorded edits chart.** Bars per day, week, or month by profile, with a dashed 7-day average and the peak marked. Switch to **Sessions**, or to a running total. Select a bar for the per-profile breakdown, and click a legend chip to focus one profile everywhere.
 - **Trail calendar.** The last 26 weeks, one cell per day, shaded by recorded edits, with totals per weekday.
 - **When edits land.** A punch card of edits by weekday and local hour, the peak hour, the share of late-night work, and a label such as *Night owl* or *Daytime*. It needs at least 50 edits in the period and is never included in exported images.
-- **Profile mix.** Each profile's share of recorded edits, the change in share, when it first appears in saved history, and how many of its edits were **delegated**: first recorded in a Claude subagent or a spawned Codex thread. Grok does not report delegation. A footer counts days when two or more profiles edited the same project.
+- **Profile mix.** Each profile's share of recorded edits, the change in share, when it first appears in saved history, and how many of its edits were **delegated**: first recorded in a Claude subagent, a spawned Codex thread, or a Copilot subagent. Grok does not report delegation. A footer counts days when two or more profiles edited the same project.
 - **Where edits landed.** For all projects, the projects ranked by recorded edits, split by profile.
 
 How the numbers are counted:
 
 - **Local activity days.** Days follow your Mac's time zone and start at 05:00, so work after midnight counts toward the evening it began. Hours in **When edits land** are local wall-clock hours.
-- **Recorded edits** count confirmed file edits. Claude counts a successful `Edit` or `Write`. Codex counts one completed `FileChange`. Grok counts one completed `write` or `search_replace`. One tool operation counts as one edit, regardless of its size. Shell commands do not count.
+- **Recorded edits** count confirmed file edits. Claude counts a successful `Edit` or `Write`. Codex counts one completed `FileChange`. Grok counts one completed `write` or `search_replace`. Copilot counts an edit tool call that VS Code applied, or a successful Copilot CLI edit. One tool operation counts as one edit, regardless of its size. Shell commands do not count.
 - **Saved sessions** count on the day they started. A session means different things per assistant, so do not compare them across assistants.
 - **Changes are shown only when saved history covers the previous period.** Assistants delete old sessions, so an empty earlier period often means "not recorded". Streaks and totals cover only the history still on disk and can shrink.
 - Replayed tool results and repeated records across transcript files are deduplicated within each project's profile history.
@@ -364,9 +381,9 @@ The Map reads Git only while it is on screen, in the panel or its window, and ne
 
 ## Privacy
 
-Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs (a log Desktop does not list is opened to read the entrypoint and folder of its opening records, which stay in memory), Codex rollout JSONL files, and Grok `summary.json` plus `updates.jsonl`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records and, for each Claude session process, its children's parent, process group, start time, and run state (never their arguments); for `claude` in a terminal, once its process start is verified, its `TERM_PROGRAM` and `__CFBundleIdentifier` values to name the terminal, as for Grok; Codex app-server writer-handle presence and read-only turn metadata, and Grok process-registry/lifecycle events. These checks do not write assistant data or infer status from recent edits. After you click Jump with several instances of the host app running, it reads the parent process IDs of the session's ancestors to find the instance it runs under. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
+Indexing happens on your Mac. Agent Trail reads Claude desktop session indexes and JSONL logs (a log Desktop does not list is opened to read the entrypoint and folder of its opening records, which stay in memory), Codex rollout JSONL files, Grok `summary.json` plus `updates.jsonl`, VS Code's Copilot Chat `workspace.json`, `chatSessions` and `chatEditingSessions` files, and Copilot CLI `events.jsonl` plus `workspace.yaml`'s `cwd`. It does not decompress Codex archives or read assistant databases for edits. Live status reads Claude process-registry records and, for each Claude session process, its children's parent, process group, start time, and run state (never their arguments); for `claude` in a terminal, once its process start is verified, its `TERM_PROGRAM` and `__CFBundleIdentifier` values to name the terminal, as for Grok; Codex app-server writer-handle presence and read-only turn metadata, Grok process-registry/lifecycle events, and Copilot CLI session locks and lifecycle events. These checks do not write assistant data or infer status from recent edits. After you click Jump with several instances of the host app running, it reads the parent process IDs of the session's ancestors to find the instance it runs under. The app does not send those records anywhere, inject code, install hooks, or edit assistant data. There are no telemetry, cloud accounts, or automatic update checks.
 
-Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), and `activity-cache-grok.json` (version 4). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches, and the Claude cache for terminal sessions, also keep the parent folders of edited files. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. A cache is written only after a scan changed it, at most every 5 minutes, and once more when Agent Trail quits. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
+Incremental caches live under `~/Library/Application Support/AgentTrail/`: `activity-cache.json` (Claude, version 2), `activity-cache-codex.json` (version 4), `activity-cache-grok.json` (version 4), and `activity-cache-copilot.json` (version 1). They store file positions, tool IDs, confirmed-edit dates, project/workspace paths, and related indexing metadata. The Codex and Grok caches, and the Claude cache for terminal sessions, also keep the parent folders of edited files. The Copilot cache keeps each chat's request and tool ids with their times and the paths of the files VS Code applied, and each CLI session's edited paths. The Claude cache can briefly keep the full target path of an `Edit` or `Write` whose result has not been recorded yet, for example while a permission prompt is open or after an interrupted session. Confirmed tool IDs retain their date and workspace so daily totals survive incremental scans and replayed results can be deduplicated. The caches do not store prompts, commands, patches, diffs, or conversation text. Paths and timestamps can still be sensitive; keep caches and diagnostic output private. Growth statistics are computed in memory from these records; nothing new is cached. A cache is written only after a scan changed it, at most every 5 minutes, and once more when Agent Trail quits. An unreadable or unknown cache version is rebuilt. With Agent Trail closed, deleting a cache causes a fresh index of that assistant on the next launch.
 
 `project-locations.json` (mode 0600) in the same folder remembers repositories Agent Trail attributed work to. It holds their current and earlier folder paths, which are learned from session evidence, plus a macOS bookmark and folder identity: device, inode, and creation date. It holds no prompts, commands, diffs, or conversation text, but the paths can still be sensitive; keep it private like the caches. An unreadable file is reported and never overwritten. With Agent Trail closed, deleting it forgets learned earlier locations; links still present are learned again.
 
@@ -439,7 +456,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance. New adapters s
 - **Usage limits and cost:** [CodexBar](https://github.com/steipete/CodexBar) or [ccusage](https://github.com/ryoppippi/ccusage). Both work fine next to Agent Trail.
 - **Starting and orchestrating agents:** [Conductor](https://www.conductor.build/), [Vibe Kanban](https://github.com/BloopAI/vibe-kanban), or [cmux](https://github.com/manaflow-ai/cmux).
 
-Agent Trail is for people who want one card per repository across Claude (Desktop and terminal), Codex, and Grok, both Claude accounts in one place, and long jobs that stay visible after Claude goes idle.
+Agent Trail is for people who want one card per repository across Claude (Desktop and terminal), Codex, Grok, and Copilot, both Claude accounts in one place, and long jobs that stay visible after Claude goes idle.
 
 ## What's next
 

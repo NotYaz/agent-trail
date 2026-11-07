@@ -163,11 +163,13 @@ struct ProfileSettingsView: View {
                                 placeholder: draftSources[index].assistant.defaultHome(home: "~"),
                                 value: sourceBinding(\.configDirectory), field: .config)
 
-                    if draftSources[index].assistant.descriptor.usesUserDataDirectory {
+                    let descriptor = draftSources[index].assistant.descriptor
+                    if descriptor.usesUserDataDirectory {
                         VStack(alignment: .leading, spacing: 6) {
-                            folderField("Desktop user-data folder", symbol: "macwindow", placeholder: "Default Claude desktop profile",
+                            folderField(descriptor.userDataTitle ?? "User-data folder", symbol: "macwindow",
+                                        placeholder: descriptor.userDataPlaceholder ?? "",
                                         value: userDataBinding, field: .userData)
-                            Text("Leave blank only for the default Claude profile. For custom config folders, enter the matching --user-data-dir folder.")
+                            Text(descriptor.userDataNote ?? "")
                                 .font(Theme.Typeface.note)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -247,8 +249,8 @@ struct ProfileSettingsView: View {
                     .font(Theme.Typeface.mono)
                     .accessibilityLabel(title)
                 Button { chooseFolder(field) } label: { Image(systemName: "folder") }
-                    .help("Choose \(title.lowercased())")
-                    .accessibilityLabel("Choose \(title.lowercased())")
+                    .help("Choose \(Self.midSentence(title))")
+                    .accessibilityLabel("Choose \(Self.midSentence(title))")
             }
         }
     }
@@ -285,6 +287,14 @@ struct ProfileSettingsView: View {
         } else {
             picker.labelsHidden().pickerStyle(.menu).fixedSize().accessibilityLabel("Assistant")
         }
+    }
+
+    /// A field title inside a sentence: "Desktop folder" → "desktop folder",
+    /// while a name such as "VS Code folder" keeps its capitals.
+    static func midSentence(_ title: String) -> String {
+        let characters = Array(title)
+        guard characters.count > 1, characters[1].isLowercase else { return title }
+        return title.prefix(1).lowercased() + title.dropFirst()
     }
 
     private func configTitle(_ assistant: AssistantKind) -> String {
@@ -324,7 +334,8 @@ struct ProfileSettingsView: View {
             : (draftSources[index].userDataDirectory ?? "")
         let panel = NSOpenPanel()
         let assistant = draftSources[index].assistant.displayName
-        panel.title = field == .config ? "Choose \(assistant) home folder" : "Choose desktop user-data folder"
+        let dataTitle = Self.midSentence(draftSources[index].assistant.descriptor.userDataTitle ?? "User-data folder")
+        panel.title = field == .config ? "Choose \(assistant) home folder" : "Choose \(dataTitle)"
         panel.prompt = "Choose folder"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
