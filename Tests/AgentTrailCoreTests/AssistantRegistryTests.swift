@@ -47,7 +47,7 @@ final class AssistantRegistryTests: XCTestCase {
         XCTAssertEqual(AgentSource(id: "x", name: "X", configDirectory: "~/.codex", assistant: .codex).bundleIdentifier, "")
         XCTAssertFalse(AssistantKind.grok.descriptor.reportsDelegation)
         XCTAssertEqual(AssistantKind.grok.descriptor.hosting, .terminal)
-        XCTAssertEqual(AssistantKind.homeEnvironmentVariables, ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "COPILOT_HOME", "CURSOR_CONFIG_DIR"])
+        XCTAssertEqual(AssistantKind.homeEnvironmentVariables, ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "COPILOT_HOME", "CURSOR_CONFIG_DIR", "QWEN_HOME"])
     }
 
     func testListedNames() {
@@ -55,7 +55,7 @@ final class AssistantRegistryTests: XCTestCase {
         XCTAssertEqual(AssistantKind.listed(["A"]), "A")
         XCTAssertEqual(AssistantKind.listed(["A", "B"], conjunction: "or"), "A or B")
         XCTAssertEqual(AssistantKind.listed(["A", "B", "C"]), "A, B, and C")
-        XCTAssertEqual(AssistantKind.listedNames(), "Claude, Codex, Grok, Copilot, OpenCode, and Cursor")
+        XCTAssertEqual(AssistantKind.listedNames(), "Claude, Codex, Grok, Copilot, OpenCode, Cursor, Gemini CLI, and Qwen Code")
     }
 
     func testStatsIndexReadsDelegationFromDescriptor() {
