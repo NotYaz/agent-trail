@@ -105,6 +105,17 @@ extension AssistantKind {
                 userDataTitle: nil, userDataPlaceholder: nil, userDataNote: nil,
                 reportsDelegation: true, delegationOrigin: "an OpenCode subagent",
                 editEvidence: "OpenCode's completed edit, write and patch calls", worktreeFolder: nil)
+        case .cursor:
+            // One profile reads the Cursor CLI's home and the Cursor app's data folder.
+            return AssistantDescriptor(kind: self, displayName: "Cursor", homeTitle: "Cursor CLI home",
+                homeFolder: ".cursor", homeEnvironmentVariable: "CURSOR_CONFIG_DIR", hosting: .desktopApp,
+                defaultBundleIdentifier: "", requiresBundleIdentifier: false,
+                usesUserDataDirectory: true, defaultUserDataDirectory: "~/Library/Application Support/Cursor",
+                requiresUserDataDirectory: false, userDataTitle: "Cursor user-data folder",
+                userDataPlaceholder: "Cursor's default folder, with the default home",
+                userDataNote: "Cursor app chats are read from this folder, and Cursor CLI sessions from the home above. With the default ~/.cursor home, leave it blank to read Cursor's default folder.",
+                reportsDelegation: true, delegationOrigin: "a Cursor subagent",
+                editEvidence: "Cursor's applied edit and delete calls", worktreeFolder: nil)
         }
     }
 
@@ -146,6 +157,7 @@ extension CodexActivityProvider: HistoryAdapter {}
 extension GrokActivityProvider: HistoryAdapter {}
 extension CopilotActivityProvider: HistoryAdapter {}
 extension OpenCodeActivityProvider: HistoryAdapter {}
+extension CursorActivityProvider: HistoryAdapter {}
 
 /// Builds each assistant's readers. One exhaustive switch per reader kind, so
 /// a new assistant cannot be left out of scans, cache flushes or live status.
@@ -157,6 +169,7 @@ enum AssistantRegistry {
         case .grok: return GrokActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .copilot: return CopilotActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .opencode: return OpenCodeActivityProvider(cacheURL: cacheURL, resolver: resolver)
+        case .cursor: return CursorActivityProvider(cacheURL: cacheURL, resolver: resolver)
         }
     }
 
@@ -178,6 +191,9 @@ enum AssistantRegistry {
         case .opencode:
             let reader = OpenCodeLiveActivityProvider()
             return { reader.scan(sources: $0, now: $1) }
+        case .cursor:
+            // Cursor records no process per chat, and its saved chat state lags.
+            return nil
         }
     }
 
