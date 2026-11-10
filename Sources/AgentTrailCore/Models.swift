@@ -101,7 +101,7 @@ public struct ActivityDay: Identifiable, Codable, Equatable, Sendable {
 }
 
 /// One confirmed edit's completion time. `delegated` is true when the edit's earliest
-/// record came from a Claude subagent transcript or a Codex spawned thread. Grok never sets it.
+/// record came from a subagent or spawned thread (Claude, Codex, Copilot, OpenCode, Cursor). Grok never sets it.
 public struct EditMoment: Hashable, Sendable {
     public var date: Date
     public var delegated: Bool

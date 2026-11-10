@@ -21,7 +21,7 @@ struct HistorySession {
     /// Such a session is never moved to another project.
     var canMove = true
     /// Edits first recorded by a subagent inside this same session, for an
-    /// assistant whose subagents are not sessions of their own (Claude).
+    /// assistant whose subagents are not sessions of their own (Claude, Copilot).
     var delegatedEdits: Set<String> = []
 }
 

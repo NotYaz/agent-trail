@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.14 — 2026-11-10
 
-- **GitHub Copilot.** A Copilot profile reads Copilot Chat in VS Code and the Copilot CLI (with the Copilot app and VS Code's Copilot CLI sessions, which write the same files), and their projects share cards with Claude, Codex, and Grok.
+- **GitHub Copilot.** A Copilot profile reads Copilot Chat in VS Code and the Copilot CLI (with the Copilot app and VS Code's Copilot CLI sessions, which write the same files), and their projects share cards with the other assistants.
   - **Copilot Chat in VS Code.** History only. An edit tool call counts once VS Code recorded applying it to a file in that request. Edits undone by restoring a checkpoint, rejected, or undone in the next request don't count. Chats in Remote-SSH windows, windows without a folder, and chats with no requests are skipped. VS Code writes these records about once a minute while idle, so the newest edits can show up to a minute late.
   - **Copilot CLI.** History and live status. A successful edit counts, with its files from `fileEdits` or the tool's `path`, and subagent edits count as delegated. An open session is Working during a turn or tool call and Needs input while a permission request or a question to you is unanswered. Jump brings its terminal forward.
   - One profile covers both: `configDirectory` is the Copilot CLI home (`~/.copilot`), and `userDataDirectory` is VS Code's user-data folder (VS Code's default when omitted for `~/.copilot`; set it for Insiders).
@@ -17,6 +17,8 @@
   - One profile covers both: `configDirectory` is the Cursor CLI home (`~/.cursor`), and `userDataDirectory` is the Cursor app's data folder (Cursor's default when omitted for `~/.cursor`).
 - **Found on this Mac.** When an assistant has sessions on this Mac but no profile reads them, the Projects panel offers **Add profile**. **Not now** hides the offer for good. Nothing is added without your click.
 - A `profiles.json` that names an assistant this version doesn't know now says which one, instead of a generic JSON error. It still fails closed, so saving can't drop that profile.
+- Jump brings a host app that isn't a terminal forward through LaunchServices, as a Dock click does, when one instance of it runs: Cursor accepted the usual activation request and stayed behind. This also covers Claude Desktop's terminal pane, an editor's terminal pane running `claude` or Grok, and the Codex app when its link can't be opened. Like a Dock click, it may open a window for an app with none showing, and it never launches an app that isn't running.
+- In a window with several folders (VS Code, Cursor), an edit in a folder beside the checkout the session started in now counts for that folder instead of the checkout.
 - Under the hood, each assistant is now described once, and its readers are registered in one place, so a new assistant can't be left out of scans or cache flushes.
 
 ## 0.1.0-alpha.13 — 2026-11-07

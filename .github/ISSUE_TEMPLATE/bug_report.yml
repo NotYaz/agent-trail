@@ -11,7 +11,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: macOS version, Apple Silicon or Intel, Agent Trail version/commit, and the assistant with its version (Claude Desktop, `claude` in a terminal, Codex, or Grok).
+      description: macOS version, Apple Silicon or Intel, Agent Trail version/commit, and the assistant with its version (Claude Desktop, `claude` in a terminal, Codex, Grok, Copilot Chat in VS Code or the Copilot CLI, OpenCode, or the Cursor app or Cursor CLI).
     validations:
       required: true
   - type: textarea

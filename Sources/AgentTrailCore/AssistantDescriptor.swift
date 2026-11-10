@@ -2,9 +2,9 @@ import Foundation
 
 /// Where an assistant's sessions run, which decides how Jump reaches them.
 public enum AssistantHosting: Sendable, Equatable {
-    /// Its own desktop app; a single session may still run in a terminal (Claude).
+    /// Its own desktop app; a single session may still run in a terminal (Claude, Cursor).
     case desktopApp
-    /// Its own app or a terminal; the live reader names the host per session (Codex).
+    /// Its own app or a terminal; the live reader names the host per session (Codex, OpenCode).
     case appOrTerminal
     /// A command-line agent running in a terminal (Grok, the Copilot CLI).
     case terminal
@@ -12,7 +12,7 @@ public enum AssistantHosting: Sendable, Equatable {
 
 /// What differs between assistants outside their adapters. Shared code reads
 /// these fields where they apply; the few paths that still name an assistant
-/// (Claude and Codex links in Jump, Claude's process match and desktop-folder
+/// (Claude, Codex and Cursor links in Jump, Claude's process match and desktop-folder
 /// default) are listed in CONTRIBUTING.md.
 public struct AssistantDescriptor: Sendable {
     public let kind: AssistantKind
@@ -119,7 +119,7 @@ extension AssistantKind {
         }
     }
 
-    /// The assistants' names as an English list: "Claude, Codex, and Grok".
+    /// The assistants' names as an English list: "Claude, Codex, Grok, Copilot, OpenCode, and Cursor".
     public static func listedNames(conjunction: String = "and") -> String {
         listed(allCases.map(\.displayName), conjunction: conjunction)
     }
