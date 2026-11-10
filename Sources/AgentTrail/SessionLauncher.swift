@@ -303,8 +303,9 @@ enum SessionLauncher {
     private static func activateWithHint(_ app: NSRunningApplication, inTerminal: Bool = false,
                                          context: JumpContext) -> JumpOutcome {
         let name = app.localizedName ?? "the app"
-        guard activate(app) else { return .failed("macOS did not accept the request to bring \(name) forward.") }
         let isTerminal = app.bundleIdentifier.map { terminalBundleIDs.contains($0) } ?? false
+        let brought = isTerminal || inTerminal ? activate(app) : bringForward(app)
+        guard brought else { return .failed("macOS did not accept the request to bring \(name) forward.") }
         // A terminal app's sessions are tabs; an editor's or Claude Desktop's are its terminal panes.
         let noun = isTerminal ? "tab" : inTerminal ? "terminal" : "session"
         let hint = pickHint(app: name, title: context.title, noun: noun, folder: context.folder)
@@ -462,6 +463,27 @@ enum SessionLauncher {
     /// A regular (Dock) instance wins over a helper with the same bundle id.
     private static func preferredInstance(_ apps: [NSRunningApplication]) -> NSRunningApplication? {
         apps.first { $0.activationPolicy == .regular } ?? apps.first
+    }
+
+    /// A desktop app, brought forward the way a Dock click does: through
+    /// LaunchServices, on the running app's own bundle, which also switches to
+    /// its Space. A cooperative `activate` can be accepted and still change
+    /// nothing (seen with Cursor 3.29), as can one aimed at an app whose
+    /// windows are elsewhere. With several instances of the bundle running,
+    /// LaunchServices could pick another one, so the chosen instance is
+    /// activated directly. This never launches an app: it runs only for an
+    /// app found running, and checks it again first.
+    private static func bringForward(_ app: NSRunningApplication) -> Bool {
+        guard !app.isTerminated, let bundle = app.bundleURL, let id = app.bundleIdentifier,
+              runningApplications(id).filter({ $0.activationPolicy == .regular }).count == 1,
+              app.activationPolicy == .regular else { return activate(app) }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        NSApp.yieldActivation(to: app)
+        guard !app.isTerminated else { return false }
+        NSWorkspace.shared.openApplication(at: bundle, configuration: configuration) { _, _ in }
+        return true
     }
 
     private static func activate(_ app: NSRunningApplication) -> Bool {
