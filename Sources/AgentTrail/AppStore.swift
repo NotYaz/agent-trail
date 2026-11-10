@@ -321,7 +321,7 @@ final class AppStore: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let found = AssistantDetection.suggestions(configured: configured).filter { !dismissed.contains($0.assistant.rawValue) }
             DispatchQueue.main.async {
-                guard let self, self.sources == configured else { return }
+                guard let self, self.sources == configured, self.assistantSuggestions != found else { return }
                 self.assistantSuggestions = found
             }
         }
@@ -351,7 +351,6 @@ final class AppStore: ObservableObject {
         scheduleRefresh()
         refreshLive()
         refresh()
-        refreshSuggestions()
     }
 
     /// `fromTimer` is false for a refresh the user asked for, which also reads Git again for the
@@ -367,6 +366,8 @@ final class AppStore: ObservableObject {
             return
         }
         guard configurationIsValid else { return }
+        // An assistant first used after launch is offered on the next refresh.
+        refreshSuggestions()
         guard !isScanning else { return }
         isScanning = true
         updateRunningSources()
