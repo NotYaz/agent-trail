@@ -136,6 +136,9 @@ final class AppStore: ObservableObject {
     /// A snapshot of the system time zone, replaced when that changes.
     private(set) var activityCalendar = ActivityCalendar.current
     let configurationURL = ProfileConfiguration.defaultURL
+    /// Profiles for assistants found on this Mac that no profile reads yet,
+    /// minus the ones the user dismissed. Never added without the user's click.
+    @Published private(set) var assistantSuggestions: [AgentSource] = []
     var showProfiles: (() -> Void)?
     /// Reopens the floating panel, which closes while a folder picker is up.
     var showPanel: (() -> Void)?
@@ -287,7 +290,40 @@ final class AppStore: ObservableObject {
             timer?.invalidate()
             liveTimer?.invalidate()
             resetLive()
+            assistantSuggestions = []
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Adds a suggested profile and saves the settings.
+    func addSuggestedProfile(_ suggestion: AgentSource) {
+        do {
+            try saveProfiles(sources + [suggestion], refreshInterval: refreshInterval)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func dismissSuggestion(_ kind: AssistantKind) {
+        var dismissed = UserDefaults.standard.stringArray(forKey: AppSettings.Key.dismissedAssistantSuggestions) ?? []
+        if !dismissed.contains(kind.rawValue) { dismissed.append(kind.rawValue) }
+        UserDefaults.standard.set(dismissed, forKey: AppSettings.Key.dismissedAssistantSuggestions)
+        assistantSuggestions.removeAll { $0.assistant == kind }
+    }
+
+    private func refreshSuggestions() {
+        guard !demoMode, configurationIsValid else {
+            assistantSuggestions = []
+            return
+        }
+        let dismissed = Set(UserDefaults.standard.stringArray(forKey: AppSettings.Key.dismissedAssistantSuggestions) ?? [])
+        let configured = sources
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = AssistantDetection.suggestions(configured: configured).filter { !dismissed.contains($0.assistant.rawValue) }
+            DispatchQueue.main.async {
+                guard let self, self.sources == configured, self.assistantSuggestions != found else { return }
+                self.assistantSuggestions = found
+            }
         }
     }
 
@@ -330,6 +366,8 @@ final class AppStore: ObservableObject {
             return
         }
         guard configurationIsValid else { return }
+        // An assistant first used after launch is offered on the next refresh.
+        refreshSuggestions()
         guard !isScanning else { return }
         isScanning = true
         updateRunningSources()

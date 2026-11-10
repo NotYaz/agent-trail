@@ -137,15 +137,21 @@ public struct ProfileConfiguration: Codable, Equatable, Sendable {
                 }
                 continue
             }
-            let defaultConfig = canonicalPath("~/.claude")
-            let desktopDirectory = source.userDataDirectory
-                ?? (config == defaultConfig ? "~/Library/Application Support/Claude" : nil)
-            guard let desktopDirectory else {
-                throw ProfileConfigurationError.invalid("\(source.name): set userDataDirectory to this Claude instance's desktop data folder. The main instance uses ~/Library/Application Support/Claude.")
+            let defaultConfig = canonicalPath(descriptor.defaultHome(home: "~"))
+            let dataDirectory = source.userDataDirectory
+                ?? (config == defaultConfig ? descriptor.defaultUserDataDirectory : nil)
+            guard let dataDirectory else {
+                if source.assistant == .claude {
+                    throw ProfileConfigurationError.invalid("\(source.name): set userDataDirectory to this Claude instance's desktop data folder. The main instance uses ~/Library/Application Support/Claude.")
+                }
+                guard !descriptor.requiresUserDataDirectory else {
+                    throw ProfileConfigurationError.invalid("\(source.name): set userDataDirectory for this \(descriptor.displayName) profile.")
+                }
+                continue
             }
-            let userData = try Self.checkedPath(desktopDirectory, field: "userDataDirectory", source: source.name)
+            let userData = try Self.checkedPath(dataDirectory, field: "userDataDirectory", source: source.name)
             if let other = userDataPaths[userData] {
-                throw ProfileConfigurationError.invalid("\(source.name) and \(other) share a userDataDirectory. Set distinct desktop data folders so their activity can be attributed correctly.")
+                throw ProfileConfigurationError.invalid("\(source.name) and \(other) share a userDataDirectory. Set distinct \(source.assistant == .claude ? "desktop data" : "data") folders so their activity can be attributed correctly.")
             }
             userDataPaths[userData] = source.name
         }
