@@ -138,7 +138,7 @@ enum GrowthText {
 
     static let streakHelp = "Local days (05:00–05:00) with at least one recorded edit, in saved history. "
         + "Today counts once it has an edit; until then yesterday keeps the streak."
-    /// "Edits first recorded in a Claude subagent or a spawned Codex thread. Grok does not report them."
+    /// "Edits first recorded in a Claude subagent, a spawned Codex thread, or a Copilot, OpenCode, or Cursor subagent. Grok does not report them."
     static var delegationNote: String {
         let kinds = AssistantKind.allCases.map(\.descriptor)
         let origins = kinds.compactMap { $0.reportsDelegation ? $0.delegationOrigin : nil }

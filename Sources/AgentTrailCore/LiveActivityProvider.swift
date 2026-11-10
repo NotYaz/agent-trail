@@ -39,12 +39,15 @@ public struct LiveSessionDetails: Hashable, Sendable {
     /// Recorded pull requests, https links only, in the assistant's order.
     public var pullRequests: [LivePullRequest]
     /// Bundle id of the app that owns the session: com.openai.codex for a Codex
-    /// thread owned by the desktop app, or a terminal for Grok. Nil when unknown.
+    /// thread owned by the desktop app, a terminal for Grok, the Copilot CLI or
+    /// terminal Claude, the OpenCode desktop app, or Cursor. Nil when unknown.
     public var hostBundleID: String?
-    /// Codex subagent thread's parent thread id.
+    /// Codex subagent thread's parent thread id, or a Cursor side chat's parent
+    /// chat id. Jump opens the parent.
     public var parentThreadID: String?
-    /// Set when the turn ended but a command it started still runs: the oldest
-    /// such command's start. The session then reports `working`.
+    /// Set when the turn ended but a command or a background subagent it
+    /// started still runs: the oldest one's start. The session then reports
+    /// `working`.
     public var backgroundSince: Date?
     /// A Claude session started with `claude` in a terminal rather than in
     /// Claude Desktop. Jump then goes to its terminal, never to Claude.

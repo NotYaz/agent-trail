@@ -2,9 +2,9 @@ import Foundation
 
 /// Where an assistant's sessions run, which decides how Jump reaches them.
 public enum AssistantHosting: Sendable, Equatable {
-    /// Its own desktop app; a single session may still run in a terminal (Claude).
+    /// Its own desktop app; a single session may still run in a terminal (Claude, Cursor).
     case desktopApp
-    /// Its own app or a terminal; the live reader names the host per session (Codex).
+    /// Its own app or a terminal; the live reader names the host per session (Codex, OpenCode).
     case appOrTerminal
     /// A command-line agent running in a terminal (Grok, the Copilot CLI).
     case terminal
@@ -12,7 +12,7 @@ public enum AssistantHosting: Sendable, Equatable {
 
 /// What differs between assistants outside their adapters. Shared code reads
 /// these fields where they apply; the few paths that still name an assistant
-/// (Claude and Codex links in Jump, Claude's process match and desktop-folder
+/// (Claude, Codex and Cursor links in Jump, Claude's process match and desktop-folder
 /// default) are listed in CONTRIBUTING.md.
 public struct AssistantDescriptor: Sendable {
     public let kind: AssistantKind
@@ -105,10 +105,21 @@ extension AssistantKind {
                 userDataTitle: nil, userDataPlaceholder: nil, userDataNote: nil,
                 reportsDelegation: true, delegationOrigin: "an OpenCode subagent",
                 editEvidence: "OpenCode's completed edit, write and patch calls", worktreeFolder: nil)
+        case .cursor:
+            // One profile reads the Cursor CLI's home and the Cursor app's data folder.
+            return AssistantDescriptor(kind: self, displayName: "Cursor", homeTitle: "Cursor CLI home",
+                homeFolder: ".cursor", homeEnvironmentVariable: "CURSOR_CONFIG_DIR", hosting: .desktopApp,
+                defaultBundleIdentifier: "", requiresBundleIdentifier: false,
+                usesUserDataDirectory: true, defaultUserDataDirectory: "~/Library/Application Support/Cursor",
+                requiresUserDataDirectory: false, userDataTitle: "Cursor user-data folder",
+                userDataPlaceholder: "Cursor's default folder, with the default home",
+                userDataNote: "Cursor app chats are read from this folder, and Cursor CLI sessions from the home above. With the default ~/.cursor home, leave it blank to read Cursor's default folder.",
+                reportsDelegation: true, delegationOrigin: "a Cursor subagent",
+                editEvidence: "Cursor's applied edit and delete calls", worktreeFolder: nil)
         }
     }
 
-    /// The assistants' names as an English list: "Claude, Codex, and Grok".
+    /// The assistants' names as an English list: "Claude, Codex, Grok, Copilot, OpenCode, and Cursor".
     public static func listedNames(conjunction: String = "and") -> String {
         listed(allCases.map(\.displayName), conjunction: conjunction)
     }
@@ -146,6 +157,7 @@ extension CodexActivityProvider: HistoryAdapter {}
 extension GrokActivityProvider: HistoryAdapter {}
 extension CopilotActivityProvider: HistoryAdapter {}
 extension OpenCodeActivityProvider: HistoryAdapter {}
+extension CursorActivityProvider: HistoryAdapter {}
 
 /// Builds each assistant's readers. One exhaustive switch per reader kind, so
 /// a new assistant cannot be left out of scans, cache flushes or live status.
@@ -157,6 +169,7 @@ enum AssistantRegistry {
         case .grok: return GrokActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .copilot: return CopilotActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .opencode: return OpenCodeActivityProvider(cacheURL: cacheURL, resolver: resolver)
+        case .cursor: return CursorActivityProvider(cacheURL: cacheURL, resolver: resolver)
         }
     }
 
@@ -177,6 +190,9 @@ enum AssistantRegistry {
             return { reader.scan(sources: $0, now: $1) }
         case .opencode:
             let reader = OpenCodeLiveActivityProvider()
+            return { reader.scan(sources: $0, now: $1) }
+        case .cursor:
+            let reader = CursorLiveActivityProvider()
             return { reader.scan(sources: $0, now: $1) }
         }
     }

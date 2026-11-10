@@ -185,7 +185,8 @@ public struct ProjectMap: Equatable, Sendable {
     /// One session's run of edits on one lane. A session that pauses or works on
     /// several branches has several runs, joined by `sessionKey` and numbered by
     /// start; runs on different lanes overlap where it worked on them side by side.
-    /// Codex threads spawned by a session in this project fold into its key.
+    /// Child sessions (spawned Codex threads, OpenCode subagent sessions, Cursor
+    /// subagent chats) started by a session in this project fold into its key.
     public struct Span: Identifiable, Equatable, Sendable {
         public var id: String { sessionKey + "\u{0}" + String(index) }
         public var sessionKey: String

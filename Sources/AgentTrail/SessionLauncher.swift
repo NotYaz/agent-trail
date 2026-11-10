@@ -160,6 +160,7 @@ struct JumpContext {
 enum SessionLauncher {
     static let claudeBundleID = "com.anthropic.claudefordesktop"
     static let codexBundleID = "com.openai.codex"
+    static let cursorBundleID = "com.todesktop.230313mzl4w4u92"
 
     /// Detection order; the first installed app is the default choice.
     static let editorCatalog: [(bundleID: String, name: String)] = [
@@ -183,7 +184,8 @@ enum SessionLauncher {
     /// profile's instance is the one macOS hands links to (the one launched
     /// first), else the profile's instance comes forward with a hint; a Claude
     /// session started in a terminal skips this and goes to its terminal; (2) a Codex thread link
-    /// when the ChatGPT app owns the thread and runs; (3) the running host app,
+    /// when the ChatGPT app owns the thread and runs, or a Cursor chat link when one
+    /// Cursor app runs; (3) the running host app,
     /// the instance the session runs under when several run;
     /// (4) the session's own app, else the folder in a running preferred
     /// editor, else Finder. `report` is called once, possibly later.
@@ -196,6 +198,10 @@ enum SessionLauncher {
         }
         if let source, source.assistant == .codex,
            openCodexThread(session, context: context, report: report) {
+            return
+        }
+        if let source, source.assistant == .cursor,
+           openCursorChat(session, context: context, report: report) {
             return
         }
         if let outcome = activateHost(of: session, source: source, context: context) {
@@ -270,8 +276,42 @@ enum SessionLauncher {
         return true
     }
 
-    /// Step 3: the app that owns the session (a terminal for Grok or terminal Claude, Claude
-    /// Desktop when either runs in its terminal pane, an editor or the ChatGPT app for Codex),
+    /// A Cursor app chat opens with Cursor's own link in the one running
+    /// Cursor: `cursor://anysphere.cursor-deeplink/agent?id=<chat>` brings
+    /// Cursor forward and selects the chat in its Agents window (Cursor 3.29;
+    /// no link reaches an editor window's chat pane). With several Cursor
+    /// instances, or when the link can't be opened, Cursor is brought forward
+    /// instead. Returns false when this step does not apply.
+    private static func openCursorChat(_ session: LiveAgentSession, context: JumpContext,
+                                       report: @escaping (JumpOutcome) -> Void) -> Bool {
+        guard session.details.hostBundleID == cursorBundleID else { return false }
+        let running = runningApplications(cursorBundleID).filter { $0.activationPolicy == .regular }
+        guard running.count == 1, let app = running.first, let bundleURL = app.bundleURL,
+              // A side chat opens through its parent, beside which Cursor shows it.
+              let url = cursorChatURL(session.details.parentThreadID ?? session.sessionID) else { return false }
+        openLink(url, in: bundleURL) { recipient in
+            report(recipient != nil ? .done : activateWithHint(app, context: context))
+        }
+        return true
+    }
+
+    /// `cursor://anysphere.cursor-deeplink/agent?id=<chat>` for a chat id of
+    /// ASCII letters, digits and `-` (Cursor's chat ids are UUIDs).
+    nonisolated static func cursorChatURL(_ id: String) -> URL? {
+        let bytes = Array(id.utf8)
+        guard (1...128).contains(bytes.count),
+              bytes.allSatisfy({ isASCIIAlphanumeric($0) || $0 == UInt8(ascii: "-") }) else { return nil }
+        var components = URLComponents()
+        components.scheme = "cursor"
+        components.host = "anysphere.cursor-deeplink"
+        components.path = "/agent"
+        components.queryItems = [URLQueryItem(name: "id", value: id)]
+        return components.url
+    }
+
+    /// Step 3: the app that owns the session (a terminal for Grok, the Copilot CLI or terminal
+    /// Claude, Claude Desktop when either runs in its terminal pane, an editor or the ChatGPT app
+    /// for Codex, the OpenCode desktop app, or Cursor),
     /// when it is running.
     private static func activateHost(of session: LiveAgentSession, source: AgentSource?,
                                      context: JumpContext) -> JumpOutcome? {
@@ -290,6 +330,8 @@ enum SessionLauncher {
     /// with its own terminal pane), the one the session process runs under.
     private static func enclosingInstance(of pid: pid_t, among apps: [NSRunningApplication]) -> NSRunningApplication? {
         guard apps.count > 1, pid > 0 else { return nil }
+        // The session process may be the app itself: a Cursor chat's is Cursor's.
+        if let app = apps.first(where: { $0.processIdentifier == pid }) { return app }
         var current = pid
         // claude → shell → Claude Helper → Claude is three steps; 16 bounds a loop.
         for _ in 0..<16 {
@@ -303,8 +345,10 @@ enum SessionLauncher {
     private static func activateWithHint(_ app: NSRunningApplication, inTerminal: Bool = false,
                                          context: JumpContext) -> JumpOutcome {
         let name = app.localizedName ?? "the app"
-        guard activate(app) else { return .failed("macOS did not accept the request to bring \(name) forward.") }
         let isTerminal = app.bundleIdentifier.map { terminalBundleIDs.contains($0) } ?? false
+        // By the app, not the session: `claude` in an editor's terminal pane still needs the editor forward.
+        let brought = isTerminal ? activate(app) : bringForward(app)
+        guard brought else { return .failed("macOS did not accept the request to bring \(name) forward.") }
         // A terminal app's sessions are tabs; an editor's or Claude Desktop's are its terminal panes.
         let noun = isTerminal ? "tab" : inTerminal ? "terminal" : "session"
         let hint = pickHint(app: name, title: context.title, noun: noun, folder: context.folder)
@@ -462,6 +506,34 @@ enum SessionLauncher {
     /// A regular (Dock) instance wins over a helper with the same bundle id.
     private static func preferredInstance(_ apps: [NSRunningApplication]) -> NSRunningApplication? {
         apps.first { $0.activationPolicy == .regular } ?? apps.first
+    }
+
+    /// A desktop app, brought forward the way a Dock click does: through
+    /// LaunchServices, on the running app's own bundle, which also switches to
+    /// its Space. A cooperative `activate` can be accepted and still change
+    /// nothing (seen with Cursor 3.29), as can one aimed at an app whose
+    /// windows are elsewhere. With several instances of the bundle running,
+    /// LaunchServices could pick another one, so the chosen instance is
+    /// activated directly. It runs only for an app found running and checks it
+    /// again first, so it does not launch one; an app that quits in the
+    /// instant before LaunchServices acts would be opened again, as a Dock
+    /// click would. Like a Dock click, it may open a window for an app that
+    /// has none showing. If LaunchServices fails, the app is activated
+    /// directly.
+    private static func bringForward(_ app: NSRunningApplication) -> Bool {
+        guard !app.isTerminated, let bundle = app.bundleURL, let id = app.bundleIdentifier,
+              runningApplications(id).filter({ $0.activationPolicy == .regular }).count == 1,
+              app.activationPolicy == .regular else { return activate(app) }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        NSApp.yieldActivation(to: app)
+        guard !app.isTerminated else { return false }
+        NSWorkspace.shared.openApplication(at: bundle, configuration: configuration) { _, error in
+            guard error != nil else { return }
+            DispatchQueue.main.async { _ = activate(app) }
+        }
+        return true
     }
 
     private static func activate(_ app: NSRunningApplication) -> Bool {

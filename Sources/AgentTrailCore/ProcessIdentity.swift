@@ -24,7 +24,8 @@ public struct ProcessIdentity: Sendable {
 
     /// Parses the native macOS layout: argc, executable, padding, argv, environment.
     /// Truncated records and conflicting or empty profile overrides fail closed.
-    public static func parseKernelArguments(_ data: Data) -> ProcessIdentity? {
+    /// With `environment` false the environment is not parsed at all.
+    public static func parseKernelArguments(_ data: Data, environment: Bool = true) -> ProcessIdentity? {
         let bytes = [UInt8](data)
         guard bytes.count > MemoryLayout<Int32>.size else { return nil }
         let argumentCount = data.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
@@ -51,13 +52,15 @@ public struct ProcessIdentity: Sendable {
             arguments.append(argument)
         }
 
-        let prefixes = AssistantKind.homeEnvironmentVariables.map { ($0, Array("\($0)=".utf8)) }
         var homes: [String: String] = [:]
-        while cursor < bytes.count, bytes[cursor] != 0 {
-            guard let entry = readCString() else { return nil }
-            for (name, prefix) in prefixes where entry.starts(with: prefix) {
-                guard homes[name] == nil, let value = environmentValue(entry, prefix: prefix) else { return nil }
-                homes[name] = value
+        if environment {
+            let prefixes = AssistantKind.homeEnvironmentVariables.map { ($0, Array("\($0)=".utf8)) }
+            while cursor < bytes.count, bytes[cursor] != 0 {
+                guard let entry = readCString() else { return nil }
+                for (name, prefix) in prefixes where entry.starts(with: prefix) {
+                    guard homes[name] == nil, let value = environmentValue(entry, prefix: prefix) else { return nil }
+                    homes[name] = value
+                }
             }
         }
 
@@ -93,6 +96,13 @@ public struct ProcessIdentity: Sendable {
     public static func read(pid: Int32) -> ProcessIdentity? {
         guard let data = kernelArguments(pid: pid) else { return nil }
         return parseKernelArguments(data)
+    }
+
+    /// Reads one live process's executable and arguments only. Its
+    /// environment is dropped with the buffer, never parsed.
+    public static func readArguments(pid: Int32) -> ProcessIdentity? {
+        guard let data = kernelArguments(pid: pid) else { return nil }
+        return parseKernelArguments(data, environment: false)
     }
 
     /// Reads only one live process's two terminal hints. The rest of the record,
