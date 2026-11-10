@@ -54,14 +54,15 @@ final class CursorLiveActivityProviderTests: XCTestCase {
                      rows: [[id, updated.map { f.ms($0) }, subagent || type != nil ? 1 : 0, type ?? "", value]])
     }
 
-    private func chat(_ id: String, updated: TimeInterval, running: TimeInterval? = nil, extra: [String: Any] = [:]) throws {
+    private func chat(_ id: String, updated: TimeInterval, running: TimeInterval? = nil, created: TimeInterval = 0,
+                      extra: [String: Any] = [:]) throws {
         var fields: [String: Any] = ["_v": 18, "workspaceIdentifier": ["id": "w", "uri": f.uri(f.project.path)]]
         if let running {
             fields["unfinishedRunAt"] = f.ms(running)
             fields["status"] = "aborted"
         }
         for (key, value) in extra { fields[key] = value }
-        try f.put([("composerData:\(id)", f.composer(id, bubbles: [], created: 0, updated: updated, extra: fields))])
+        try f.put([("composerData:\(id)", f.composer(id, bubbles: [], created: created, updated: updated, extra: fields))])
     }
 
     /// The chat's newest message: a header page entry and its body.
@@ -179,9 +180,11 @@ final class CursorLiveActivityProviderTests: XCTestCase {
         try chat("p1", updated: 300)
         try header("s1", updated: 320, type: "side-chat")
         try chat("s1", updated: 320, running: 320, extra: ["subagentInfo": side])
-        // A Task subagent running beside it still shows through its parent only.
+        // A Task subagent running beside it still shows through its parent only,
+        // even when a transcript of its own makes it a candidate.
         try header("t1", updated: nil, type: "general-purpose")
         try chat("t1", updated: 322, running: 322, extra: ["subagentInfo": ["parentComposerId": "p1", "subagentTypeName": "general-purpose"]])
+        try transcript("t1", ending: "message", at: 323)
         let reader = provider()
         var snapshot = reader.scan(sources: [f.source])
         XCTAssertEqual(statuses(snapshot), ["s1": .working])
@@ -198,28 +201,72 @@ final class CursorLiveActivityProviderTests: XCTestCase {
     /// turn ends (no run marker) while the task's page entry reads
     /// `grouping.taskStatus` "running"; when the subagent ends it reads
     /// "success" and the parent wakes for a turn of its own.
+    private func task(_ status: String, started: TimeInterval) -> [String: Any] {
+        ["bubbleId": "t\(Int(started))", "type": 2, "startedAtMs": f.ms(started), "completedAtMs": f.ms(started + 1),
+         "grouping": ["toolCallCase": "taskToolCall", "toolFormerStatus": "loading", "taskStatus": status]]
+    }
+
+    private func message(_ bubble: String, at seconds: TimeInterval) -> [String: Any] {
+        ["bubbleId": bubble, "type": 2, "startedAtMs": f.ms(seconds)]
+    }
+
+    private func pages(_ id: String, _ pages: [[[String: Any]]]) throws {
+        try f.put(pages.enumerated().map { ("composerConvHeaders:\(id):" + String(format: "%06d", $0.offset), $0.element) })
+    }
+
     func testABackgroundSubagentKeepsItsParentWorking() throws {
-        func page(task status: String, started: TimeInterval) throws {
-            try f.put([("composerConvHeaders:p1:000000", [
-                ["bubbleId": "u1", "type": 1, "startedAtMs": f.ms(300)],
-                ["bubbleId": "t1", "type": 2, "startedAtMs": f.ms(started), "completedAtMs": f.ms(started + 1),
-                 "grouping": ["toolCallCase": "taskToolCall", "toolFormerStatus": "loading", "taskStatus": status]],
-                ["bubbleId": "a1", "type": 2, "startedAtMs": f.ms(started + 2)]])])
-        }
         try header("p1", updated: 300)
         try chat("p1", updated: 300)
-        try page(task: "running", started: 305)
+        try pages("p1", [[message("u1", at: 300), task("running", started: 305), message("a1", at: 307)]])
         let reader = provider()
         let snapshot = reader.scan(sources: [f.source])
         XCTAssertEqual(statuses(snapshot), ["p1": .working])
         XCTAssertEqual(snapshot.sessions.first?.details.backgroundSince, f.date(305))
         XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(305))
         // The subagent ended.
-        try page(task: "success", started: 305)
+        try pages("p1", [[message("u1", at: 300), task("success", started: 305), message("a1", at: 307)]])
         XCTAssertEqual(reader.scan(sources: [f.source]).sessions, [])
         // A task left running by a Cursor that quit before this one started claims nothing.
-        try page(task: "running", started: 50)
+        try pages("p1", [[message("u0", at: 40), task("running", started: 50), message("a1", at: 52)]])
         XCTAssertEqual(reader.scan(sources: [f.source]).sessions, [])
+    }
+
+    /// Pages hold 256 messages; a task still running on an earlier page counts
+    /// while that page was written since the app started.
+    func testABackgroundSubagentOnAnEarlierPageStillCounts() throws {
+        try header("p1", updated: 400)
+        try chat("p1", updated: 400)
+        try pages("p1", [[message("u1", at: 300), task("running", started: 305)],
+                         [message("u2", at: 400), message("a2", at: 402)]])
+        let snapshot = provider().scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["p1": .working])
+        XCTAssertEqual(snapshot.sessions.first?.details.backgroundSince, f.date(305))
+    }
+
+    /// A fork copies its original's page entries, and nothing updates the
+    /// copy: a running task from before the chat was created doesn't count.
+    func testAForkedCopyOfARunningTaskDoesNotCount() throws {
+        try header("f1", updated: 330)
+        try chat("f1", updated: 330, created: 320)
+        try pages("f1", [[message("u1", at: 300), task("running", started: 305), message("u2", at: 330)]])
+        XCTAssertEqual(provider().scan(sources: [f.source]).sessions, [])
+    }
+
+    /// A run of its own comes first; once a transcript ends that run, the
+    /// background subagent still keeps the chat Working in background.
+    func testARunComesBeforeABackgroundSubagent() throws {
+        try header("p1", updated: 300)
+        try chat("p1", updated: 300, running: 310)
+        try pages("p1", [[message("u1", at: 300), task("running", started: 305), message("u2", at: 310)]])
+        let reader = provider()
+        var snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["p1": .working])
+        XCTAssertNil(snapshot.sessions.first?.details.backgroundSince)
+        XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(310))
+        try transcript("p1", ending: "turn_ended", at: 320)
+        snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["p1": .working])
+        XCTAssertEqual(snapshot.sessions.first?.details.backgroundSince, f.date(305))
     }
 
     func testATurnEndedInTheTranscriptEndsTheRun() throws {

@@ -21,7 +21,7 @@ import Foundation
 /// that quit or crashed mid-turn left markers older than the app now running.
 /// That app is a launchd-parented `Cursor` process matched to the profile's
 /// data folder by `--user-data-dir`. The chats read are the most recently
-/// updated main-chat rows of the chat-header table, chats shown on the last
+/// updated main-chat and side-chat rows of the chat-header table, chats shown on the last
 /// scan, and (capped) chats whose transcript changed or ends with a message;
 /// each is read by key and reduced inside SQLite. The database is read only
 /// while its `-wal` and `-shm` exist (lstat) and only in WAL mode, asked of
@@ -43,11 +43,13 @@ import Foundation
 /// parent is Working while it runs, and Needs input while it waits for
 /// approval (Cursor ORs a subagent's `hasBlockingPendingActions` into its
 /// parent's header, up to the root). A subagent sent to the background
-/// outlives its parent's turn; while the task's entry in the parent's last
-/// header page reads `grouping.taskStatus` "running", the parent is Working in
-/// background. A side chat is stored like a subagent (type "side-chat") but
-/// you drive it yourself and it runs on its own, so it shows on its own; Jump
-/// opens it through its parent.
+/// outlives its parent's turn; while the task's entry in the parent's header
+/// pages reads `grouping.taskStatus` "running", the parent is Working in
+/// background (the entry may sit on any page written since the app started,
+/// up to `maximumPagesRead`). A side chat is stored like a subagent (type
+/// "side-chat") but you drive it yourself and it runs on its own, so it shows
+/// on its own; Jump opens it through its parent. A side chat's transcript sits
+/// in its parent's `subagents` folder and is not read.
 ///
 /// Not shown: Task subagents themselves, cloud
 /// and background agents (`createdFromBackgroundAgent`), remote and
@@ -91,6 +93,9 @@ public final class CursorLiveActivityProvider {
 
     /// File times and process start times are compared with this much slack.
     static let clockSlack: TimeInterval = 2
+    /// How many of a chat's header pages, newest first, one scan reads looking
+    /// for a subagent still running in the background: 256 messages each.
+    static let maximumPagesRead = 8
     /// `subagentInfo.subagentTypeName` of a side chat: a chat you open beside an
     /// agent and drive yourself. It runs on its own, not in its parent's turn.
     static let sideChatType = "side-chat"
@@ -323,7 +328,7 @@ public final class CursorLiveActivityProvider {
         """
 
     /// Live markers of the chats to look at: the `candidateLimit` most
-    /// recently updated main-chat header rows since `since` (milliseconds),
+    /// recently updated main-chat and side-chat header rows since `since` (milliseconds),
     /// then `extra`. The database is opened only when its `-wal` and `-shm`
     /// exist (checked with lstat), and its journal mode is read through SQLite,
     /// never through a file handle of our own: closing one would drop this
@@ -377,25 +382,30 @@ public final class CursorLiveActivityProvider {
                         AND json_extract(v, '$.createdFromBackgroundAgent') <> '{}', 0),
                     \(folderSQL),
                     json_extract(v, '$.fullConversationHeadersOnly[#-1].bubbleId'),
-                    json_extract(v, '$.fullConversationHeadersOnly[#-1].startedAtMs')
+                    json_extract(v, '$.fullConversationHeadersOnly[#-1].startedAtMs'),
+                    json_extract(v, '$.createdAt')
                 FROM (SELECT key AS k, CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key IN (%KEYS%)) WHERE json_valid(v)
                 """
             let records = try CursorActivityProvider.keyedRows(reader, keys: ids.map { "composerData:" + $0 },
                                                                sql: recordSQL, limits: limits)
-            // The last page's newest message, and its oldest background subagent
-            // still marked running, started since `since`.
+            // Cursor 3.29 keeps a chat's message list in header pages of 256
+            // entries, in time order. Per page: its newest message, the start of
+            // its first, and its oldest subagent task still marked running in the
+            // background that started since `?2`.
+            let pageKeysSQL = "SELECT key FROM cursorDiskKV WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT \(maximumPagesRead)"
             let pageSQL = """
-                SELECT json_extract(v, '$[#-1].bubbleId'), json_extract(v, '$[#-1].startedAtMs'),
+                SELECT json_extract(v, '$[#-1].bubbleId'), json_extract(v, '$[#-1].startedAtMs'), json_extract(v, '$[0].startedAtMs'),
                     (SELECT min(json_extract(e.value, '$.startedAtMs')) FROM json_each(v) AS e
-                        WHERE e.type = 'object' AND json_extract(e.value, '$.grouping.taskStatus') = 'running'
-                            AND json_extract(e.value, '$.startedAtMs') >= ?3)
-                FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT 1)
+                        WHERE e.type = 'object' AND json_extract(e.value, '$.grouping.toolCallCase') = 'taskToolCall'
+                            AND json_extract(e.value, '$.grouping.taskStatus') = 'running'
+                            AND json_extract(e.value, '$.startedAtMs') >= ?2)
+                FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key = ?1)
                 WHERE json_valid(v) AND json_type(v) = 'array'
                 """
             let bubbleSQL = "SELECT json_extract(v, '$.toolFormerData.name'), json_extract(v, '$.toolFormerData.additionalData.status') FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key = ?1) WHERE json_valid(v)"
             var states: [String: ChatState] = [:]
             for id in ids {
-                guard let row = records.rows["composerData:" + id], row.count == 8 else { continue }
+                guard let row = records.rows["composerData:" + id], row.count == 9 else { continue }
                 var state = ChatState(unfinishedRunAt: row[0].int, updatedAt: row[1].int, isSubagent: row[2].int == 1,
                                       parent: row[3].string.flatMap { CursorActivityProvider.isSafeID($0) ? $0 : nil },
                                       isBackground: row[4].int == 1, folder: row[5].string.flatMap { CheckoutPath.absolute($0) },
@@ -404,14 +414,22 @@ public final class CursorLiveActivityProvider {
                 // The newest message: the last header page (Cursor 3.29), else the inline list.
                 var bubble = row[6].string
                 state.lastStartedAt = row[7].int
-                if let page = try reader.rows(pageSQL, bindings: [.text("composerConvHeaders:\(id):"), .text("composerConvHeaders:\(id);"),
-                                                                  .integer(since)],
-                                              maximumColumnBytes: 4_096, deadline: deadline).first, page.count == 3 {
-                    if let last = page[0].string {
+                // A task counts only if it started since `since` and after the chat
+                // itself was created: a fork copies its original's entries, and
+                // nothing updates the copies.
+                let taskBound = max(since, row[8].int ?? since)
+                let pages = try reader.rows(pageKeysSQL, bindings: [.text("composerConvHeaders:\(id):"), .text("composerConvHeaders:\(id);")],
+                                            maximumColumnBytes: 4_096, deadline: deadline).compactMap { $0.first?.string }
+                for (index, key) in pages.enumerated() {
+                    guard let page = try reader.rows(pageSQL, bindings: [.text(key), .integer(taskBound)], maximumColumnBytes: 4_096,
+                                                     deadline: deadline).first, page.count == 4 else { continue }
+                    if index == 0, let last = page[0].string {
                         bubble = last
                         state.lastStartedAt = page[1].int
                     }
-                    state.backgroundSince = page[2].int
+                    if let start = page[3].int { state.backgroundSince = min(state.backgroundSince ?? start, start) }
+                    // Pages before this one hold only messages from before `since`.
+                    if let first = page[2].int, first < since { break }
                 }
                 if let bubble, CursorActivityProvider.isSafeBubbleID(bubble),
                    let body = try reader.rows(bubbleSQL, bindings: [.text("bubbleId:\(id):\(bubble)")], maximumColumnBytes: 4_096,
