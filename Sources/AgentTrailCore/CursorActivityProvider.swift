@@ -443,6 +443,8 @@ public final class CursorActivityProvider: ActivityProvider {
         var repo: String?
         var workspaceIDs: [String] = []
         var parent: String?
+        /// A side chat: you drive it beside its parent, so its edits are not delegated.
+        var isSideChat = false
         var created: Date?
         var updated: Date?
         var background = false
@@ -458,6 +460,7 @@ public final class CursorActivityProvider: ActivityProvider {
             location = field(1)
             repo = field(2) as? String
             parent = (field(3) as? String).flatMap { CursorActivityProvider.isSafeID($0) ? $0 : nil }
+            isSideChat = field(7) as? String == CursorLiveActivityProvider.sideChatType
             created = RecordedDate.milliseconds(field(4))
             updated = RecordedDate.milliseconds(field(5))
             background = origin || field(6) as? String == "background"
@@ -479,6 +482,8 @@ public final class CursorActivityProvider: ActivityProvider {
         var repo: String?
         var worktree: String?
         var parent: String?
+        /// A side chat: you drive it beside its parent, so its edits are not delegated.
+        var isSideChat = false
         var background = false
 
         init(_ values: [Any]) {
@@ -494,6 +499,7 @@ public final class CursorActivityProvider: ActivityProvider {
             repo = field(9) as? String
             worktree = (field(10) as? String).flatMap { $0.hasPrefix("/") ? ProjectLocationRegistry.lexicalPath($0) : nil }
             parent = (field(11) as? String).flatMap { CursorActivityProvider.isSafeID($0) ? $0 : nil }
+            isSideChat = field(14) as? String == CursorLiveActivityProvider.sideChatType
             let origin = (field(13) as? [String: Any]).map { !$0.isEmpty } ?? false
             background = field(12) as? String == "background" || origin
         }
@@ -632,7 +638,8 @@ public final class CursorActivityProvider: ActivityProvider {
                 composer.skipped = skipped
                 composer.worktree = fields.worktree
             }
-            composer.parent = fields.parent ?? header?.parent
+            // A side chat is yours, not delegated: it keeps no parent.
+            composer.parent = fields.isSideChat || header?.isSideChat == true ? nil : fields.parent ?? header?.parent
             composer.created = fields.created ?? header?.created
             composer.updated = [fields.updated, header?.updated].compactMap { $0 }.max()
             composer.hasHeaders = hasBubbles
@@ -1135,7 +1142,7 @@ public final class CursorActivityProvider: ActivityProvider {
     static let headerTableSQL = """
         SELECT composerId, workspaceId,
             json_extract(v, '$.workspaceIdentifier', '$.agentLocation.environment.uri', '$.trackedGitRepos[0].repoPath',
-                '$.subagentInfo.parentComposerId', '$.createdAt', '$.lastUpdatedAt', '$.unifiedMode'),
+                '$.subagentInfo.parentComposerId', '$.createdAt', '$.lastUpdatedAt', '$.unifiedMode', '$.subagentInfo.subagentTypeName'),
             coalesce(json_type(v, '$.createdFromBackgroundAgent') = 'object'
                 AND json_extract(v, '$.createdFromBackgroundAgent') <> '{}', 0)
         FROM (SELECT composerId, workspaceId,
@@ -1147,7 +1154,7 @@ public final class CursorActivityProvider: ActivityProvider {
     static let headerListSQL = """
         SELECT json_extract(e.value, '$.composerId'),
             json_extract(e.value, '$.workspaceIdentifier', '$.agentLocation.environment.uri', '$.trackedGitRepos[0].repoPath',
-                '$.subagentInfo.parentComposerId', '$.createdAt', '$.lastUpdatedAt', '$.unifiedMode'),
+                '$.subagentInfo.parentComposerId', '$.createdAt', '$.lastUpdatedAt', '$.unifiedMode', '$.subagentInfo.subagentTypeName'),
             coalesce(json_type(e.value, '$.createdFromBackgroundAgent') = 'object'
                 AND json_extract(e.value, '$.createdFromBackgroundAgent') <> '{}', 0)
         FROM ItemTable AS t, json_each(CAST(t.value AS TEXT), '$.allComposers') AS e
@@ -1164,7 +1171,8 @@ public final class CursorActivityProvider: ActivityProvider {
         SELECT k, json_extract(v, '$.createdAt', '$.lastUpdatedAt', '$.conversationCheckpointLastUpdatedAt', '$.status',
             '$._v', '$.fullConversationHeadersOnly[0].bubbleId', '$.fullConversationHeadersOnly[#-1].bubbleId',
             '$.workspaceIdentifier', '$.agentLocation.environment.uri', '$.trackedGitRepos[0].repoPath',
-            '$.gitWorktree.worktreePath', '$.subagentInfo.parentComposerId', '$.unifiedMode', '$.createdFromBackgroundAgent'),
+            '$.gitWorktree.worktreePath', '$.subagentInfo.parentComposerId', '$.unifiedMode', '$.createdFromBackgroundAgent',
+            '$.subagentInfo.subagentTypeName'),
             (SELECT json_array(
                 (SELECT count(*) FROM cursorDiskKV AS c WHERE c.key >= p.lo AND c.key < p.hi),
                 (SELECT CASE WHEN json_valid(CAST(c.value AS TEXT)) THEN json_extract(CAST(c.value AS TEXT), '$[0].bubbleId') END

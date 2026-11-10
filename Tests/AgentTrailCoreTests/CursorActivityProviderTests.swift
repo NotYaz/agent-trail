@@ -309,6 +309,29 @@ final class CursorActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "child" }?.parentSessionID, "parent")
     }
 
+    /// A side chat (Cursor 3.29) records its parent like a subagent, but you
+    /// drive it yourself: its edits are yours, not delegated.
+    func testSideChatEditsAreNotDelegated() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("a.txt").path
+        let side: [String: Any] = ["parentComposerId": "parent", "subagentType": 0, "subagentTypeName": "side-chat",
+                                   "conversationLengthAtSpawn": 1, "sideChatSeedTurnCount": 1]
+        try f.put([
+            ("composerData:parent", f.composer("parent", bubbles: ["u1"], created: 0, updated: 30)),
+            ("bubbleId:parent:u1", f.userBubble("u1", at: 1)),
+            ("composerData:side", f.composer("side", bubbles: ["t1"], created: 5, updated: 30, extra: ["subagentInfo": side])),
+            ("bubbleId:side:t1", f.tool("t1", name: "edit_file_v2", call: "tool_1", path: file, at: 10, result: f.applied()))
+        ])
+        var head = f.head("side", folder: f.project.path)
+        head["subagentInfo"] = side
+        try f.headerTable([("parent", nil, f.head("parent", folder: f.project.path)), ("side", nil, head)])
+        let result = f.provider().scan(sources: [f.source])
+        let project = try XCTUnwrap(result.projects.first)
+        XCTAssertEqual(project.activities.first?.editMoments, [EditMoment(date: f.date(10), delegated: false)])
+        XCTAssertNil(result.sessionTrails.first { $0.sessionID == "side" }?.parentSessionID)
+    }
+
     /// Cursor 3.29 (chat version 18, seen on 3.29.15) leaves
     /// `fullConversationHeadersOnly` empty, keeps the bubble list in pages
     /// (`composerConvHeaders:<id>:<page>`), and gives a reply's steps ids like
@@ -876,7 +899,8 @@ final class CursorFixture {
     func headerTable(_ rows: [(String, String?, [String: Any])]) throws {
         try execute("""
             CREATE TABLE IF NOT EXISTS composerHeaders (composerId TEXT PRIMARY KEY, workspaceId TEXT, createdAt INTEGER,
-                lastUpdatedAt INTEGER, isArchived INTEGER, isSubagent INTEGER, recency INTEGER, checkpointAt INTEGER, value TEXT);
+                lastUpdatedAt INTEGER, isArchived INTEGER, isSubagent INTEGER, recency INTEGER, checkpointAt INTEGER,
+                subagentTypeName TEXT, value TEXT);
             """)
         try insert("INSERT OR REPLACE INTO composerHeaders (composerId, workspaceId, isArchived, isSubagent, value) VALUES (?, ?, 0, 0, ?)",
                    rows: rows.map { [$0.0, $0.1, $0.2] })

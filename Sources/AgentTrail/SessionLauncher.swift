@@ -286,7 +286,8 @@ enum SessionLauncher {
         guard session.details.hostBundleID == cursorBundleID else { return false }
         let running = runningApplications(cursorBundleID).filter { $0.activationPolicy == .regular }
         guard running.count == 1, let app = running.first, let bundleURL = app.bundleURL,
-              let url = cursorChatURL(session.sessionID) else { return false }
+              // A side chat opens through its parent, beside which Cursor shows it.
+              let url = cursorChatURL(session.details.parentThreadID ?? session.sessionID) else { return false }
         openLink(url, in: bundleURL) { recipient in
             report(recipient != nil ? .done : activateWithHint(app, context: context))
         }

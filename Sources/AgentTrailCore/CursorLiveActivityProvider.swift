@@ -39,9 +39,17 @@ import Foundation
 /// bytes are compared, nothing else is kept, and a transcript is read again
 /// only after its size or time changes.
 ///
-/// Not shown: subagent chats (their parent is Working while they run, and
-/// Needs input while one waits for approval: Cursor ORs a subagent's
-/// `hasBlockingPendingActions` into its parent's header, up to the root), cloud
+/// A subagent the agent's Task tool starts shows through its parent: the
+/// parent is Working while it runs, and Needs input while it waits for
+/// approval (Cursor ORs a subagent's `hasBlockingPendingActions` into its
+/// parent's header, up to the root). A subagent sent to the background
+/// outlives its parent's turn; while the task's entry in the parent's last
+/// header page reads `grouping.taskStatus` "running", the parent is Working in
+/// background. A side chat is stored like a subagent (type "side-chat") but
+/// you drive it yourself and it runs on its own, so it shows on its own; Jump
+/// opens it through its parent.
+///
+/// Not shown: Task subagents themselves, cloud
 /// and background agents (`createdFromBackgroundAgent`), remote and
 /// multi-root workspaces, and Cursor CLI
 /// sessions. A run orphaned by a window crash or reload while Cursor keeps
@@ -68,6 +76,8 @@ public final class CursorLiveActivityProvider {
         let status: LiveStatus
         let since: Date
         let folder: String
+        var parent: String?
+        var background: Date?
     }
 
     /// What `readStates` found.
@@ -81,6 +91,9 @@ public final class CursorLiveActivityProvider {
 
     /// File times and process start times are compared with this much slack.
     static let clockSlack: TimeInterval = 2
+    /// `subagentInfo.subagentTypeName` of a side chat: a chat you open beside an
+    /// agent and drive yourself. It runs on its own, not in its parent's turn.
+    static let sideChatType = "side-chat"
     /// Cursor's app, which Jump brings forward.
     static let cursorBundleID = "com.todesktop.230313mzl4w4u92"
     /// How far back from a transcript's end the reader looks for the start of
@@ -115,7 +128,13 @@ public final class CursorLiveActivityProvider {
         var unfinishedRunAt: Int64?
         /// `lastUpdatedAt`: when the latest turn was sent.
         var updatedAt: Int64?
+        /// A subagent a tool call started: it works for its parent, which shows instead.
         var isSubagent = false
+        /// A side chat's parent chat. You drive a side chat yourself, so it shows on its own.
+        var parent: String?
+        /// The start of the oldest subagent this chat sent to the background that
+        /// Cursor still marks running (`grouping.taskStatus` "running"), since `since`.
+        var backgroundSince: Int64?
         /// A cloud or background agent's chat: its run is on Cursor's servers.
         var isBackground = false
         var folder: String?
@@ -172,17 +191,19 @@ public final class CursorLiveActivityProvider {
                     let current = (state.updatedAt ?? 0) >= sinceMs || (state.unfinishedRunAt ?? 0) >= sinceMs
                     if current, state.lastTool == "ask_question", state.lastToolPending {
                         let at = Self.date(state.lastStartedAt ?? state.updatedAt) ?? now
-                        reported.append(Reported(id: id, status: .waiting, since: at, folder: folder))
+                        reported.append(Reported(id: id, status: .waiting, since: at, folder: folder, parent: state.parent))
                     } else if current, state.blocking {
                         let first = blockedSince[key(id)] ?? now
                         nextBlocked[key(id)] = first
-                        reported.append(Reported(id: id, status: .waiting, since: first, folder: folder))
-                    } else if let run = state.unfinishedRunAt, run >= sinceMs {
-                        // The turn_ended of a turn after this one was sent has ended it already.
-                        let sent = Double(max(run, state.updatedAt ?? run)) / 1000
-                        if let transcript = transcripts[id], transcript.kind == .turnEnded,
-                           transcript.written.timeIntervalSince1970 > sent + Self.endMargin { continue }
-                        reported.append(Reported(id: id, status: .working, since: Self.date(run) ?? now, folder: folder))
+                        reported.append(Reported(id: id, status: .waiting, since: first, folder: folder, parent: state.parent))
+                    } else if let run = state.unfinishedRunAt, run >= sinceMs,
+                              !Self.endedEarly(transcripts[id], run: run, updatedAt: state.updatedAt) {
+                        reported.append(Reported(id: id, status: .working, since: Self.date(run) ?? now, folder: folder,
+                                                 parent: state.parent))
+                    } else if let background = state.backgroundSince.flatMap(Self.date) {
+                        // The turn ended, but a subagent it sent to the background still runs.
+                        reported.append(Reported(id: id, status: .working, since: background, folder: folder,
+                                                 parent: state.parent, background: background))
                     }
                 }
             case .busy:
@@ -206,7 +227,8 @@ public final class CursorLiveActivityProvider {
                 keep.insert(key(item.id))
                 sessions.append(LiveAgentSession(sourceID: source.id, projectPath: item.folder, workspacePath: item.folder,
                     sessionID: item.id, status: item.status, updatedAt: item.since, pid: app.pid,
-                    details: LiveSessionDetails(stateSince: item.since, hostBundleID: Self.cursorBundleID)))
+                    details: LiveSessionDetails(stateSince: item.since, hostBundleID: Self.cursorBundleID,
+                                                parentThreadID: item.parent, backgroundSince: item.background)))
             }
         }
         lines = lines.filter { seenLines.contains($0.key) }
@@ -228,6 +250,14 @@ public final class CursorLiveActivityProvider {
 
     static func date(_ milliseconds: Int64?) -> Date? {
         milliseconds.map { Date(timeIntervalSince1970: Double($0) / 1000) }
+    }
+
+    /// The transcript's `turn_ended`, written more than `endMargin` after the
+    /// run was sent, has ended the run before Cursor saved the record again.
+    static func endedEarly(_ transcript: (written: Date, kind: LastLine, changed: Bool)?, run: Int64, updatedAt: Int64?) -> Bool {
+        guard let transcript, transcript.kind == .turnEnded else { return false }
+        let sent = Double(max(run, updatedAt ?? run)) / 1000
+        return transcript.written.timeIntervalSince1970 > sent + endMargin
     }
 
     /// The earliest-started running Cursor instance that uses `data`: one
@@ -314,7 +344,9 @@ public final class CursorLiveActivityProvider {
             let headers = reader.columns(of: "composerHeaders")
             if headers.isSuperset(of: ["composerId", "value"]) {
                 let updated = headers.contains("recency") ? "coalesce(lastUpdatedAt, recency, 0)" : "coalesce(lastUpdatedAt, 0)"
-                let main = headers.contains("isSubagent") ? " AND coalesce(isSubagent, 0) = 0" : ""
+                // Main chats and side chats; a tool call's subagent shows through its parent.
+                let side = headers.contains("subagentTypeName") ? " OR subagentTypeName = '\(sideChatType)'" : ""
+                let main = headers.contains("isSubagent") ? " AND (coalesce(isSubagent, 0) = 0\(side))" : ""
                 for row in try reader.rows("SELECT composerId FROM composerHeaders WHERE \(updated) >= ?1\(main) ORDER BY \(updated) DESC LIMIT \(candidateLimit)",
                                            bindings: [.integer(since)], maximumColumnBytes: 4_096, deadline: deadline) {
                     if let id = row.first?.string, CursorActivityProvider.isSafeID(id) { ids.append(id) }
@@ -337,7 +369,10 @@ public final class CursorLiveActivityProvider {
             }
             let recordSQL = """
                 SELECT k, json_extract(v, '$.unfinishedRunAt'), json_extract(v, '$.lastUpdatedAt'),
-                    json_extract(v, '$.subagentInfo.parentComposerId') IS NOT NULL,
+                    json_extract(v, '$.subagentInfo.parentComposerId') IS NOT NULL
+                        AND coalesce(json_extract(v, '$.subagentInfo.subagentTypeName'), '') <> '\(sideChatType)',
+                    CASE WHEN json_extract(v, '$.subagentInfo.subagentTypeName') = '\(sideChatType)'
+                        THEN json_extract(v, '$.subagentInfo.parentComposerId') END,
                     coalesce(json_type(v, '$.createdFromBackgroundAgent') = 'object'
                         AND json_extract(v, '$.createdFromBackgroundAgent') <> '{}', 0),
                     \(folderSQL),
@@ -347,23 +382,36 @@ public final class CursorLiveActivityProvider {
                 """
             let records = try CursorActivityProvider.keyedRows(reader, keys: ids.map { "composerData:" + $0 },
                                                                sql: recordSQL, limits: limits)
-            let pageSQL = "SELECT json_extract(v, '$[#-1].bubbleId'), json_extract(v, '$[#-1].startedAtMs') FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT 1) WHERE json_valid(v)"
+            // The last page's newest message, and its oldest background subagent
+            // still marked running, started since `since`.
+            let pageSQL = """
+                SELECT json_extract(v, '$[#-1].bubbleId'), json_extract(v, '$[#-1].startedAtMs'),
+                    (SELECT min(json_extract(e.value, '$.startedAtMs')) FROM json_each(v) AS e
+                        WHERE e.type = 'object' AND json_extract(e.value, '$.grouping.taskStatus') = 'running'
+                            AND json_extract(e.value, '$.startedAtMs') >= ?3)
+                FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT 1)
+                WHERE json_valid(v) AND json_type(v) = 'array'
+                """
             let bubbleSQL = "SELECT json_extract(v, '$.toolFormerData.name'), json_extract(v, '$.toolFormerData.additionalData.status') FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key = ?1) WHERE json_valid(v)"
             var states: [String: ChatState] = [:]
             for id in ids {
-                guard let row = records.rows["composerData:" + id], row.count == 7 else { continue }
+                guard let row = records.rows["composerData:" + id], row.count == 8 else { continue }
                 var state = ChatState(unfinishedRunAt: row[0].int, updatedAt: row[1].int, isSubagent: row[2].int == 1,
-                                      isBackground: row[3].int == 1, folder: row[4].string.flatMap { CheckoutPath.absolute($0) },
+                                      parent: row[3].string.flatMap { CursorActivityProvider.isSafeID($0) ? $0 : nil },
+                                      isBackground: row[4].int == 1, folder: row[5].string.flatMap { CheckoutPath.absolute($0) },
                                       blocking: blocking[id] ?? false)
                 guard !state.isSubagent, !state.isBackground else { states[id] = state; continue }
                 // The newest message: the last header page (Cursor 3.29), else the inline list.
-                var bubble = row[5].string
-                state.lastStartedAt = row[6].int
-                if let page = try reader.rows(pageSQL, bindings: [.text("composerConvHeaders:\(id):"), .text("composerConvHeaders:\(id);")],
-                                              maximumColumnBytes: 4_096, deadline: deadline).first, page.count == 2,
-                   let last = page[0].string {
-                    bubble = last
-                    state.lastStartedAt = page[1].int
+                var bubble = row[6].string
+                state.lastStartedAt = row[7].int
+                if let page = try reader.rows(pageSQL, bindings: [.text("composerConvHeaders:\(id):"), .text("composerConvHeaders:\(id);"),
+                                                                  .integer(since)],
+                                              maximumColumnBytes: 4_096, deadline: deadline).first, page.count == 3 {
+                    if let last = page[0].string {
+                        bubble = last
+                        state.lastStartedAt = page[1].int
+                    }
+                    state.backgroundSince = page[2].int
                 }
                 if let bubble, CursorActivityProvider.isSafeBubbleID(bubble),
                    let body = try reader.rows(bubbleSQL, bindings: [.text("bubbleId:\(id):\(bubble)")], maximumColumnBytes: 4_096,
