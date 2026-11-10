@@ -48,6 +48,18 @@ final class ProcessIdentityTests: XCTestCase {
         XCTAssertFalse(identity.matches(source: sources[1], homeDirectory: home))
     }
 
+    /// The Cursor live reader needs only the executable and `--user-data-dir`:
+    /// an environment that would fail closed is never parsed.
+    func testArgumentsOnlyParsingIgnoresTheEnvironment() throws {
+        let data = record(arguments: ["--user-data-dir", "/tmp/cursor-work"],
+                          environment: ["CLAUDE_CONFIG_DIR=/a", "CLAUDE_CONFIG_DIR=/b", "SECRET_TOKEN=PRIVATE"])
+        XCTAssertNil(ProcessIdentity.parseKernelArguments(data))
+        let identity = try XCTUnwrap(ProcessIdentity.parseKernelArguments(data, environment: false))
+        XCTAssertEqual(identity.userDataDirectory, "/tmp/cursor-work")
+        XCTAssertEqual(identity.homes, [:])
+        XCTAssertEqual(identity.executablePath, "/Applications/Claude.app/Contents/MacOS/Claude")
+    }
+
     func testUnknownConfigDoesNotFallBackToMain() throws {
         let identity = try XCTUnwrap(ProcessIdentity.parseKernelArguments(record(environment: ["CLAUDE_CONFIG_DIR=/tmp/unknown"])))
         XCTAssertFalse(identity.matches(source: sources[0], homeDirectory: home))

@@ -70,15 +70,23 @@ final class CursorLiveActivityProviderTests: XCTestCase {
 
     /// A Cursor app for this profile's data folder, started at `appStart`;
     /// every chat id maps to `project`.
-    private func provider(apps: [CursorLiveActivityProvider.CursorApp]? = nil,
-                          alive: Bool = true) -> CursorLiveActivityProvider {
+    /// Folder lookups, by the chat ids asked for.
+    private var lookups: [[String]] = []
+
+    private func provider(apps: [CursorLiveActivityProvider.CursorApp]? = nil, alive: Bool = true,
+                          folders: [String: String]? = nil) -> CursorLiveActivityProvider {
         let apps = apps ?? [.init(pid: pid, start: micros(appStart), userDataDirectory: data.path)]
         let starts = Dictionary(uniqueKeysWithValues: apps.map { ($0.pid, $0.start) })
         let project = self.project
         return CursorLiveActivityProvider(
             processStartTimes: { pids in alive ? starts.filter { pids.contains($0.key) } : [:] },
             cursorApps: { apps },
-            folderLookup: { _, ids in Dictionary(uniqueKeysWithValues: ids.map { ($0, canonicalPath(project)) }) })
+            folderLookup: { [weak self] _, ids in
+                self?.lookups.append(ids)
+                if let folders { return folders.filter { ids.contains($0.key) } }
+                return Dictionary(uniqueKeysWithValues: ids.map { ($0, canonicalPath(project)) })
+            },
+            transcriptHome: home)
     }
 
     func testATranscriptEndingWithYourMessageIsWorkingUntilItsTurnEnds() throws {
@@ -122,12 +130,25 @@ final class CursorLiveActivityProviderTests: XCTestCase {
 
     func testAChatWithoutAKnownFolderIsNotShown() throws {
         try transcript("77777777-7777-4777-8777-777777777777", lines: [user()], at: Date().addingTimeInterval(-5))
-        let reader = CursorLiveActivityProvider(
-            processStartTimes: { [pid, appStart] pids in pids.contains(pid) ? [pid: UInt64(appStart.timeIntervalSince1970 * 1_000_000)] : [:] },
-            cursorApps: { [pid, appStart, data] in [.init(pid: pid, start: UInt64(appStart.timeIntervalSince1970 * 1_000_000),
-                                                         userDataDirectory: data!.path)] },
-            folderLookup: { _, _ in [:] })
-        XCTAssertEqual(reader.scan(sources: [source]).sessions, [])
+        XCTAssertEqual(provider(folders: [:]).scan(sources: [source]).sessions, [])
+    }
+
+    /// The app writes transcripts to ~/.cursor whatever CLI home the profile
+    /// names, a chat's folder is looked up once, and a transcript that did not
+    /// change is not read again.
+    func testFoldersAreLookedUpOnceAndTranscriptsFollowTheirChanges() throws {
+        let custom = AgentSource(id: "cursor", name: "Cursor", configDirectory: root.appendingPathComponent("cli-home").path,
+                                 userDataDirectory: data.path, assistant: .cursor)
+        let id = "88888888-8888-4888-8888-888888888888"
+        let file = try transcript(id, lines: [user()], at: Date().addingTimeInterval(-20))
+        let reader = provider()
+        XCTAssertEqual(reader.scan(sources: [custom]).sessions.map(\.sessionID), [id])
+        XCTAssertEqual(reader.scan(sources: [custom]).sessions.map(\.sessionID), [id])
+        XCTAssertEqual(lookups, [[id]], "the folder is remembered")
+        // The turn ends: the file changes, so it is read again.
+        try (try line(user()) + "\n" + line(ended) + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try setTime(file, Date().addingTimeInterval(-10))
+        XCTAssertEqual(reader.scan(sources: [custom]).sessions, [])
     }
 
     func testTheInstanceMustUseTheProfilesDataFolder() {
@@ -151,11 +172,22 @@ final class CursorLiveActivityProviderTests: XCTestCase {
         try f.headerTable([("r1", nil, remote)])
         try f.put([("composerData:c1", f.composer("c1", bubbles: [], created: 0, updated: 1,
                                                     extra: ["trackedGitRepos": [["repoPath": f.project.path]]]))])
+        // A file URI saved without fsPath, a remote chat with a repository, and a multi-root workspace.
+        var bare = f.head("p1", folder: f.project.path)
+        bare["workspaceIdentifier"] = ["id": "y", "uri": ["scheme": "file", "path": f.project.path]]
+        try f.headerTable([("p1", nil, bare)])
+        try f.put([("composerData:r2", f.composer("r2", bubbles: [], created: 0, updated: 1, extra: [
+            "workspaceIdentifier": ["id": "z", "uri": ["scheme": "vscode-remote", "path": "/srv/app"]],
+            "trackedGitRepos": [["repoPath": "/srv/app"]]])),
+                   ("composerData:m1", f.composer("m1", bubbles: [], created: 0, updated: 1, extra: [
+            "workspaceIdentifier": ["id": "w", "configPath": ["scheme": "file", "fsPath": "/Users/someone/both.code-workspace"]],
+            "trackedGitRepos": [["repoPath": f.project.path]]]))])
         // History leaves a rollback-journal database alone just after a change; so does this.
         XCTAssertEqual(CursorLiveActivityProvider.readFolders(f.userData, ids: ["h1"]), [:])
         try setTime(f.database, Date().addingTimeInterval(-30))
-        let folders = CursorLiveActivityProvider.readFolders(f.userData, ids: ["h1", "r1", "c1", "missing"])
-        XCTAssertEqual(folders, ["h1": canonicalPath(f.project.path), "c1": canonicalPath(f.project.path)])
+        let folders = CursorLiveActivityProvider.readFolders(f.userData, ids: ["h1", "r1", "c1", "missing", "p1", "r2", "m1"])
+        XCTAssertEqual(folders, ["h1": canonicalPath(f.project.path), "c1": canonicalPath(f.project.path),
+                                 "p1": canonicalPath(f.project.path)])
     }
 
     func testTheLastLineIsFoundFromItsOpeningBytes() throws {
