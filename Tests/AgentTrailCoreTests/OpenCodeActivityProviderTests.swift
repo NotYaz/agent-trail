@@ -123,6 +123,71 @@ final class OpenCodeActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "ses_fork" }?.edits.count, 1)
     }
 
+    /// The shapes of a real OpenCode 2.2.7 desktop session (structure only):
+    /// one assistant message per step, `write` naming only an absolute `path`,
+    /// `edit` and `patch` naming project-relative files, a subagent in a child
+    /// session, a denied write stored as an aborted error, and the `idle` and
+    /// `model-switched` messages between turns.
+    func testARealOpenCode227SessionCountsItsCompletedEdits() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        try f.createV2()
+        let root = f.project.path
+        var seq = 0
+        func add(_ session: String, _ type: String = "assistant", at seconds: TimeInterval, _ data: [String: Any]) throws {
+            seq += 1
+            try f.message("msg_\(seq)", session: session, type: type, seq: seq, created: seconds, data: data)
+        }
+        func step(_ session: String, at seconds: TimeInterval, _ item: [String: Any]) throws {
+            try add(session, at: seconds, f.assistant([item], created: seconds, completed: seconds + 1))
+        }
+        func written(_ id: String, _ path: String, at seconds: TimeInterval) -> [String: Any] {
+            f.tool(id, "write", ran: seconds, completed: seconds,
+                   input: ["path": "\(root)/\(path)", "content": "PRIVATE_CONTENT_MARKER"], metadata: ["truncated": false])
+        }
+        try f.session("ses_main", directory: f.project, created: 0, busy: 40, idle: 45)
+        try f.session("ses_child", directory: f.project, created: 10, parent: "ses_main", busy: 10, idle: 12)
+        try add("ses_main", "user", at: 1, f.user(created: 1))
+        try step("ses_main", at: 2, written("call_hello", "hello.txt", at: 4))
+        try step("ses_main", at: 5, f.tool("call_read", "read", ran: 5, completed: 5, input: ["path": "\(root)/README.md"],
+                                          metadata: ["truncated": false]))
+        try step("ses_main", at: 5, f.tool("call_edit", "edit", ran: 5, completed: 6,
+            input: ["path": "\(root)/README.md", "oldString": "PRIVATE_CONTENT_MARKER", "newString": "PRIVATE_CONTENT_MARKER"],
+            metadata: ["files": [f.diff("README.md")], "truncated": false]))
+        try step("ses_main", at: 7, f.tool("call_shell", "shell", ran: 7, completed: 7, input: ["command": "touch shell.txt"],
+                                          metadata: ["status": "exited", "exit": 0, "truncated": false]))
+        try step("ses_main", at: 8, f.question("call_question", status: "completed", ran: 8))
+        try step("ses_main", at: 10, f.tool("call_subagent", "subagent", ran: 10, completed: 12,
+            input: ["agent": "general", "description": "PRIVATE_PROMPT_MARKER", "prompt": "PRIVATE_PROMPT_MARKER"],
+            metadata: ["sessionID": "ses_child", "status": "completed", "truncated": false]))
+        try add("ses_child", "user", at: 10, f.user(created: 10))
+        try step("ses_child", at: 10, written("call_child", "sub/from-subagent.txt", at: 11))
+        try add("ses_child", "idle", at: 12, ["time": ["created": f.ms(12)], "outcome": "succeeded"])
+        try step("ses_main", at: 13, written("call_pending", "pending.txt", at: 14))
+        try add("ses_main", at: 15, f.assistant([f.text()], created: 15, completed: 15))
+        try add("ses_main", "idle", at: 15, ["time": ["created": f.ms(15)], "outcome": "succeeded"])
+        try add("ses_main", "model-switched", at: 19, ["time": ["created": f.ms(19)], "model": ["id": "m2"], "previous": ["id": "m1"]])
+        try add("ses_main", "user", at: 19, f.user(created: 19))
+        var patch = f.tool("call_patch", "patch", ran: 19, completed: 20, input: ["patchText": "PRIVATE_CONTENT_MARKER"],
+                           metadata: ["files": [f.diff("README.md")], "truncated": false])
+        patch["native"] = ["itemId": "fc_1"]
+        try step("ses_main", at: 19, patch)
+        try add("ses_main", "user", at: 40, f.user(created: 40))
+        // Denied: OpenCode 2.2.7 ends the call as an aborted error.
+        try step("ses_main", at: 41, f.tool("call_denied", "write", status: "error", ran: 41, completed: 44,
+                                           input: ["path": "\(root)/approval-test.txt", "content": "PRIVATE_CONTENT_MARKER"]))
+        try add("ses_main", "idle", at: 45, ["time": ["created": f.ms(45)], "outcome": "succeeded"])
+        let result = f.provider().scan(sources: [f.source])
+        let project = try XCTUnwrap(result.projects.first { $0.path == canonicalPath(root) })
+        XCTAssertEqual(project.recordedEditCount, 5)
+        XCTAssertEqual(project.sessionCount, 2)
+        XCTAssertEqual(project.activities.first?.editMoments.map(\.date).sorted(),
+                       [f.date(4), f.date(6), f.date(11), f.date(14), f.date(20)])
+        XCTAssertEqual(project.activities.first?.editMoments.filter(\.delegated).map(\.date), [f.date(11)])
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "ses_child" }?.parentSessionID, "ses_main")
+        XCTAssertEqual(result.notices, [])
+    }
+
     func testForkCopiesResolveWhereTheParentRanThemAfterTheParentMoves() throws {
         let f = try OpenCodeFixture()
         defer { f.remove() }
@@ -604,26 +669,23 @@ final class OpenCodeFixture {
     func text() -> [String: Any] { ["type": "text", "text": "PRIVATE_PROMPT_MARKER"] }
 
     /// An OpenCode 2 tool item.
-    func tool(_ id: String, _ name: String, status: String = "completed", completed: TimeInterval? = nil,
-              input: [String: Any] = [:], metadata: [String: Any]? = nil) -> [String: Any] {
+    func tool(_ id: String, _ name: String, status: String = "completed", ran: TimeInterval? = nil,
+              completed: TimeInterval? = nil, input: [String: Any] = [:], metadata: [String: Any]? = nil) -> [String: Any] {
         var state: [String: Any] = ["status": status, "input": input]
         if status == "completed" { state["content"] = [["type": "text", "text": "PRIVATE_OUTPUT_MARKER"]] }
-        if status == "error" { state["error"] = ["type": "permission.rejected", "message": "PRIVATE_OUTPUT_MARKER"] }
+        // OpenCode 2.2.7 records a denied approval as an aborted call.
+        if status == "error" { state["error"] = ["type": "aborted", "message": "PRIVATE_OUTPUT_MARKER"] }
         if let metadata { state["metadata"] = metadata }
         var time: [String: Any] = ["created": ms(0)]
+        if let ran { time["ran"] = ms(ran) }
         if let completed { time["completed"] = ms(completed) }
-        return ["type": "tool", "id": id, "name": name, "state": state, "time": time]
+        return ["type": "tool", "id": id, "name": name, "executed": false, "state": state, "time": time]
     }
 
     /// OpenCode 2's `question` tool, which waits for the user's answer while running.
     func question(_ id: String, status: String, ran: TimeInterval? = nil) -> [String: Any] {
-        var item = tool(id, "question", status: status, completed: status == "completed" ? 11 : nil,
-                        input: ["questions": [["question": "PRIVATE_PROMPT_MARKER"]]])
-        if let ran, var time = item["time"] as? [String: Any] {
-            time["ran"] = ms(ran)
-            item["time"] = time
-        }
-        return item
+        tool(id, "question", status: status, ran: ran, completed: status == "completed" ? 11 : nil,
+             input: ["questions": [["question": "PRIVATE_PROMPT_MARKER"]]])
     }
 
     /// A FileDiff, as OpenCode 2's edit and patch record it.

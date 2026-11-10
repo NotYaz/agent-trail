@@ -42,10 +42,10 @@ final class OpenCodeLiveActivityProviderTests: XCTestCase {
         let f = try OpenCodeFixture()
         defer { f.remove() }
         try f.createV2()
-        // Executing, with an edit waiting for approval: approvals are not on disk.
+        // Executing, with an edit that started two seconds ago.
         try f.session("ses_work", directory: f.project, created: 0, busy: recent)
         try f.message("msg_w", session: "ses_work", seq: 1, created: recent, data: f.assistant([
-            f.tool("call_w", "edit", status: "running", input: ["path": "a.txt"])], created: recent))
+            f.tool("call_w", "edit", status: "running", ran: recent + 8, input: ["path": "a.txt"])], created: recent))
         // Executing, and its current step asks the user a question.
         try f.session("ses_ask", directory: f.project, created: 0, busy: recent)
         try f.message("msg_a1", session: "ses_ask", seq: 1, created: 10, data: f.assistant([
@@ -71,6 +71,56 @@ final class OpenCodeLiveActivityProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.sessions.first?.pid, 4242)
         XCTAssertEqual(snapshot.sessions.first?.projectPath, canonicalPath(f.project.path))
         XCTAssertEqual(snapshot.notices, [])
+    }
+
+    /// OpenCode stores a call held by an approval prompt exactly like one that
+    /// runs: `running`, with `ran` set when the prompt opens (seen on 2.2.7).
+    func testAQuickFileCallRunningForSecondsWaitsForApproval() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        try f.createV2()
+        func step(_ session: String, _ items: [[String: Any]], seq: Int = 1) throws {
+            try f.message("msg_\(session)_\(seq)", session: session, seq: seq, created: recent,
+                          data: f.assistant(items, created: recent))
+        }
+        for id in ["ses_write", "ses_read", "ses_patch", "ses_fresh", "ses_long", "ses_older", "ses_text"] {
+            try f.session(id, directory: f.project, created: 0, busy: recent)
+        }
+        // A write held for ten seconds, and a read outside the project held as long.
+        try step("ses_write", [f.tool("call_w", "write", status: "running", ran: recent, input: ["path": "a.txt"], metadata: [:])])
+        try step("ses_read", [f.tool("call_r", "read", status: "completed", ran: recent, completed: recent),
+                              f.tool("call_r2", "read", status: "running", ran: recent + 1, input: ["path": "/etc/hosts"])])
+        // A patch held through a part row.
+        try step("ses_patch", [])
+        try f.part("msg_ses_patch_1", session: "ses_patch", ordinal: 0,
+                   item: f.tool("call_p", "patch", status: "running", ran: recent + 2))
+        // Started two seconds ago: the write itself, or its formatter.
+        try step("ses_fresh", [f.tool("call_f", "edit", status: "running", ran: recent + 8)])
+        // Shell commands and subagents run for minutes on their own.
+        try step("ses_long", [f.tool("call_s", "shell", status: "running", ran: recent),
+                              f.tool("call_a", "subagent", status: "running", ran: recent)])
+        // Only the current step counts.
+        try step("ses_older", [f.tool("call_o", "write", status: "running", ran: recent)])
+        try step("ses_older", [f.tool("call_o2", "read", status: "completed", ran: recent, completed: recent)], seq: 2)
+        // A time that is not a number is not a time.
+        var odd = f.tool("call_t", "write", status: "running")
+        odd["time"] = ["created": "soon", "ran": "soon"]
+        try step("ses_text", [odd])
+        let registration = try register(f)
+        let snapshot = provider(f, registration: registration).scan(sources: [f.source])
+        let statuses = Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.sessionID, $0.status) })
+        XCTAssertEqual(statuses, ["ses_write": .waiting, "ses_read": .waiting, "ses_patch": .waiting, "ses_fresh": .working,
+                                  "ses_long": .working, "ses_older": .working, "ses_text": .working])
+        let since = Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.sessionID, $0.details.stateSince) })
+        XCTAssertEqual(since["ses_write"], f.date(recent))
+        XCTAssertEqual(since["ses_read"], f.date(recent + 1))
+        XCTAssertEqual(since["ses_patch"], f.date(recent + 2))
+        XCTAssertEqual(since["ses_fresh"], f.date(recent))
+        // The same write, read five seconds into its wait, has just started waiting.
+        let early = provider(f, registration: registration).scan(sources: [f.source], now: f.date(recent + 4.5))
+        XCTAssertEqual(early.sessions.first { $0.sessionID == "ses_write" }?.status, .working)
+        let due = provider(f, registration: registration).scan(sources: [f.source], now: f.date(recent + 5))
+        XCTAssertEqual(due.sessions.first { $0.sessionID == "ses_write" }?.status, .waiting)
     }
 
     func testDeadReusedAndStaleServicesShowNothing() throws {

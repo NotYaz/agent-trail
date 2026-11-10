@@ -14,10 +14,16 @@ import Foundation
 /// unreleased execution claim (`time_suspended`), set since the service
 /// started, so a turn a dead process left behind is not shown. Such a session
 /// is Working; it Needs input while its current step's `question` call is
-/// running, which waits for the user's answer. Approval prompts live only in
-/// the service's memory, so a session waiting for one stays Working. Sessions
-/// that are not executing are not listed: nothing on disk says a client has
-/// them open. Nothing is inferred from file times or activity, and OpenCode 1.x
+/// running, which waits for the user's answer, or while an `edit`, `write`,
+/// `patch` or `read` call in that step has been running for `approvalDelay`.
+/// OpenCode keeps approval prompts only in the service's memory, and a call
+/// waiting for one is stored exactly like one that is executing (`running`,
+/// with its `ran` time set when the prompt opens), but these calls otherwise
+/// finish in well under a second; only a slow code formatter, which OpenCode
+/// runs inside `edit`, `write` and `patch`, keeps them running longer. Shell
+/// and subagent calls run for minutes, so their approvals stay Working.
+/// Sessions that are not executing are not listed: nothing on disk says a
+/// client has them open. Nothing is inferred from file times, and OpenCode 1.x
 /// (no service) has no live status. Only the default data folder is read,
 /// because the service registers under the default state folder.
 ///
@@ -40,6 +46,10 @@ public final class OpenCodeLiveActivityProvider {
 
     /// The service registers itself just after starting; this allows for clock rounding.
     static let registrationSlack: TimeInterval = 2
+    /// How long a quick file call runs before it counts as waiting for approval.
+    static let approvalDelay: TimeInterval = 5
+    /// Calls that finish in well under a second unless an approval holds them.
+    static let approvalTools = ["edit", "write", "patch", "read"]
 
     /// `otherServers` lists this user's OpenCode servers other than the shared
     /// service, by PID with their start times in microseconds, or nil when
@@ -204,7 +214,7 @@ public final class OpenCodeLiveActivityProvider {
         let waitingSince: Date?
     }
 
-    /// Sessions executing since `since`, and whether each waits on a question.
+    /// Sessions executing since `since`, and whether each waits for the user.
     static func busySessions(_ db: ReadOnlySQLite, since: Date, now: Date) throws -> [Busy] {
         let columns = db.columns(of: "session_v2")
         guard columns.isSuperset(of: ["id", "directory"]),
@@ -231,9 +241,9 @@ public final class OpenCodeLiveActivityProvider {
                   let workspace = CheckoutPath.absolute(raw), let busySince = OpenCodeDatabase.moment(row[2]),
                   busySince <= now.addingTimeInterval(5) else { continue }
             if events, try stoppedByShutdown(db, session: id) { continue }
-            let question = try openQuestion(db, session: id, parts: parts)
-            result.append(Busy(id: id, workspace: workspace, busySince: busySince, waiting: question.open,
-                               waitingSince: question.since))
+            let waiting = try waitingStep(db, session: id, parts: parts, now: now)
+            result.append(Busy(id: id, workspace: workspace, busySince: busySince, waiting: waiting.open,
+                               waitingSince: waiting.since))
         }
         return result
     }
@@ -250,18 +260,30 @@ public final class OpenCodeLiveActivityProvider {
         return type.hasPrefix("session.execution.interrupted") && row[1].string == "shutdown"
     }
 
-    /// Whether the session's current step has a `question` call still running,
-    /// and since when.
-    static func openQuestion(_ db: ReadOnlySQLite, session: String, parts: Bool) throws -> (open: Bool, since: Date?) {
+    /// Whether the session's current step waits for the user, and since when:
+    /// a running `question` call, or a quick file call (`approvalTools`) that
+    /// has been running since `approvalDelay` before `now`, which is waiting
+    /// for approval. A call's wait starts at its `ran` time, else its creation.
+    static func waitingStep(_ db: ReadOnlySQLite, session: String, parts: Bool, now: Date) throws -> (open: Bool, since: Date?) {
+        let cutoff = Int64(((now.timeIntervalSince1970 - approvalDelay) * 1000).rounded(.down))
+        let tools = approvalTools.map { "'\($0)'" }.joined(separator: ", ")
+        func since(_ item: String) -> String {
+            "coalesce(json_extract(\(item), '$.time.ran'), json_extract(\(item), '$.time.created'))"
+        }
+        // A missing or text time never passes the cutoff: SQLite orders text after numbers.
+        func waits(_ item: String) -> String {
+            "json_extract(\(item), '$.state.status') = 'running' AND (json_extract(\(item), '$.name') = 'question' OR (json_extract(\(item), '$.name') IN (\(tools)) AND \(since(item)) <= ?2))"
+        }
         let latest = "(SELECT max(seq) FROM session_message WHERE session_id = ?1 AND type = 'assistant')"
-        let inline = "SELECT coalesce(json_extract(j.value, '$.time.ran'), json_extract(j.value, '$.time.created')) FROM session_message m, json_each(CASE WHEN json_valid(m.data) THEN m.data ELSE '{}' END, '$.content') j WHERE m.session_id = ?1 AND m.type = 'assistant' AND m.seq = \(latest) AND (CASE WHEN j.type = 'object' THEN json_extract(j.value, '$.type') = 'tool' AND json_extract(j.value, '$.name') = 'question' AND json_extract(j.value, '$.state.status') = 'running' ELSE 0 END) LIMIT 1"
-        if let row = try db.rows(inline, bindings: [.text(session)], maximumColumnBytes: 1_024).first {
+        let inline = "SELECT \(since("j.value")) AS since FROM session_message m, json_each(CASE WHEN json_valid(m.data) THEN m.data ELSE '{}' END, '$.content') j WHERE m.session_id = ?1 AND m.type = 'assistant' AND m.seq = \(latest) AND (CASE WHEN j.type = 'object' THEN json_extract(j.value, '$.type') = 'tool' AND \(waits("j.value")) ELSE 0 END) ORDER BY since LIMIT 1"
+        let bindings: [ReadOnlySQLite.Value] = [.text(session), .integer(cutoff)]
+        if let row = try db.rows(inline, bindings: bindings, maximumColumnBytes: 1_024).first {
             return (true, row.first.flatMap { OpenCodeDatabase.moment($0) })
         }
         guard parts else { return (false, nil) }
         let current = "(SELECT id FROM session_message WHERE session_id = ?1 AND type = 'assistant' ORDER BY seq DESC LIMIT 1)"
-        let stored = "SELECT coalesce(json_extract(sp.data, '$.time.ran'), json_extract(sp.data, '$.time.created')) FROM session_part sp WHERE sp.session_id = ?1 AND sp.type = 'tool' AND sp.message_id = \(current) AND (CASE WHEN json_valid(sp.data) THEN json_extract(sp.data, '$.name') = 'question' AND json_extract(sp.data, '$.state.status') = 'running' ELSE 0 END) LIMIT 1"
-        if let row = try db.rows(stored, bindings: [.text(session)], maximumColumnBytes: 1_024).first {
+        let stored = "SELECT \(since("sp.data")) AS since FROM session_part sp WHERE sp.session_id = ?1 AND sp.type = 'tool' AND sp.message_id = \(current) AND (CASE WHEN json_valid(sp.data) THEN \(waits("sp.data")) ELSE 0 END) ORDER BY since LIMIT 1"
+        if let row = try db.rows(stored, bindings: bindings, maximumColumnBytes: 1_024).first {
             return (true, row.first.flatMap { OpenCodeDatabase.moment($0) })
         }
         return (false, nil)
