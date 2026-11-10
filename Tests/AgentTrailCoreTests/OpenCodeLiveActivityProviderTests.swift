@@ -123,6 +123,48 @@ final class OpenCodeLiveActivityProviderTests: XCTestCase {
         XCTAssertEqual(due.sessions.first { $0.sessionID == "ses_write" }?.status, .waiting)
     }
 
+    /// A denied approval or a dismissed question ends the turn, but OpenCode
+    /// records the interrupt as a shutdown and never marks the session idle
+    /// (seen on 2.2.7: still busy minutes after a Deny, no idle message).
+    func testATurnEndedByADenialLeavesTheLiveList() throws {
+        let f = try OpenCodeFixture()
+        defer { f.remove() }
+        try f.createV2()
+        func ended(_ type: String, _ items: [[String: Any]], completed: TimeInterval) -> [String: Any] {
+            var data = f.assistant(items, created: recent, completed: completed)
+            data["finish"] = "error"
+            data["error"] = ["type": type, "message": "Step interrupted"]
+            return data
+        }
+        let denied = f.tool("call_d", "write", status: "error", ran: recent, completed: recent + 3)
+        // Denied during this turn: still marked busy, but nothing runs.
+        try f.session("ses_denied", directory: f.project, created: 0, busy: recent)
+        try f.message("msg_d", session: "ses_denied", seq: 1, created: recent,
+                      data: ended("aborted", [denied], completed: recent + 3))
+        // Denied in the last turn; the next prompt has started a new one.
+        try f.session("ses_next", directory: f.project, created: 0, busy: recent + 4)
+        try f.message("msg_n1", session: "ses_next", seq: 1, created: recent,
+                      data: ended("aborted", [denied], completed: recent + 3))
+        try f.message("msg_n2", session: "ses_next", type: "user", seq: 2, created: recent + 4, data: f.user(created: recent + 4))
+        // A step that failed another way is not a denial.
+        try f.session("ses_failed", directory: f.project, created: 0, busy: recent)
+        try f.message("msg_f", session: "ses_failed", seq: 1, created: recent,
+                      data: ended("provider", [], completed: recent + 3))
+        // An aborted step that is not the newest one.
+        try f.session("ses_later", directory: f.project, created: 0, busy: recent)
+        try f.message("msg_l1", session: "ses_later", seq: 1, created: recent,
+                      data: ended("aborted", [denied], completed: recent + 3))
+        try f.message("msg_l2", session: "ses_later", seq: 2, created: recent + 3, data: f.assistant([
+            f.tool("call_l", "read", status: "running", ran: recent + 8)], created: recent + 3))
+        let registration = try register(f)
+        let snapshot = provider(f, registration: registration).scan(sources: [f.source])
+        let statuses = Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.sessionID, $0.status) })
+        XCTAssertEqual(statuses, ["ses_next": .working, "ses_failed": .working, "ses_later": .working])
+        // The desktop app lists every session, so it is each one's host.
+        XCTAssertEqual(Set(snapshot.sessions.compactMap(\.details.hostBundleID)), ["ai.opencode.desktop"])
+        XCTAssertEqual(snapshot.sessions.filter { $0.details.startedInTerminal }, [])
+    }
+
     func testDeadReusedAndStaleServicesShowNothing() throws {
         let f = try OpenCodeFixture()
         defer { f.remove() }

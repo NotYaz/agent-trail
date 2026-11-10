@@ -22,8 +22,14 @@ import Foundation
 /// finish in well under a second; only a slow code formatter, which OpenCode
 /// runs inside `edit`, `write` and `patch`, keeps them running longer. Shell
 /// and subagent calls run for minutes, so their approvals stay Working.
+/// Denying an approval or dismissing a question ends the turn, but OpenCode
+/// records that interrupt as a shutdown and never marks the session idle, so a
+/// session whose newest step ended aborted during the current turn is left out
+/// until the next prompt starts a new turn.
 /// Sessions that are not executing are not listed: nothing on disk says a
-/// client has them open. Nothing is inferred from file times, and OpenCode 1.x
+/// client has them open. Each session names the OpenCode desktop app as its
+/// host, since that app lists every session in the service; it has no link to
+/// one session, so Jump can only bring it forward. Nothing is inferred from file times, and OpenCode 1.x
 /// (no service) has no live status. Only the default data folder is read,
 /// because the service registers under the default state folder.
 ///
@@ -47,9 +53,17 @@ public final class OpenCodeLiveActivityProvider {
     /// The service registers itself just after starting; this allows for clock rounding.
     static let registrationSlack: TimeInterval = 2
     /// How long a quick file call runs before it counts as waiting for approval.
+    ///
+    /// NOTE(notifications): this wait is inferred, not reported by OpenCode,
+    /// and a slow code formatter can trip it. Before Needs input sends
+    /// notifications, decide whether an inferred wait may notify at all, or
+    /// only after a longer wait; then revisit this delay (5 s plus the 3 s
+    /// live check was confirmed acceptable for the badge on 2026-11-10).
     static let approvalDelay: TimeInterval = 5
     /// Calls that finish in well under a second unless an approval holds them.
     static let approvalTools = ["edit", "write", "patch", "read"]
+    /// OpenCode's desktop app, which lists every session in the service.
+    static let desktopBundleID = "ai.opencode.desktop"
 
     /// `otherServers` lists this user's OpenCode servers other than the shared
     /// service, by PID with their start times in microseconds, or nil when
@@ -100,7 +114,7 @@ public final class OpenCodeLiveActivityProvider {
                 let stateSince = reported == .waiting ? (busy.waitingSince ?? busy.busySince) : busy.busySince
                 sessions.append(LiveAgentSession(sourceID: source.id, projectPath: busy.workspace,
                     workspacePath: busy.workspace, sessionID: busy.id, status: reported,
-                    updatedAt: stateSince, pid: service.pid, details: LiveSessionDetails(stateSince: stateSince)))
+                    updatedAt: stateSince, pid: service.pid, details: LiveSessionDetails(stateSince: stateSince, hostBundleID: Self.desktopBundleID)))
             }
             seen = attributed
         }
@@ -241,6 +255,7 @@ public final class OpenCodeLiveActivityProvider {
                   let workspace = CheckoutPath.absolute(raw), let busySince = OpenCodeDatabase.moment(row[2]),
                   busySince <= now.addingTimeInterval(5) else { continue }
             if events, try stoppedByShutdown(db, session: id) { continue }
+            if try endedAborted(db, session: id, busySince: row[2].int) { continue }
             let waiting = try waitingStep(db, session: id, parts: parts, now: now)
             result.append(Busy(id: id, workspace: workspace, busySince: busySince, waiting: waiting.open,
                                waitingSince: waiting.since))
@@ -258,6 +273,19 @@ public final class OpenCodeLiveActivityProvider {
         guard let row = try db.rows(sql, bindings: [.text(session)], maximumColumnBytes: 1_024).first, row.count == 2,
               let type = row[0].string else { return false }
         return type.hasPrefix("session.execution.interrupted") && row[1].string == "shutdown"
+    }
+
+    /// Whether the session's newest step ended aborted during the current turn
+    /// (completed no earlier than `busySince`). A denied approval or a dismissed
+    /// question interrupts the step that way and ends the turn, but OpenCode
+    /// treats the interrupt as a shutdown and never records the session as
+    /// idle, so it still looks busy. The next prompt starts a new turn with a
+    /// later `time_busy`, which shows again.
+    static func endedAborted(_ db: ReadOnlySQLite, session: String, busySince: Int64?) throws -> Bool {
+        guard let busySince else { return false }
+        let latest = "(SELECT max(seq) FROM session_message WHERE session_id = ?1 AND type = 'assistant')"
+        let sql = "SELECT 1 FROM session_message WHERE session_id = ?1 AND type = 'assistant' AND seq = \(latest) AND (CASE WHEN json_valid(data) THEN json_extract(data, '$.finish') = 'error' AND json_extract(data, '$.error.type') = 'aborted' AND json_extract(data, '$.time.completed') >= ?2 ELSE 0 END) LIMIT 1"
+        return try !db.rows(sql, bindings: [.text(session), .integer(busySince)], maximumColumnBytes: 64).isEmpty
     }
 
     /// Whether the session's current step waits for the user, and since when:
