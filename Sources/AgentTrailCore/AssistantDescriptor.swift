@@ -96,6 +96,15 @@ extension AssistantKind {
                 userDataNote: "Copilot Chat sessions are read from this VS Code folder, and Copilot CLI sessions from the home above. With the default ~/.copilot home, leave it blank to read VS Code's default folder; with another home, enter the VS Code folder whose chats to read. Insiders uses ~/Library/Application Support/Code - Insiders.",
                 reportsDelegation: true, delegationOrigin: "a Copilot subagent",
                 editEvidence: "Copilot's applied edit and create-file calls", worktreeFolder: nil)
+        case .opencode:
+            // The profile's folder is OpenCode's data folder, which holds opencode.db.
+            return AssistantDescriptor(kind: self, displayName: "OpenCode", homeTitle: "OpenCode data folder",
+                homeFolder: ".local/share/opencode", homeEnvironmentVariable: nil, hosting: .appOrTerminal,
+                defaultBundleIdentifier: "", requiresBundleIdentifier: false,
+                usesUserDataDirectory: false, defaultUserDataDirectory: nil, requiresUserDataDirectory: false,
+                userDataTitle: nil, userDataPlaceholder: nil, userDataNote: nil,
+                reportsDelegation: true, delegationOrigin: "an OpenCode subagent",
+                editEvidence: "OpenCode's completed edit, write and patch calls", worktreeFolder: nil)
         }
     }
 
@@ -136,6 +145,7 @@ extension ClaudeActivityProvider: HistoryAdapter {}
 extension CodexActivityProvider: HistoryAdapter {}
 extension GrokActivityProvider: HistoryAdapter {}
 extension CopilotActivityProvider: HistoryAdapter {}
+extension OpenCodeActivityProvider: HistoryAdapter {}
 
 /// Builds each assistant's readers. One exhaustive switch per reader kind, so
 /// a new assistant cannot be left out of scans, cache flushes or live status.
@@ -146,6 +156,7 @@ enum AssistantRegistry {
         case .codex: return CodexActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .grok: return GrokActivityProvider(cacheURL: cacheURL, resolver: resolver)
         case .copilot: return CopilotActivityProvider(cacheURL: cacheURL, resolver: resolver)
+        case .opencode: return OpenCodeActivityProvider(cacheURL: cacheURL, resolver: resolver)
         }
     }
 
@@ -163,6 +174,9 @@ enum AssistantRegistry {
             return { reader.scan(sources: $0, now: $1) }
         case .copilot:
             let reader = CopilotLiveActivityProvider()
+            return { reader.scan(sources: $0, now: $1) }
+        case .opencode:
+            let reader = OpenCodeLiveActivityProvider()
             return { reader.scan(sources: $0, now: $1) }
         }
     }

@@ -55,7 +55,7 @@ final class AssistantRegistryTests: XCTestCase {
         XCTAssertEqual(AssistantKind.listed(["A"]), "A")
         XCTAssertEqual(AssistantKind.listed(["A", "B"], conjunction: "or"), "A or B")
         XCTAssertEqual(AssistantKind.listed(["A", "B", "C"]), "A, B, and C")
-        XCTAssertEqual(AssistantKind.listedNames(), "Claude, Codex, Grok, and Copilot")
+        XCTAssertEqual(AssistantKind.listedNames(), "Claude, Codex, Grok, Copilot, and OpenCode")
     }
 
     func testStatsIndexReadsDelegationFromDescriptor() {
