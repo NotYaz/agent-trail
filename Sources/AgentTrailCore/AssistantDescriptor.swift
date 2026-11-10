@@ -192,8 +192,8 @@ enum AssistantRegistry {
             let reader = OpenCodeLiveActivityProvider()
             return { reader.scan(sources: $0, now: $1) }
         case .cursor:
-            // Cursor records no process per chat, and its saved chat state lags.
-            return nil
+            let reader = CursorLiveActivityProvider()
+            return { reader.scan(sources: $0, now: $1) }
         }
     }
 
