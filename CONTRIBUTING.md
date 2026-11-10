@@ -66,7 +66,15 @@ Do not add telemetry or network requests to the indexing path. Do not quit, rest
 
 ## Add an assistant adapter
 
-`Sources/AgentTrailCore/Models.swift` defines `ActivityProvider`, `ProjectActivity`, and project aggregation. `CompositeActivityProvider` routes each profile by `AssistantKind` and merges projects that share a canonical folder. The current readers are:
+`Sources/AgentTrailCore/Models.swift` defines `ActivityProvider`, `ProjectActivity`, and project aggregation. `CompositeActivityProvider` routes each profile by `AssistantKind` and merges projects that share a canonical folder.
+
+A new assistant needs three pieces, and the compiler asks for each one:
+
+1. A case in `AssistantKind` and its `AssistantDescriptor` in `AssistantDescriptor.swift`: name, home folder and its environment variable, how sessions are hosted (desktop app, app or terminal, terminal), the app to focus, whether it reports delegated edits, its in-project worktree folder, and the one-line edit definition Growth shows. Shared code reads these fields where they apply. A few paths still name their assistant, so review them when you add one: Claude Desktop and Codex thread links (`SessionLauncher.jump`), Claude's two-folder process match (`ProcessIdentity.matches`), and Claude's default desktop folder and its message (`ProfileConfiguration.validate`).
+2. A `HistoryAdapter`: discover sessions, record evidence as `HistorySession` values, and fold them with `HistoryFold`. `HistoryCache` keeps the versioned per-file cache, and `JSONLTail` reads append-only logs incrementally.
+3. An entry in `AssistantRegistry` for the history adapter, and for a live reader if the assistant's live state can be read.
+
+The current readers are:
 
 - `ClaudeActivityProvider` reads desktop session metadata and transcript JSONL. A successful `Edit` or `Write` tool result is one edit. Claude live status stays in `LiveActivityProvider`; `CompositeLiveActivityProvider` routes each assistant to its own runtime reader.
 - `CodexActivityProvider` reads `rollout-*.jsonl` under `sessions/` and `archived_sessions/` in the profile’s configured home (default `~/.codex`). A completed `FileChange` item is one edit. The project is `session_meta` `cwd`. Known roots are that cwd plus `runtime_workspace_roots`. A turn cwd outside those roots drops the edit. Do not decompress `.jsonl.zst`, and do not count `apply_patch` unless a completed `FileChange` is present. Do not read `history.jsonl`, `session_index.jsonl`, or SQLite for edit attribution. `CodexLiveActivityProvider` may read turn metadata from SQLite strictly read-only, and only for threads with a current writer handle held by a verified app-server.

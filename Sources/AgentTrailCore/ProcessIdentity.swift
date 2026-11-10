@@ -6,10 +6,21 @@ import Foundation
 public struct ProcessIdentity: Sendable {
     public let executablePath: String
     public let arguments: [String]
-    public let claudeConfigDirectory: String?
     public let userDataDirectory: String?
-    public let codexHome: String?
-    public let grokHome: String?
+    /// Home-moving variables (`AssistantDescriptor.homeEnvironmentVariable`)
+    /// the process was started with, by name.
+    public let homes: [String: String]
+
+    public var claudeConfigDirectory: String? { homes["CLAUDE_CONFIG_DIR"] }
+    public var codexHome: String? { homes["CODEX_HOME"] }
+    public var grokHome: String? { homes["GROK_HOME"] }
+
+    public init(executablePath: String, arguments: [String], userDataDirectory: String?, homes: [String: String]) {
+        self.executablePath = executablePath
+        self.arguments = arguments
+        self.userDataDirectory = userDataDirectory
+        self.homes = homes
+    }
 
     /// Parses the native macOS layout: argc, executable, padding, argv, environment.
     /// Truncated records and conflicting or empty profile overrides fail closed.
@@ -40,23 +51,13 @@ public struct ProcessIdentity: Sendable {
             arguments.append(argument)
         }
 
-        let claudePrefix = Array("CLAUDE_CONFIG_DIR=".utf8)
-        let codexPrefix = Array("CODEX_HOME=".utf8)
-        let grokPrefix = Array("GROK_HOME=".utf8)
-        var configDirectory: String?
-        var codexHome: String?
-        var grokHome: String?
+        let prefixes = AssistantKind.homeEnvironmentVariables.map { ($0, Array("\($0)=".utf8)) }
+        var homes: [String: String] = [:]
         while cursor < bytes.count, bytes[cursor] != 0 {
             guard let entry = readCString() else { return nil }
-            if entry.starts(with: claudePrefix) {
-                guard configDirectory == nil, let value = environmentValue(entry, prefix: claudePrefix) else { return nil }
-                configDirectory = value
-            } else if entry.starts(with: codexPrefix) {
-                guard codexHome == nil, let value = environmentValue(entry, prefix: codexPrefix) else { return nil }
-                codexHome = value
-            } else if entry.starts(with: grokPrefix) {
-                guard grokHome == nil, let value = environmentValue(entry, prefix: grokPrefix) else { return nil }
-                grokHome = value
+            for (name, prefix) in prefixes where entry.starts(with: prefix) {
+                guard homes[name] == nil, let value = environmentValue(entry, prefix: prefix) else { return nil }
+                homes[name] = value
             }
         }
 
@@ -79,9 +80,7 @@ public struct ProcessIdentity: Sendable {
             index += 1
         }
         return ProcessIdentity(executablePath: executable, arguments: arguments,
-                               claudeConfigDirectory: configDirectory,
-                               userDataDirectory: userDataDirectory,
-                               codexHome: codexHome, grokHome: grokHome)
+                               userDataDirectory: userDataDirectory, homes: homes)
     }
 
     private static func environmentValue(_ entry: [UInt8], prefix: [UInt8]) -> String? {
@@ -253,19 +252,13 @@ public struct ProcessIdentity: Sendable {
     }
 
     /// Compare the directories that identify this assistant. Claude still requires
-    /// both its config directory and desktop data folder. Codex and Grok match
+    /// both its config directory and desktop data folder. Other assistants match
     /// only their own home variable, or the default home when that variable is absent.
     public func matches(source: AgentSource, homeDirectory: String = NSHomeDirectory()) -> Bool {
-        switch source.assistant {
-        case .claude:
-            return matchesClaude(source, homeDirectory: homeDirectory)
-        case .codex:
-            return matchesHome(recorded: codexHome, configured: source.configDirectory,
-                defaultHome: "\(homeDirectory)/.codex")
-        case .grok:
-            return matchesHome(recorded: grokHome, configured: source.configDirectory,
-                defaultHome: "\(homeDirectory)/.grok")
-        }
+        let descriptor = source.assistant.descriptor
+        if source.assistant == .claude { return matchesClaude(source, homeDirectory: homeDirectory) }
+        return matchesHome(recorded: descriptor.homeEnvironmentVariable.flatMap { homes[$0] },
+            configured: source.configDirectory, defaultHome: descriptor.defaultHome(home: homeDirectory))
     }
 
     private func matchesClaude(_ source: AgentSource, homeDirectory: String) -> Bool {

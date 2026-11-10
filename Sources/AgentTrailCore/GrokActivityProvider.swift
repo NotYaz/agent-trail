@@ -10,12 +10,7 @@ import Foundation
 /// only, so learned project locations never force a reparse.
 public final class GrokActivityProvider: ActivityProvider {
     static let cacheVersion = 4
-    private let cacheURL: URL?
-    private var cache: [String: GrokFile] = [:]
-    /// True when `cache` differs from the saved file.
-    private var cacheDirty = false
-    private var lastCacheSave = Date.distantPast
-    private var cacheLoadNotice: String?
+    private let cache: HistoryCache<GrokFile>
     private let files = FileManager.default
     private let resolver: GitProjectResolver
     private let ownsResolver: Bool
@@ -31,30 +26,16 @@ public final class GrokActivityProvider: ActivityProvider {
 
     /// A shared resolver is reset by its owner once per scan.
     init(cacheURL: URL?, resolver: GitProjectResolver, ownsResolver: Bool = false) {
-        self.cacheURL = cacheURL
+        cache = HistoryCache(url: cacheURL, version: Self.cacheVersion, name: "Grok")
         self.resolver = resolver
         self.ownsResolver = ownsResolver
-        guard let cacheURL, files.fileExists(atPath: cacheURL.path) else { return }
-        do {
-            let data = try Data(contentsOf: cacheURL)
-            let header = try JSONDecoder().decode(GrokCacheHeader.self, from: data)
-            if header.version == Self.cacheVersion {
-                cache = try JSONDecoder().decode(GrokSavedCache.self, from: data).files
-            } else {
-                cacheLoadNotice = "Grok edit history is being rebuilt once for the current indexer."
-                cacheDirty = true
-            }
-        } catch {
-            cacheLoadNotice = "The Grok activity cache could not be read; change history will be rebuilt."
-            cacheDirty = true
-        }
     }
 
     public func metadata(sources: [AgentSource]) -> ScanResult {
         if ownsResolver { resolver.reset() }
         let discovered = discover(sources: sources)
         // Reuse cached edit evidence so sessions land where the last scan put them.
-        return result(sessions: discovered.sessions, parsed: cache, includeEdits: true, extraNotices: discovered.notices)
+        return result(sessions: discovered.sessions, parsed: cache.files, includeEdits: true, extraNotices: discovered.notices)
     }
 
     public func scan(sources: [AgentSource]) -> ScanResult {
@@ -65,8 +46,7 @@ public final class GrokActivityProvider: ActivityProvider {
         if ownsResolver { resolver.reset() }
         let discovered = discover(sources: sources)
         let sessions = discovered.sessions
-        var notices = discovered.notices + (cacheLoadNotice.map { [$0] } ?? [])
-        cacheLoadNotice = nil
+        var notices = discovered.notices + (cache.takeLoadNotice().map { [$0] } ?? [])
         var parsed: [String: GrokFile] = [:]
         let tasks = sessions.flatMap { session in session.updates.map { (session, $0) } }
         var lastProgress = Date.distantPast
@@ -86,8 +66,7 @@ public final class GrokActivityProvider: ActivityProvider {
                     parse(line, file: file)
                 }
                 // Parsed evidence changes only with the tail, so an unchanged tail needs no save.
-                if changed || file.tail != before { cacheDirty = true }
-                cache[task.1.path] = file
+                cache.store(file, at: task.1.path, changed: changed || file.tail != before)
                 parsed[task.1.path] = file
                 if file.tail.malformedLines > 0 {
                     notices.append("\(task.0.source.name): skipped unreadable records in a Grok session history.")
@@ -104,15 +83,8 @@ public final class GrokActivityProvider: ActivityProvider {
                 lastProgress = Date()
             }
         }
-        let active = Set(tasks.map { $0.1.path })
-        let kept = cache.filter { active.contains($0.key) }
-        if kept.count != cache.count {
-            cache = kept
-            cacheDirty = true
-        }
-        if Date().timeIntervalSince(lastCacheSave) >= historyCacheSaveInterval, let notice = saveCache() {
-            notices.append(notice)
-        }
+        cache.prune(keeping: Set(tasks.map { $0.1.path }))
+        if let notice = cache.saveIfDue() { notices.append(notice) }
         return result(sessions: sessions, parsed: parsed, includeEdits: true, extraNotices: notices)
     }
 
@@ -120,18 +92,7 @@ public final class GrokActivityProvider: ActivityProvider {
     /// notice when it could not be saved; a later scan tries again.
     @discardableResult
     public func saveCache() -> String? {
-        guard cacheDirty, let cacheURL else { return nil }
-        do {
-            try files.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(GrokSavedCache(version: Self.cacheVersion, files: cache))
-            try data.write(to: cacheURL, options: .atomic)
-            try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
-            cacheDirty = false
-            lastCacheSave = Date()
-            return nil
-        } catch {
-            return "The Grok activity cache could not be saved; the next launch may reindex change history."
-        }
+        cache.save()
     }
 
     private struct GrokSession {
@@ -295,10 +256,3 @@ private final class GrokFile: Codable {
         edits = [:]
     }
 }
-
-private struct GrokSavedCache: Codable {
-    var version: Int
-    var files: [String: GrokFile]
-}
-
-private struct GrokCacheHeader: Decodable { let version: Int }
