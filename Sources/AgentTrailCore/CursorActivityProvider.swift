@@ -7,7 +7,12 @@ import Foundation
 /// `User/globalStorage/state.vscdb`, a SQLite database Cursor keeps open while
 /// it runs. Its `cursorDiskKV` table holds `composerData:<id>`, one chat with
 /// its ordered bubble list `fullConversationHeadersOnly`, and
-/// `bubbleId:<id>:<bubble>`, one message or tool call. `cursorDiskKV` and
+/// `bubbleId:<id>:<bubble>`, one message or tool call. Cursor 3.29 (chat
+/// version 18) leaves that list empty and keeps it instead in pages,
+/// `composerConvHeaders:<id>:<page>` (`000000` first), each a JSON array of
+/// the same headers; its bubble ids may carry a `/s:<n>` or `/t:<call id>`
+/// suffix, and a call id can hold a newline. A chat with
+/// pages is read from its pages. `cursorDiskKV` and
 /// `ItemTable` are queried by key and key range only. The `composerHeaders`
 /// table has no key range and is read in full. Every value is reduced with
 /// `json_extract` inside SQLite (a header to its folder, parent, times and
@@ -292,6 +297,23 @@ public final class CursorActivityProvider: ActivityProvider {
 
     static func isSafeID(_ id: String) -> Bool {
         !id.isEmpty && id.count <= 128 && id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
+    }
+
+    /// Whether `composerSQL`'s header-page summary, `[count, first, last,
+    /// length]`, lists at least one bubble.
+    static func pagesListBubbles(_ summary: String?) -> Bool {
+        guard let summary, let values = (try? JSONSerialization.jsonObject(with: Data(summary.utf8))) as? [Any],
+              values.count == 4, let count = values[0] as? NSNumber, count.intValue > 0 else { return false }
+        return values[1] is String
+    }
+
+    /// A bubble id. Cursor 3.29 names a reply's steps `<uuid>/s:<n>` and its
+    /// tool calls `<uuid>/t:<toolCallId>`, and a tool call id can hold a
+    /// newline (`call-<uuid>-0` and `fc_<uuid>_0` on two lines). Bubble ids
+    /// are only bound as SQL parameters and used as cache keys, never as
+    /// paths, so any visible ASCII character or a newline is accepted.
+    static func isSafeBubbleID(_ id: String) -> Bool {
+        !id.isEmpty && id.utf8.count <= 256 && id.unicodeScalars.allSatisfy { $0 == "\n" || (0x21...0x7E).contains($0.value) }
     }
 
     static func composerKey(_ database: URL, _ id: String) -> String {
@@ -588,7 +610,12 @@ public final class CursorActivityProvider: ActivityProvider {
             let fields = ComposerFields(values)
             let header = headers[id]
             let placement = place(fields, header: header, id: id, context: &context)
-            let fingerprint = Self.hash([text])
+            // Header pages (Cursor 3.29) stand in for the inline list. A chat
+            // without pages keeps the fingerprint it had before pages existed.
+            let pages = row.count > 1 ? row[1].string : nil
+            let paged = Self.pagesListBubbles(pages)
+            let hasBubbles = fields.hasBubbles || paged
+            let fingerprint = paged ? Self.hash([text, pages ?? ""]) : Self.hash([text])
             let file = cached ?? CursorFile()
             let before = file.composer
             var composer = before ?? CursorComposer()
@@ -608,11 +635,11 @@ public final class CursorActivityProvider: ActivityProvider {
             composer.parent = fields.parent ?? header?.parent
             composer.created = fields.created ?? header?.created
             composer.updated = [fields.updated, header?.updated].compactMap { $0 }.max()
-            composer.hasHeaders = fields.hasBubbles
+            composer.hasHeaders = hasBubbles
             if skipped != nil {
                 composer.fingerprint = fingerprint
                 composer.length = chat.length
-            } else if !fields.hasBubbles {
+            } else if !hasBubbles {
                 // An emptied chat (a draft, or one cleared) is no session.
                 composer.resetBubbles()
                 composer.fingerprint = fingerprint
@@ -889,8 +916,19 @@ public final class CursorActivityProvider: ActivityProvider {
         var blocks: [String: CursorBlockProof] = [:]
         var created: Set<String> = []
         do {
-            for row in try reader.rows(Self.bubbleListSQL, bindings: [dataKey], maximumColumnBytes: 4_096, deadline: deadline) {
-                if let id = row.first?.string, Self.isSafeID(id) { ids.append(id) }
+            // A chat with header pages (Cursor 3.29) lists its bubbles there; its
+            // inline list is empty.
+            let pageRange: [ReadOnlySQLite.Value] = [.text("composerConvHeaders:\(task.id):"),
+                                                      .text("composerConvHeaders:\(task.id);")]
+            for row in try reader.rows(Self.pagedBubbleListSQL, bindings: pageRange, maximumColumnBytes: 4_096,
+                                       deadline: deadline) {
+                if let id = row.first?.string, Self.isSafeBubbleID(id) { ids.append(id) }
+            }
+            if ids.isEmpty {
+                for row in try reader.rows(Self.bubbleListSQL, bindings: [dataKey], maximumColumnBytes: 4_096,
+                                           deadline: deadline) {
+                    if let id = row.first?.string, Self.isSafeBubbleID(id) { ids.append(id) }
+                }
             }
             let blockRows = try reader.rows(Self.codeBlockSQL, bindings: [dataKey], maximumColumnBytes: 65_536, deadline: deadline)
             for row in blockRows where row.count == 5 {
@@ -1116,11 +1154,26 @@ public final class CursorActivityProvider: ActivityProvider {
         """
 
     /// One small JSON array per chat. `ComposerFields` reads it by position.
+    /// The third column summarizes the chat's header pages (Cursor 3.29):
+    /// their count, the first page's first and the last page's last bubble id,
+    /// and the last page's length, so a page change changes the fingerprint
+    /// the way the inline list's first and last ids do. Each page is looked up
+    /// by key range.
     static let composerSQL = """
         SELECT k, json_extract(v, '$.createdAt', '$.lastUpdatedAt', '$.conversationCheckpointLastUpdatedAt', '$.status',
             '$._v', '$.fullConversationHeadersOnly[0].bubbleId', '$.fullConversationHeadersOnly[#-1].bubbleId',
             '$.workspaceIdentifier', '$.agentLocation.environment.uri', '$.trackedGitRepos[0].repoPath',
-            '$.gitWorktree.worktreePath', '$.subagentInfo.parentComposerId', '$.unifiedMode', '$.createdFromBackgroundAgent')
+            '$.gitWorktree.worktreePath', '$.subagentInfo.parentComposerId', '$.unifiedMode', '$.createdFromBackgroundAgent'),
+            (SELECT json_array(
+                (SELECT count(*) FROM cursorDiskKV AS c WHERE c.key >= p.lo AND c.key < p.hi),
+                (SELECT CASE WHEN json_valid(CAST(c.value AS TEXT)) THEN json_extract(CAST(c.value AS TEXT), '$[0].bubbleId') END
+                    FROM cursorDiskKV AS c WHERE c.key >= p.lo AND c.key < p.hi ORDER BY c.key LIMIT 1),
+                (SELECT CASE WHEN json_valid(CAST(c.value AS TEXT)) THEN json_extract(CAST(c.value AS TEXT), '$[#-1].bubbleId') END
+                    FROM cursorDiskKV AS c WHERE c.key >= p.lo AND c.key < p.hi ORDER BY c.key DESC LIMIT 1),
+                (SELECT CASE WHEN json_valid(CAST(c.value AS TEXT)) THEN json_array_length(CAST(c.value AS TEXT)) END
+                    FROM cursorDiskKV AS c WHERE c.key >= p.lo AND c.key < p.hi ORDER BY c.key DESC LIMIT 1))
+             FROM (SELECT 'composerConvHeaders:' || substr(k, 14) || ':' AS lo,
+                          'composerConvHeaders:' || substr(k, 14) || ';' AS hi) AS p)
         FROM (SELECT key AS k, CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key IN (%KEYS%))
         """
 
@@ -1129,6 +1182,14 @@ public final class CursorActivityProvider: ActivityProvider {
         SELECT json_extract(e.value, '$.bubbleId')
         FROM cursorDiskKV AS kv, json_each(CAST(kv.value AS TEXT), '$.fullConversationHeadersOnly') AS e
         WHERE kv.key = ? AND e.type = 'object' ORDER BY e.key
+        """
+
+    /// The bubble ids a chat's header pages list (Cursor 3.29), in page order
+    /// then position. Bound to the chat's page key range.
+    static let pagedBubbleListSQL = """
+        SELECT json_extract(e.value, '$.bubbleId')
+        FROM cursorDiskKV AS kv, json_each(CAST(kv.value AS TEXT)) AS e
+        WHERE kv.key >= ? AND kv.key < ? AND e.type = 'object' ORDER BY kv.key, e.key
         """
 
     /// Applied code blocks (Cursor 2.x): block id, file URI, diff id, apply time, status.

@@ -309,6 +309,70 @@ final class CursorActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "child" }?.parentSessionID, "parent")
     }
 
+    /// Cursor 3.29 (chat version 18, seen on 3.29.15) leaves
+    /// `fullConversationHeadersOnly` empty, keeps the bubble list in pages
+    /// (`composerConvHeaders:<id>:<page>`), and gives a reply's steps ids like
+    /// `<uuid>/s:<n>`.
+    func testCursor329HeaderPagesAndStepBubbleIDs() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        func path(_ name: String) -> String { f.project.appendingPathComponent(name).path }
+        func page(_ ids: [String]) -> [[String: Any]] { ids.map { ["bubbleId": $0, "type": $0 == "u1" ? 1 : 2] } }
+        let reply = "32cc6318-7541-4f85-8291-4a8035b33eaa"
+        // A tool call's bubble: the reply id, `/t:`, and the call id, which can span two lines.
+        func call(_ n: Int) -> String { "\(reply)/t:call-392d1910-8548-4e9a-b10b-a3e75682211\(n)-\(n)\nfc_a4c426e0-7994-9daf-949b-11d2a2b0db3\(n)_0" }
+        try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path)),
+                           ("c2", nil, f.head("c2", folder: f.project.path))])
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: [], created: 0, updated: 40, extra: ["_v": 18])),
+            ("composerConvHeaders:c1:000000", page(["u1", reply, "\(reply)/s:0", call(0), call(1)])),
+            ("composerConvHeaders:c1:000001", page([call(2), call(3)])),
+            ("bubbleId:c1:u1", f.userBubble("u1", at: 1)),
+            ("bubbleId:c1:\(reply)", f.textBubble(reply, at: 2)),
+            ("bubbleId:c1:\(reply)/s:0", f.textBubble("\(reply)/s:0", at: 3)),
+            ("bubbleId:c1:" + call(0), f.tool(call(0), name: "edit_file_v2", call: "tool_1", path: path("hello.txt"),
+                                                at: 10, result: f.applied())),
+            ("bubbleId:c1:" + call(1), f.tool(call(1), name: "run_terminal_command_v2", call: "tool_2", path: nil,
+                                                at: 11, result: ["rejected": false, "notInterrupted": true])),
+            // A delete on the agent backend leaves an empty result.
+            ("bubbleId:c1:" + call(2), f.tool(call(2), name: "delete_file", call: "tool_3", path: path("hello.txt"),
+                                                at: 12, result: [:], former: ["userDecision": "accepted"])),
+            ("bubbleId:c1:" + call(3), f.tool(call(3), name: "edit_file_v2", call: "tool_4", path: path("notes.md"),
+                                                at: 20, result: f.applied())),
+            // A subagent's chat has pages too, and names its parent.
+            ("composerData:c2", f.composer("c2", bubbles: [], created: 12, updated: 40, extra: [
+                "_v": 18, "subagentInfo": ["parentComposerId": "c1", "subagentType": 1, "conversationLengthAtSpawn": 4]])),
+            ("composerConvHeaders:c2:000000", page(["s1"])),
+            ("bubbleId:c2:s1", f.tool("s1", name: "edit_file_v2", call: "tool_5", path: path("sub/sub.txt"), at: 15,
+                                      result: f.applied()))
+        ])
+        let provider = f.provider()
+        var result = provider.scan(sources: [f.source])
+        var project = try XCTUnwrap(result.projects.first { $0.path == canonicalPath(f.project.path) })
+        XCTAssertEqual(project.recordedEditCount, 3)
+        XCTAssertEqual(project.activities.first?.editMoments.sorted { $0.date < $1.date },
+                       [EditMoment(date: f.date(10), delegated: false), EditMoment(date: f.date(15), delegated: true),
+                        EditMoment(date: f.date(20), delegated: false)])
+        XCTAssertEqual(result.sessionTrails.first { $0.sessionID == "c2" }?.parentSessionID, "c1")
+        XCTAssertEqual(result.notices, [])
+
+        // Cursor moves the header's lastUpdatedAt with each message (seen on
+        // 3.29.15); the chat's record stays byte for byte the same, and only
+        // its last page grows.
+        var head = f.head("c1", folder: f.project.path)
+        head["lastUpdatedAt"] = f.ms(50)
+        try f.headerTable([("c1", nil, head)])
+        try f.put([
+            ("composerConvHeaders:c1:000001", page([call(2), call(3), call(4)])),
+            ("bubbleId:c1:" + call(4), f.tool(call(4), name: "edit_file_v2", call: "tool_6", path: path("later.txt"),
+                                                at: 30, result: f.applied()))
+        ])
+        result = provider.scan(sources: [f.source])
+        project = try XCTUnwrap(result.projects.first { $0.path == canonicalPath(f.project.path) })
+        XCTAssertEqual(project.recordedEditCount, 4)
+        XCTAssertEqual(project.activities.first?.editMoments.map(\.date).max(), f.date(30))
+    }
+
     func testUnreadableBubbleIsReportedAndTheOthersStillCount() throws {
         let f = try CursorFixture()
         defer { f.remove() }
