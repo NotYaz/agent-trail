@@ -160,6 +160,7 @@ struct JumpContext {
 enum SessionLauncher {
     static let claudeBundleID = "com.anthropic.claudefordesktop"
     static let codexBundleID = "com.openai.codex"
+    static let cursorBundleID = "com.todesktop.230313mzl4w4u92"
 
     /// Detection order; the first installed app is the default choice.
     static let editorCatalog: [(bundleID: String, name: String)] = [
@@ -196,6 +197,10 @@ enum SessionLauncher {
         }
         if let source, source.assistant == .codex,
            openCodexThread(session, context: context, report: report) {
+            return
+        }
+        if let source, source.assistant == .cursor,
+           openCursorChat(session, context: context, report: report) {
             return
         }
         if let outcome = activateHost(of: session, source: source, context: context) {
@@ -268,6 +273,38 @@ enum SessionLauncher {
             report(recipient != nil ? .done : activateWithHint(app, context: context))
         }
         return true
+    }
+
+    /// A Cursor app chat opens with Cursor's own link in the one running
+    /// Cursor: `cursor://anysphere.cursor-deeplink/agent?id=<chat>` brings
+    /// Cursor forward and selects the chat in its Agents window (Cursor 3.29;
+    /// no link reaches an editor window's chat pane). With several Cursor
+    /// instances, or when the link can't be opened, Cursor is brought forward
+    /// instead. Returns false when this step does not apply.
+    private static func openCursorChat(_ session: LiveAgentSession, context: JumpContext,
+                                       report: @escaping (JumpOutcome) -> Void) -> Bool {
+        guard session.details.hostBundleID == cursorBundleID else { return false }
+        let running = runningApplications(cursorBundleID).filter { $0.activationPolicy == .regular }
+        guard running.count == 1, let app = running.first, let bundleURL = app.bundleURL,
+              let url = cursorChatURL(session.sessionID) else { return false }
+        openLink(url, in: bundleURL) { recipient in
+            report(recipient != nil ? .done : activateWithHint(app, context: context))
+        }
+        return true
+    }
+
+    /// `cursor://anysphere.cursor-deeplink/agent?id=<chat>` for a chat id of
+    /// ASCII letters, digits and `-` (Cursor's chat ids are UUIDs).
+    nonisolated static func cursorChatURL(_ id: String) -> URL? {
+        let bytes = Array(id.utf8)
+        guard (1...128).contains(bytes.count),
+              bytes.allSatisfy({ isASCIIAlphanumeric($0) || $0 == UInt8(ascii: "-") }) else { return nil }
+        var components = URLComponents()
+        components.scheme = "cursor"
+        components.host = "anysphere.cursor-deeplink"
+        components.path = "/agent"
+        components.queryItems = [URLQueryItem(name: "id", value: id)]
+        return components.url
     }
 
     /// Step 3: the app that owns the session (a terminal for Grok or terminal Claude, Claude
