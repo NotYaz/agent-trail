@@ -9,6 +9,8 @@ public enum AssistantKind: String, Codable, CaseIterable, Sendable {
     case copilot
     case opencode
     case cursor
+    case gemini
+    case qwen
 
     public var displayName: String { descriptor.displayName }
 
@@ -101,7 +103,7 @@ public struct ActivityDay: Identifiable, Codable, Equatable, Sendable {
 }
 
 /// One confirmed edit's completion time. `delegated` is true when the edit's earliest
-/// record came from a subagent or spawned thread (Claude, Codex, Copilot, OpenCode, Cursor). Grok never sets it.
+/// record came from a subagent or spawned thread (Claude, Codex, Copilot, OpenCode, Cursor, Gemini CLI, Qwen Code). Grok never sets it.
 public struct EditMoment: Hashable, Sendable {
     public var date: Date
     public var delegated: Bool

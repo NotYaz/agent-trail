@@ -309,8 +309,8 @@ enum SessionLauncher {
         return components.url
     }
 
-    /// Step 3: the app that owns the session (a terminal for Grok, the Copilot CLI or terminal
-    /// Claude, Claude Desktop when either runs in its terminal pane, an editor or the ChatGPT app
+    /// Step 3: the app that owns the session (a terminal for Grok, the Copilot CLI, Qwen Code or
+    /// terminal Claude, Claude Desktop when either runs in its terminal pane, an editor or the ChatGPT app
     /// for Codex, the OpenCode desktop app, or Cursor),
     /// when it is running.
     private static func activateHost(of session: LiveAgentSession, source: AgentSource?,

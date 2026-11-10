@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Gemini CLI.** A Gemini CLI profile reads its session files, and its projects share cards with the other assistants. History only. A `write_file` or `replace` call Gemini recorded as successful, with a result that shows the change, is one edit, and subagent edits count as delegated. Each session's folder comes from Gemini's own project records, checked against the hash the session stores. Sessions written under Gemini's macOS sandbox (`~/.cache/.gemini`) are read too. Gemini CLI deletes sessions after 30 days by default, and their history leaves Agent Trail with them.
+- **Qwen Code.** A Qwen Code profile reads the sessions of the `qwen` CLI, Qwen Code Desktop, and its editor integrations. A successful `edit`, `write_file`, or `notebook_edit` is one edit, subagent edits count as delegated, and records `/branch` copied count once. A running session shows on its card with its state unknown, since Qwen records none on disk; Jump brings its terminal forward.
+
 ## 0.1.0-alpha.14 — 2026-11-10
 
 - **GitHub Copilot.** A Copilot profile reads Copilot Chat in VS Code and the Copilot CLI (with the Copilot app and VS Code's Copilot CLI sessions, which write the same files), and their projects share cards with the other assistants.
