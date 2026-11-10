@@ -327,6 +327,8 @@ enum SessionLauncher {
     /// with its own terminal pane), the one the session process runs under.
     private static func enclosingInstance(of pid: pid_t, among apps: [NSRunningApplication]) -> NSRunningApplication? {
         guard apps.count > 1, pid > 0 else { return nil }
+        // The session process may be the app itself: a Cursor chat's is Cursor's.
+        if let app = apps.first(where: { $0.processIdentifier == pid }) { return app }
         var current = pid
         // claude → shell → Claude Helper → Claude is three steps; 16 bounds a loop.
         for _ in 0..<16 {
@@ -341,7 +343,8 @@ enum SessionLauncher {
                                          context: JumpContext) -> JumpOutcome {
         let name = app.localizedName ?? "the app"
         let isTerminal = app.bundleIdentifier.map { terminalBundleIDs.contains($0) } ?? false
-        let brought = isTerminal || inTerminal ? activate(app) : bringForward(app)
+        // By the app, not the session: `claude` in an editor's terminal pane still needs the editor forward.
+        let brought = isTerminal ? activate(app) : bringForward(app)
         guard brought else { return .failed("macOS did not accept the request to bring \(name) forward.") }
         // A terminal app's sessions are tabs; an editor's or Claude Desktop's are its terminal panes.
         let noun = isTerminal ? "tab" : inTerminal ? "terminal" : "session"
@@ -508,8 +511,12 @@ enum SessionLauncher {
     /// nothing (seen with Cursor 3.29), as can one aimed at an app whose
     /// windows are elsewhere. With several instances of the bundle running,
     /// LaunchServices could pick another one, so the chosen instance is
-    /// activated directly. This never launches an app: it runs only for an
-    /// app found running, and checks it again first.
+    /// activated directly. It runs only for an app found running and checks it
+    /// again first, so it does not launch one; an app that quits in the
+    /// instant before LaunchServices acts would be opened again, as a Dock
+    /// click would. Like a Dock click, it may open a window for an app that
+    /// has none showing. If LaunchServices fails, the app is activated
+    /// directly.
     private static func bringForward(_ app: NSRunningApplication) -> Bool {
         guard !app.isTerminated, let bundle = app.bundleURL, let id = app.bundleIdentifier,
               runningApplications(id).filter({ $0.activationPolicy == .regular }).count == 1,
@@ -519,7 +526,10 @@ enum SessionLauncher {
         configuration.addsToRecentItems = false
         NSApp.yieldActivation(to: app)
         guard !app.isTerminated else { return false }
-        NSWorkspace.shared.openApplication(at: bundle, configuration: configuration) { _, _ in }
+        NSWorkspace.shared.openApplication(at: bundle, configuration: configuration) { _, error in
+            guard error != nil else { return }
+            DispatchQueue.main.async { _ = activate(app) }
+        }
         return true
     }
 
