@@ -7,37 +7,41 @@ import Foundation
 /// Cursor marks a chat's run in the chat's record, `composerData:<id>` in the
 /// profile's `state.vscdb`. When you send a message it saves the chat with
 /// `unfinishedRunAt`, the time you sent it (its `status` then reads
-/// `aborted`, so a crash leaves an honest record); when the turn ends, or you
-/// press Stop or quit, it saves the chat again without it. A chat with
+/// `aborted`, so a crash leaves an honest record); when the turn ends or you
+/// press Stop, it saves the chat again without it (after a quit mid-turn, the
+/// relaunched Cursor does, within a minute). A chat with
 /// `unfinishedRunAt` is Working since that time. A chat is Needs input while
 /// its newest message is an `ask_question` call whose answer is still
 /// `pending`, or while its row in Cursor's chat-header table says
-/// `hasBlockingPendingActions` (a question or an approval waiting). A live
-/// trace on 3.29.15 and Cursor's code agree on all of this.
+/// `hasBlockingPendingActions` (a question or an approval waiting; Cursor
+/// sets it for an approval about 8 s after the prompt opens). A live trace on
+/// 3.29.15 and Cursor's code agree on all of this.
 ///
 /// Only runs since the profile's running Cursor app started count: an app
 /// that quit or crashed mid-turn left markers older than the app now running.
 /// That app is a launchd-parented `Cursor` process matched to the profile's
 /// data folder by `--user-data-dir`. The chats read are the most recently
-/// updated rows of the chat-header table, chats flagged there as waiting,
-/// chats shown on the last scan, and chats whose transcript changed since the
-/// app started; each is read by key and reduced inside SQLite. The database is
-/// read only in WAL mode (Cursor 3.29) and only while its `-wal` and `-shm`
-/// exist, as history reads it.
+/// updated main-chat rows of the chat-header table, chats shown on the last
+/// scan, and (capped) chats whose transcript changed or ends with a message;
+/// each is read by key and reduced inside SQLite. The database is read only
+/// while its `-wal` and `-shm` exist (lstat) and only in WAL mode, asked of
+/// SQLite; no file handle of ours touches it, since closing one would drop
+/// this process's SQLite locks on the file.
 ///
 /// Each chat's transcript, `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`
 /// (the app writes there whatever Cursor CLI home a profile names), ends with
-/// `{"type":"turn_ended",...}` when a turn ends; one written after a run
-/// started ends that run before the record is saved again. When the database
-/// can't be read on a scan, a transcript ending with your message, written
-/// since the app started, still shows a chat whose folder is known as
-/// Working. To find a transcript's last line the reader reads backwards from
+/// `{"type":"turn_ended",...}` when a turn ends; one written more than
+/// `endMargin` after a run was sent ends that run before the record is saved
+/// again. While the database is busy the last scan's report stays; when it
+/// can't be read, a transcript ending with a message line, written since the
+/// app started, shows a chat whose folder is known as Working. To find a transcript's last line the reader reads backwards from
 /// its end, so a prompt can pass through memory; only the line's first 32
 /// bytes are compared, nothing else is kept, and a transcript is read again
 /// only after its size or time changes.
 ///
 /// Not shown: subagent chats (their parent is Working while they run), cloud
-/// and background agents, remote and multi-root workspaces, and Cursor CLI
+/// and background agents (`createdFromBackgroundAgent`), remote and
+/// multi-root workspaces, and Cursor CLI
 /// sessions. A run orphaned by a window crash or reload while Cursor keeps
 /// running keeps its marker until Cursor saves that chat again, and stays
 /// Working until then. Nothing is written anywhere.
@@ -54,6 +58,24 @@ public final class CursorLiveActivityProvider {
     private var folders: [String: String] = [:]
     /// When a chat was first seen blocked, by profile and chat id: the flag records no time.
     private var blockedSince: [String: Date] = [:]
+    /// The last scan's report per profile, kept through a scan the database is busy for.
+    private var lastReport: [String: [Reported]] = [:]
+
+    struct Reported: Equatable {
+        let id: String
+        let status: LiveStatus
+        let since: Date
+        let folder: String
+    }
+
+    /// What `readStates` found.
+    enum ReadResult {
+        case states([String: ChatState])
+        /// Busy or past a deadline: try again next scan.
+        case busy
+        /// Not a WAL database with its `-wal` and `-shm` now, or unreadable.
+        case unavailable
+    }
 
     /// File times and process start times are compared with this much slack.
     static let clockSlack: TimeInterval = 2
@@ -62,9 +84,13 @@ public final class CursorLiveActivityProvider {
     /// How far back from a transcript's end the reader looks for the start of
     /// its last line before giving up on it.
     static let maximumLineScan = 1 << 20
-    /// How many recently updated chats one scan reads, besides chats already
-    /// shown, flagged, or with a changed transcript.
+    /// How many recently updated chats one scan reads, and at most how many
+    /// more it adds for transcripts that changed or end with a message.
     static let candidateLimit = 32
+    /// A transcript's `turn_ended` ends a run only when written this long
+    /// after the run was sent, so the previous turn's end line, landing just
+    /// after you send again, doesn't hide the new run.
+    static let endMargin: TimeInterval = 2
 
     /// A running Cursor app instance: its PID, start time in microseconds, and
     /// the data folder it was started with (`--user-data-dir`), if any.
@@ -88,6 +114,8 @@ public final class CursorLiveActivityProvider {
         /// `lastUpdatedAt`: when the latest turn was sent.
         var updatedAt: Int64?
         var isSubagent = false
+        /// A cloud or background agent's chat: its run is on Cursor's servers.
+        var isBackground = false
         var folder: String?
         var blocking = false
         /// The newest message's tool, and whether its answer is still pending.
@@ -116,6 +144,7 @@ public final class CursorLiveActivityProvider {
         var nextShown: [String: Set<String>] = [:]
         var nextFolders: [String: String] = [:]
         var nextBlocked: [String: Date] = [:]
+        var nextReport: [String: [Reported]] = [:]
         /// Chats whose folder stays remembered: a recent transcript, or shown.
         var keep: Set<String> = []
         for source in sources where source.assistant == .cursor {
@@ -126,40 +155,53 @@ public final class CursorLiveActivityProvider {
             let transcripts = recentTranscripts(since: since, now: now, seen: &seenLines)
             let key = { (id: String) in "\(source.id)\u{0}\(id)" }
             keep.formUnion(transcripts.keys.map(key))
-            var reported: [(id: String, status: LiveStatus, since: Date, folder: String)] = []
+            // Besides recently updated chats: chats shown last scan, then transcripts
+            // that changed or end with a message, newest first, capped.
+            let fresh = transcripts.filter { $0.value.changed || $0.value.kind == .message }
+                .sorted { $0.value.written > $1.value.written }.prefix(Self.candidateLimit).map(\.key)
+            let extra = Array(shown[source.id] ?? []).sorted() + fresh
+            var reported: [Reported] = []
             let database = data.appendingPathComponent("User/globalStorage/state.vscdb")
-            let extra = Set(transcripts.keys).union(shown[source.id] ?? [])
-            if let states = Self.readStates(database, since: sinceMs, extra: extra) {
-                for (id, state) in states where !state.isSubagent {
+            switch Self.readStates(database, since: sinceMs, extra: extra) {
+            case .states(let states):
+                for (id, state) in states where !state.isSubagent && !state.isBackground {
                     guard let folder = state.folder else { continue }
                     nextFolders[key(id)] = folder
                     let current = (state.updatedAt ?? 0) >= sinceMs || (state.unfinishedRunAt ?? 0) >= sinceMs
                     if current, state.lastTool == "ask_question", state.lastToolPending {
                         let at = Self.date(state.lastStartedAt ?? state.updatedAt) ?? now
-                        reported.append((id, .waiting, at, folder))
+                        reported.append(Reported(id: id, status: .waiting, since: at, folder: folder))
                     } else if current, state.blocking {
                         let first = blockedSince[key(id)] ?? now
                         nextBlocked[key(id)] = first
-                        reported.append((id, .waiting, first, folder))
+                        reported.append(Reported(id: id, status: .waiting, since: first, folder: folder))
                     } else if let run = state.unfinishedRunAt, run >= sinceMs {
-                        // A turn_ended written after this run started has ended it already.
+                        // The turn_ended of a turn after this one was sent has ended it already.
+                        let sent = Double(max(run, state.updatedAt ?? run)) / 1000
                         if let transcript = transcripts[id], transcript.kind == .turnEnded,
-                           transcript.written.timeIntervalSince1970 * 1000 > Double(run) { continue }
-                        reported.append((id, .working, Self.date(run) ?? now, folder))
+                           transcript.written.timeIntervalSince1970 > sent + Self.endMargin { continue }
+                        reported.append(Reported(id: id, status: .working, since: Self.date(run) ?? now, folder: folder))
                     }
                 }
-            } else {
-                // The database could not be read on this scan: the transcripts alone.
+            case .busy:
+                // Cursor is writing: keep the last report, and when each wait began.
+                reported = lastReport[source.id] ?? []
+                for item in reported where item.status == .waiting {
+                    if let first = blockedSince[key(item.id)] { nextBlocked[key(item.id)] = first }
+                }
+            case .unavailable:
+                // The transcripts alone, for chats whose folder is known.
                 for (id, transcript) in transcripts where transcript.kind == .message {
                     guard let folder = folders[key(id)] else { continue }
                     nextFolders[key(id)] = folder
-                    reported.append((id, .working, transcript.written, folder))
+                    reported.append(Reported(id: id, status: .working, since: transcript.written, folder: folder))
                 }
             }
+            nextReport[source.id] = reported
             for item in reported {
                 starts[app.pid] = app.start
                 nextShown[source.id, default: []].insert(item.id)
-                keep.insert("\(source.id)\u{0}\(item.id)")
+                keep.insert(key(item.id))
                 sessions.append(LiveAgentSession(sourceID: source.id, projectPath: item.folder, workspacePath: item.folder,
                     sessionID: item.id, status: item.status, updatedAt: item.since, pid: app.pid,
                     details: LiveSessionDetails(stateSince: item.since, hostBundleID: Self.cursorBundleID)))
@@ -169,6 +211,7 @@ public final class CursorLiveActivityProvider {
         shown = nextShown
         folders = folders.merging(nextFolders) { $1 }.filter { keep.contains($0.key) }
         blockedSince = nextBlocked
+        lastReport = nextReport
         // Verify presence again after reading the database and transcripts.
         let finalStarts = processStartTimes(Set(sessions.map(\.pid)))
         sessions.removeAll { finalStarts[$0.pid] != starts[$0.pid] }
@@ -201,10 +244,11 @@ public final class CursorLiveActivityProvider {
 
     /// Main-chat transcripts written since `since`: when, and their last line's kind.
     /// `seen` collects the transcripts looked at, to prune the memo.
-    func recentTranscripts(since: Date, now: Date, seen: inout Set<String>) -> [String: (written: Date, kind: LastLine)] {
+    func recentTranscripts(since: Date, now: Date, seen: inout Set<String>)
+        -> [String: (written: Date, kind: LastLine, changed: Bool)] {
         let projects = transcriptHome.appendingPathComponent("projects", isDirectory: true)
         guard let slugs = try? files.contentsOfDirectory(atPath: projects.path) else { return [:] }
-        var found: [String: (written: Date, kind: LastLine)] = [:]
+        var found: [String: (written: Date, kind: LastLine, changed: Bool)] = [:]
         for slug in slugs where !slug.hasPrefix(".") {
             let folder = projects.appendingPathComponent(slug, isDirectory: true)
                 .appendingPathComponent("agent-transcripts", isDirectory: true)
@@ -216,14 +260,17 @@ public final class CursorLiveActivityProvider {
                       stat.modified >= since, stat.modified <= now.addingTimeInterval(5) else { continue }
                 seen.insert(transcript.path)
                 let kind: LastLine
+                let changed: Bool
                 if let known = lines[transcript.path], known.size == stat.size, known.modified == stat.modified {
                     kind = known.kind
+                    changed = false
                 } else {
                     kind = Self.lastLine(of: transcript, size: stat.size)
                     lines[transcript.path] = (stat.size, stat.modified, kind)
+                    changed = true
                 }
                 if let earlier = found[id], earlier.written >= stat.modified { continue }
-                found[id] = (stat.modified, kind)
+                found[id] = (stat.modified, kind, changed)
             }
         }
         return found
@@ -244,29 +291,40 @@ public final class CursorLiveActivityProvider {
         """
 
     /// Live markers of the chats to look at: the `candidateLimit` most
-    /// recently updated header rows since `since` (milliseconds), rows flagged
-    /// as waiting, and `extra`. Nil when the database can't be read now: not
-    /// in WAL mode, without its `-wal` and `-shm`, busy, or past a deadline.
-    static func readStates(_ database: URL, since: Int64, extra: Set<String>) -> [String: ChatState]? {
-        let opened = CursorActivityProvider.open(database)
-        guard opened.wal, let reader = opened.reader else { return nil }
-        let deadline = opened.limits.deadline
-        let flag = "CASE WHEN json_valid(value) THEN coalesce(json_extract(value, '$.hasBlockingPendingActions'), 0) ELSE 0 END"
+    /// recently updated main-chat header rows since `since` (milliseconds),
+    /// then `extra`. The database is opened only when its `-wal` and `-shm`
+    /// exist (checked with lstat), and its journal mode is read through SQLite,
+    /// never through a file handle of our own: closing one would drop this
+    /// process's SQLite locks on the file.
+    static func readStates(_ database: URL, since: Int64, extra: [String]) -> ReadResult {
+        guard FileStat.of(database.path)?.kind == .regular,
+              FileStat.of(database.path + "-wal")?.kind == .regular,
+              FileStat.of(database.path + "-shm")?.kind == .regular,
+              let reader = ReadOnlySQLite(url: database, maximumValueBytes: CursorActivityProvider.ReadLimits.wal.maximumValueBytes) else {
+            return .unavailable
+        }
+        let limits = CursorActivityProvider.ReadLimits.wal
+        let deadline = limits.deadline
         do {
+            guard try reader.rows("PRAGMA journal_mode", maximumColumnBytes: 64, deadline: deadline).first?.first?.string?
+                    .lowercased() == "wal" else { return .unavailable }
             var ids: [String] = []
-            var blocking: [String: Bool] = [:]
-            if reader.tableExists("composerHeaders") {
-                let recent = try reader.rows(
-                    "SELECT composerId, \(flag) FROM composerHeaders WHERE coalesce(lastUpdatedAt, recency, 0) >= ?1 OR \(flag) = 1 ORDER BY coalesce(lastUpdatedAt, recency, 0) DESC LIMIT \(candidateLimit)",
-                    bindings: [.integer(since)], maximumColumnBytes: 4_096, deadline: deadline)
-                for row in recent where row.count == 2 {
-                    guard let id = row[0].string, CursorActivityProvider.isSafeID(id) else { continue }
-                    ids.append(id)
-                    blocking[id] = row[1].int == 1
+            let headers = reader.columns(of: "composerHeaders")
+            if headers.isSuperset(of: ["composerId", "value"]) {
+                let updated = headers.contains("recency") ? "coalesce(lastUpdatedAt, recency, 0)" : "coalesce(lastUpdatedAt, 0)"
+                let main = headers.contains("isSubagent") ? " AND coalesce(isSubagent, 0) = 0" : ""
+                for row in try reader.rows("SELECT composerId FROM composerHeaders WHERE \(updated) >= ?1\(main) ORDER BY \(updated) DESC LIMIT \(candidateLimit)",
+                                           bindings: [.integer(since)], maximumColumnBytes: 4_096, deadline: deadline) {
+                    if let id = row.first?.string, CursorActivityProvider.isSafeID(id) { ids.append(id) }
                 }
-                let others = extra.filter { blocking[$0] == nil && CursorActivityProvider.isSafeID($0) }.sorted()
-                for start in stride(from: 0, to: others.count, by: max(1, opened.limits.batchSize)) {
-                    let batch = Array(others[start..<min(start + opened.limits.batchSize, others.count)])
+            }
+            for id in extra where CursorActivityProvider.isSafeID(id) && !ids.contains(id) { ids.append(id) }
+            // The blocked flag, parsed only for the chats read.
+            var blocking: [String: Bool] = [:]
+            if headers.isSuperset(of: ["composerId", "value"]) {
+                let flag = "CASE WHEN json_valid(value) THEN coalesce(json_extract(value, '$.hasBlockingPendingActions'), 0) ELSE 0 END"
+                for start in stride(from: 0, to: ids.count, by: max(1, limits.batchSize)) {
+                    let batch = Array(ids[start..<min(start + limits.batchSize, ids.count)])
                     let marks = Array(repeating: "?", count: batch.count).joined(separator: ", ")
                     for row in try reader.rows("SELECT composerId, \(flag) FROM composerHeaders WHERE composerId IN (\(marks))",
                                                bindings: batch.map { .text($0) }, maximumColumnBytes: 4_096, deadline: deadline)
@@ -275,27 +333,30 @@ public final class CursorLiveActivityProvider {
                     }
                 }
             }
-            for id in extra.sorted() where CursorActivityProvider.isSafeID(id) && !ids.contains(id) { ids.append(id) }
             let recordSQL = """
                 SELECT k, json_extract(v, '$.unfinishedRunAt'), json_extract(v, '$.lastUpdatedAt'),
-                    json_extract(v, '$.subagentInfo.parentComposerId') IS NOT NULL, \(folderSQL),
+                    json_extract(v, '$.subagentInfo.parentComposerId') IS NOT NULL,
+                    coalesce(json_type(v, '$.createdFromBackgroundAgent') = 'object'
+                        AND json_extract(v, '$.createdFromBackgroundAgent') <> '{}', 0),
+                    \(folderSQL),
                     json_extract(v, '$.fullConversationHeadersOnly[#-1].bubbleId'),
                     json_extract(v, '$.fullConversationHeadersOnly[#-1].startedAtMs')
                 FROM (SELECT key AS k, CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key IN (%KEYS%)) WHERE json_valid(v)
                 """
             let records = try CursorActivityProvider.keyedRows(reader, keys: ids.map { "composerData:" + $0 },
-                                                               sql: recordSQL, limits: opened.limits)
+                                                               sql: recordSQL, limits: limits)
             let pageSQL = "SELECT json_extract(v, '$[#-1].bubbleId'), json_extract(v, '$[#-1].startedAtMs') FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key >= ?1 AND key < ?2 ORDER BY key DESC LIMIT 1) WHERE json_valid(v)"
             let bubbleSQL = "SELECT json_extract(v, '$.toolFormerData.name'), json_extract(v, '$.toolFormerData.additionalData.status') FROM (SELECT CAST(value AS TEXT) AS v FROM cursorDiskKV WHERE key = ?1) WHERE json_valid(v)"
             var states: [String: ChatState] = [:]
             for id in ids {
-                guard let row = records.rows["composerData:" + id], row.count == 6 else { continue }
+                guard let row = records.rows["composerData:" + id], row.count == 7 else { continue }
                 var state = ChatState(unfinishedRunAt: row[0].int, updatedAt: row[1].int, isSubagent: row[2].int == 1,
-                                      folder: row[3].string.flatMap { CheckoutPath.absolute($0) },
+                                      isBackground: row[3].int == 1, folder: row[4].string.flatMap { CheckoutPath.absolute($0) },
                                       blocking: blocking[id] ?? false)
+                guard !state.isSubagent, !state.isBackground else { states[id] = state; continue }
                 // The newest message: the last header page (Cursor 3.29), else the inline list.
-                var bubble = row[4].string
-                state.lastStartedAt = row[5].int
+                var bubble = row[5].string
+                state.lastStartedAt = row[6].int
                 if let page = try reader.rows(pageSQL, bindings: [.text("composerConvHeaders:\(id):"), .text("composerConvHeaders:\(id);")],
                                               maximumColumnBytes: 4_096, deadline: deadline).first, page.count == 2,
                    let last = page[0].string {
@@ -310,9 +371,11 @@ public final class CursorLiveActivityProvider {
                 }
                 states[id] = state
             }
-            return states
+            return .states(states)
+        } catch let error where CursorActivityProvider.isTransient(error) {
+            return .busy
         } catch {
-            return nil
+            return .unavailable
         }
     }
 

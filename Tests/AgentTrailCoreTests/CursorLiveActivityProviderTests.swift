@@ -154,6 +154,38 @@ final class CursorLiveActivityProviderTests: XCTestCase {
         XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["c1": .working])
     }
 
+    /// The previous turn's end line can land just after you send again; it
+    /// doesn't hide the new run.
+    func testATurnEndedRightAfterASendDoesNotHideTheNewRun() throws {
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 300)
+        try transcript("c1", ending: "turn_ended", at: 301)
+        XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["c1": .working])
+    }
+
+    func testCloudAndBackgroundAgentChatsAreNotShown() throws {
+        try header("b1", updated: 300)
+        try chat("b1", updated: 300, running: 300, extra: ["createdFromBackgroundAgent": ["bcId": "bc-1"]])
+        try header("b2", updated: 300)
+        try chat("b2", updated: 300, running: 300, extra: ["createdFromBackgroundAgent": [:]])
+        XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["b2": .working], "an empty marker is a local chat")
+    }
+
+    /// A rollback-journal database with stray -wal and -shm files is not read;
+    /// the journal mode comes from SQLite, not from a file handle of ours.
+    func testOnlyAWALDatabaseIsRead() throws {
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 300)
+        XCTAssertEqual(sqlite3_exec(writer, "PRAGMA journal_mode=DELETE;", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(writer)
+        writer = nil
+        FileManager.default.createFile(atPath: f.database.path + "-wal", contents: Data())
+        FileManager.default.createFile(atPath: f.database.path + "-shm", contents: Data())
+        guard case .unavailable = CursorLiveActivityProvider.readStates(f.database, since: 0, extra: []) else {
+            return XCTFail("a rollback-journal database must not be read")
+        }
+    }
+
     func testAChatWhoseHeaderIsBehindIsFoundThroughItsTranscript() throws {
         try header("c1", updated: nil)
         try chat("c1", updated: 300, running: 300)
