@@ -4,7 +4,7 @@
 
 A read-only macOS menu-bar app. Each Git repository gets one card across Claude, Codex, Grok, GitHub Copilot, and OpenCode: which agent edited it last, history from the logs already on your Mac, and which live session needs you. When Claude says a session is idle but a command it started is still running, the card says **Working in background**.
 
-**Works with** Claude Code in Claude Desktop's Code tab and `claude` in a terminal, Codex, Grok, GitHub Copilot (Copilot Chat in VS Code, and the Copilot CLI), and OpenCode (the terminal, the desktop app, and `opencode serve`). A Codex thread or an OpenCode session waiting for approval shows as Working. Copilot Chat in VS Code has history but no live status. **Not supported:** Cursor, Gemini CLI. It can't answer prompts for you.
+**Works with** Claude Code in Claude Desktop's Code tab and `claude` in a terminal, Codex, Grok, GitHub Copilot (Copilot Chat in VS Code, and the Copilot CLI), and OpenCode (the terminal, the desktop app, and `opencode serve`). A Codex thread waiting for approval shows as Working, and so does an OpenCode session waiting to approve a shell command or a subagent; OpenCode file approvals show as Needs input. Copilot Chat in VS Code has history but no live status. **Not supported:** Cursor, Gemini CLI. It can't answer prompts for you.
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
