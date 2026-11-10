@@ -244,6 +244,92 @@ final class QwenActivityProviderTests: XCTestCase {
         XCTAssertEqual(result.notices, [])
     }
 
+    func testHowTheToolRanDecidesOverTheCallStatus() throws {
+        let f = try QwenFixture()
+        defer { f.remove() }
+        let a = f.project.appendingPathComponent("a.txt").path
+        func result(_ id: String, seconds: TimeInterval, status: String, execution: String) -> [String: Any] {
+            var record = f.toolResult(id, session: self.id, seconds: seconds, file: nil, error: status != "success")
+            // A stopped call's display is the stop message, not a diff.
+            record["toolCallResult"] = ["callId": id, "status": status, "executionStatus": execution,
+                                        "resultDisplay": "PRIVATE_CONTENT_MARKER", "errorType": "execution_denied"]
+            return record
+        }
+        try f.chat(id, [
+            f.user(id, seconds: 1),
+            // A PostToolUse hook stopped the call after the edit was applied.
+            f.call("h1", session: id, seconds: 2, file: a),
+            result("h1", seconds: 10, status: "error", execution: "success"),
+            // Cancelled once the change was written.
+            f.call("c1", name: "write_file", session: id, seconds: 3, file: a),
+            result("c1", seconds: 11, status: "cancelled", execution: "success"),
+            // The tool failed or never ran.
+            f.call("f1", session: id, seconds: 4, file: a),
+            result("f1", seconds: 12, status: "error", execution: "error"),
+            f.call("x1", session: id, seconds: 5, file: a),
+            result("x1", seconds: 13, status: "cancelled", execution: "cancelled")
+        ])
+        let result = f.provider().scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        XCTAssertEqual(result.projects.first?.activities.first?.editMoments.map(\.date), [f.date(10), f.date(11)])
+        XCTAssertEqual(result.notices, [])
+    }
+
+    func testSubagentToolLifecycleDecidesWhenPresent() throws {
+        let f = try QwenFixture()
+        defer { f.remove() }
+        let a = f.project.appendingPathComponent("a.txt").path
+        try f.chat(id, [f.user(id, seconds: 1)])
+        func sidechain(_ record: [String: Any]) -> [String: Any] {
+            var record = record
+            record["isSidechain"] = true
+            record["agentId"] = "general-purpose-1"
+            return record
+        }
+        func ended(_ callID: String, seconds: TimeInterval, execution: String) -> [String: Any] {
+            var record = f.record("system", session: id, seconds: seconds)
+            record["subtype"] = "ui_telemetry"
+            let event: [String: Any] = ["event.name": "tool_lifecycle", "v": 1, "kind": "tool", "phase": "ended",
+                                        "callId": callID, "toolName": "edit", "executionStatus": execution,
+                                        "outcome": execution == "success" ? "error" : execution, "sessionId": id,
+                                        "executionId": UUID().uuidString, "endedAt": 1, "startedAt": 1, "executionDurationMs": 1]
+            record["systemPayload"] = ["uiEvent": event]
+            return sidechain(record)
+        }
+        func answer(_ callID: String, seconds: TimeInterval, error: Bool) -> [String: Any] {
+            var record = f.toolResult(callID, session: id, seconds: seconds, file: nil, error: error)
+            record["toolCallResult"] = ["callId": callID, "durationMs": 5]
+            return sidechain(record)
+        }
+        try f.subagent(parent: id, agent: "general-purpose-1", [
+            // Applied, then stopped by a PostToolUse hook: answered with `error`.
+            sidechain(f.call("s1", session: id, seconds: 10, file: a)),
+            ended("s1", seconds: 11, execution: "success"),
+            answer("s1", seconds: 12, error: true),
+            // Failed while running.
+            sidechain(f.call("s2", session: id, seconds: 13, file: a)),
+            ended("s2", seconds: 14, execution: "error"),
+            answer("s2", seconds: 15, error: true),
+            // No lifecycle (before 0.27): the answer decides.
+            sidechain(f.call("s3", session: id, seconds: 16, file: a)),
+            answer("s3", seconds: 17, error: false)
+        ])
+        // A main session's lifecycle records never stand in for a status.
+        try f.chat(id, [
+            f.call("m1", session: id, seconds: 20, file: a),
+            ended("m1", seconds: 21, execution: "success").filter { $0.key != "isSidechain" && $0.key != "agentId" },
+            {
+                var record = f.toolResult("m1", session: id, seconds: 22, file: nil, error: true)
+                record["toolCallResult"] = ["callId": "m1"]
+                return record
+            }()
+        ], append: true)
+        let result = f.provider().scan(sources: [f.source])
+        XCTAssertEqual(result.projects.first?.recordedEditCount, 2)
+        XCTAssertEqual(result.projects.first?.activities.first?.editMoments.map(\.date), [f.date(12), f.date(17)])
+        XCTAssertEqual(result.projects.first?.activities.first?.editMoments.filter(\.delegated).count, 2)
+    }
+
     func testExternalExecutorSubagentEnvelopesDoNotCount() throws {
         let f = try QwenFixture()
         defer { f.remove() }

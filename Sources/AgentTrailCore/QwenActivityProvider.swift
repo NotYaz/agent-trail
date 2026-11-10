@@ -10,30 +10,40 @@ import Foundation
 /// never decoded.
 ///
 /// One confirmed edit is a `tool_result` record of an `edit` (formerly
-/// `replace`), `write_file` or `notebook_edit` call whose `toolCallResult`
-/// status is `success`, called directly or through the `tool_call` bridge
-/// (which reaches deferred tools). A call the headless loop skipped without
-/// running is recorded as `success` too, with `executionStatus: not_started`,
-/// and never counts. Its file is the result's `resultDisplay.filePath`, else
-/// the call's own absolute path argument; its time is the record's. Records
+/// `replace`), `write_file` or `notebook_edit` call whose tool ran
+/// successfully, called directly or through the `tool_call` bridge (which
+/// reaches deferred tools). How the tool ran is `toolCallResult.
+/// executionStatus`; records without it give only `status`. The two differ
+/// when a PostToolUse hook stops a call after its change was applied (status
+/// `error`, execution `success`: counts) and for a call the headless loop
+/// skipped without running (status `success`, execution `not_started`: never
+/// counts). Its file is the result's `resultDisplay.filePath`, else the
+/// call's own absolute path argument; its time is the record's. Records
 /// `/branch` and `--fork-session` copied from another session (`forkedFrom`)
 /// are skipped, so an edit counts for the session that made it.
 ///
 /// A subagent's transcript, `projects/<folder>/subagents/<session id>/
-/// agent-<id>.jsonl`, records no status: there an edit counts when Qwen
-/// answered the call with `output` and no `error`, which is how it reports
-/// every successful call (failed and cancelled ones carry `error`). Those
-/// edits join the parent session as delegated. A subagent run by an external
-/// executor (another ACP agent) answers every call with `{input, toolName,
-/// output, content, status}`, failed ones included; those never count, and
-/// that agent's own history records its edits.
+/// agent-<id>.jsonl`, records no status. From Qwen Code 0.27 it writes each
+/// tool's ended `tool_lifecycle` record, with its `executionStatus`, before
+/// the result; without one, an edit counts when Qwen answered the call with
+/// `output` and no `error`, which is how it reports every successful call
+/// (failed and cancelled ones carry `error`). Those edits join the parent
+/// session as delegated. A subagent run by an external executor (another ACP
+/// agent) answers every call with `{input, toolName, output, content,
+/// status}`, failed ones included; those never count, and that agent's own
+/// history records its edits.
+///
+/// Not read: the experimental Managed engine's sessions (their messages sit
+/// in separate resource files), `qwen serve --managed` (its own store), and
+/// the inner calls of a code-mode `exec` script in a terminal session, which
+/// Qwen does not record.
 ///
 /// Shell commands, failed or cancelled calls and file modification times are
 /// never evidence, and nothing in a session's working folder is read: paths
-/// stay the strings Qwen recorded. The cache keeps ids, times and folder
-/// paths only: no prompts, code, diffs or file content.
+/// stay the strings Qwen recorded. The cache keeps ids, statuses, times and
+/// folder paths only: no prompts, code, diffs or file content.
 public final class QwenActivityProvider: ActivityProvider {
-    static let cacheVersion = 2
+    static let cacheVersion = 3
     private let cache: HistoryCache<QwenFile>
     private let files = FileManager.default
     private let resolver: GitProjectResolver
@@ -307,6 +317,9 @@ struct QwenLog: Codable, Equatable {
     var edits: [String: StoredEdit] = [:]
     /// Edits recorded by a subagent (`isSidechain`).
     var delegated: Set<String> = []
+    /// A subagent's ended `tool_lifecycle` records: `executionStatus` by
+    /// call id, until the call's result arrives.
+    var ran: [String: String] = [:]
 
     /// `edit` (and its old name `replace`), `write_file`, `notebook_edit`.
     static let editTools: Set<String> = ["edit", "replace", "write_file", "notebook_edit"]
@@ -334,10 +347,21 @@ struct QwenLog: Codable, Equatable {
         case "tool_result":
             if let date { result(object, date: date, cwd: cwd ?? firstCwd, sidechain: sidechain) }
         case "system":
-            if object["subtype"] as? String == "parent_session",
-               let payload = object["systemPayload"] as? [String: Any],
-               let parent = payload["parentSessionId"] as? String, QwenActivityProvider.isSafeID(parent) {
-                parentSessionID = parent
+            let payload = object["systemPayload"] as? [String: Any]
+            switch object["subtype"] as? String {
+            case "parent_session":
+                if let parent = payload?["parentSessionId"] as? String, QwenActivityProvider.isSafeID(parent) {
+                    parentSessionID = parent
+                }
+            case "ui_telemetry" where sidechain:
+                // A subagent writes each tool's end, with how it ran, before the tool's result.
+                guard let event = payload?["uiEvent"] as? [String: Any], event["event.name"] as? String == "tool_lifecycle",
+                      event["phase"] as? String == "ended", let id = event["callId"] as? String, !id.isEmpty,
+                      id.utf8.count <= 512, let status = event["executionStatus"] as? String, status.utf8.count <= 32 else { break }
+                if ran.count >= 4_096 { ran.removeAll() }
+                ran[id] = status
+            default:
+                break
             }
         default:
             break
@@ -386,21 +410,33 @@ struct QwenLog: Codable, Equatable {
         }
         guard let id = callID ?? responseID, !id.isEmpty, id.utf8.count <= 512 else { return }
         let call = pending.removeValue(forKey: id)
+        let lifecycle = ran.removeValue(forKey: id)
         // A bridged call is answered as `tool_call`; its call names the tool it ran.
         let resolved = responseName == "tool_call" ? call?.name : (responseName ?? call?.name)
         guard let name = resolved, Self.editTools.contains(name) else { return }
-        // Skipped without running (a sibling of `structured_output` in a
-        // headless turn), yet recorded with status `success`.
-        if info["executionStatus"] as? String == "not_started" { return }
-        if let status = info["status"] as? String {
+        if let execution = info["executionStatus"] as? String {
+            // How the tool itself ran. `success` means the change was
+            // applied, also when a PostToolUse hook then stopped the call
+            // (recorded with status `error`). `not_started` is a call skipped
+            // without running (a sibling of `structured_output` in a headless
+            // turn), recorded with status `success`.
+            guard execution == "success" else { return }
+        } else if let status = info["status"] as? String {
             guard status == "success" else { return }
         } else {
-            // Subagent transcripts record no status. Qwen answers every
-            // successful call with `output`, every failed or cancelled one with `error`.
-            // An external executor's `{input, toolName, output, content, status}`
-            // looks the same whatever the outcome, so it is not evidence.
+            // Subagent transcripts record no status, only the tool's ended
+            // lifecycle (from Qwen Code 0.27) and its answer. An external
+            // executor's `{input, toolName, output, content, status}` answer
+            // looks the same whatever the outcome, so it is never evidence.
             guard sidechain, let answer = response, answer["status"] == nil, answer["toolName"] == nil,
-                  answer["input"] == nil, answer["output"] is String, answer["error"] == nil else { return }
+                  answer["input"] == nil else { return }
+            if let lifecycle {
+                guard lifecycle == "success" else { return }
+            } else {
+                // Qwen answers every successful call with `output`, every
+                // failed or cancelled one with `error`.
+                guard answer["output"] is String, answer["error"] == nil else { return }
+            }
         }
         let display = info["resultDisplay"] as? [String: Any]
         let recorded = (display?["filePath"] as? String).flatMap { $0.hasPrefix("/") ? ProjectLocationRegistry.lexicalPath($0) : nil }
