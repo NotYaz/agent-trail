@@ -39,7 +39,9 @@ import Foundation
 /// bytes are compared, nothing else is kept, and a transcript is read again
 /// only after its size or time changes.
 ///
-/// Not shown: subagent chats (their parent is Working while they run), cloud
+/// Not shown: subagent chats (their parent is Working while they run, and
+/// Needs input while one waits for approval: Cursor ORs a subagent's
+/// `hasBlockingPendingActions` into its parent's header, up to the root), cloud
 /// and background agents (`createdFromBackgroundAgent`), remote and
 /// multi-root workspaces, and Cursor CLI
 /// sessions. A run orphaned by a window crash or reload while Cursor keeps

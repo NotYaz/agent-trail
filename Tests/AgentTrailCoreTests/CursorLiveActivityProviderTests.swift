@@ -44,11 +44,11 @@ final class CursorLiveActivityProviderTests: XCTestCase {
 
     // Records, as Cursor 3.29 saves them.
 
-    private func header(_ id: String, updated: TimeInterval?, blocking: Bool = false) throws {
+    private func header(_ id: String, updated: TimeInterval?, blocking: Bool = false, subagent: Bool = false) throws {
         var value = f.head(id, folder: f.project.path)
         value["hasBlockingPendingActions"] = blocking
-        try f.insert("INSERT OR REPLACE INTO composerHeaders (composerId, workspaceId, lastUpdatedAt, isArchived, isSubagent, value) VALUES (?, NULL, ?, 0, 0, ?)",
-                     rows: [[id, updated.map { f.ms($0) }, value]])
+        try f.insert("INSERT OR REPLACE INTO composerHeaders (composerId, workspaceId, lastUpdatedAt, isArchived, isSubagent, value) VALUES (?, NULL, ?, 0, ?, ?)",
+                     rows: [[id, updated.map { f.ms($0) }, subagent ? 1 : 0, value]])
     }
 
     private func chat(_ id: String, updated: TimeInterval, running: TimeInterval? = nil, extra: [String: Any] = [:]) throws {
@@ -142,6 +142,28 @@ final class CursorLiveActivityProviderTests: XCTestCase {
         try header("c1", updated: 50, blocking: true)
         try chat("c1", updated: 50)
         XCTAssertEqual(reader.scan(sources: [f.source]).sessions, [])
+    }
+
+    /// A subagent waiting for approval, as traced on 3.29.15: Cursor copies the
+    /// subagent's blocked flag to its parent's header, so the parent shows
+    /// Needs input. The subagent itself (its header has no `lastUpdatedAt`,
+    /// its transcript sits in the parent's `subagents` folder) never shows.
+    func testASubagentsApprovalShowsAsNeedsInputOnItsParent() throws {
+        try header("p1", updated: 300, blocking: true)
+        try chat("p1", updated: 300, running: 300)
+        try last("p1", bubble: "t1", started: 302, tool: "task_v2", answer: "loading")
+        try header("s1", updated: nil, blocking: true, subagent: true)
+        try chat("s1", updated: 303, running: 303, extra: ["subagentInfo": ["parentComposerId": "p1", "rootParentConversationId": "p1"]])
+        try last("s1", bubble: "x1", started: 309, tool: "run_terminal_command_v2", answer: "pending")
+        let folder = transcriptHome.appendingPathComponent("projects/Users-someone-app/agent-transcripts/p1/subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "{\"role\":\"user\"}\n".write(to: folder.appendingPathComponent("s1.jsonl"), atomically: true, encoding: .utf8)
+        let reader = provider()
+        XCTAssertEqual(statuses(reader.scan(sources: [f.source])), ["p1": .waiting])
+        // Allowed: both flags clear, and the parent works on.
+        try header("p1", updated: 300)
+        try header("s1", updated: nil, subagent: true)
+        XCTAssertEqual(statuses(reader.scan(sources: [f.source])), ["p1": .working])
     }
 
     func testATurnEndedInTheTranscriptEndsTheRun() throws {
