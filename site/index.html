@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Trail · Which agent touched this project last?</title>
-  <meta name="description" content="A native macOS menu-bar app that puts your coding projects and live Claude, Codex, and Grok sessions in one panel. Local-only, free, and open source.">
+  <meta name="description" content="A native macOS menu-bar app for your coding projects and live Claude, Codex, Grok, Copilot, OpenCode, and Cursor sessions. Local-only, free, and open source.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
   <link rel="canonical" href="https://agent-trail.app/">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Agent Trail">
-  <meta property="og:description" content="Your coding projects and live Claude, Codex, and Grok sessions in one macOS menu-bar panel. Local-only, free, and open source.">
+  <meta property="og:description" content="Your coding projects and live Claude, Codex, Grok, Copilot, OpenCode, and Cursor sessions in one macOS menu-bar panel. Local-only, free, and open source.">
   <meta property="og:url" content="https://agent-trail.app/">
   <meta property="og:image" content="https://agent-trail.app/assets/og.jpg">
   <meta property="og:image:width" content="1200">
@@ -104,22 +104,23 @@
     <section class="hero" id="top">
       <div class="wrap hero-grid">
         <div class="hero-copy">
-          <a class="pill" href="#map-title">
+          <a class="pill" href="#assistants-title">
             <span class="pill-tag">New</span>
-            <span>The Map: branches, sessions, and merges</span>
+            <span>GitHub Copilot, OpenCode, and Cursor</span>
             <svg width="16" height="16" aria-hidden="true"><use href="#i-arrow"/></svg>
           </a>
           <h1>Which agent touched this project last?</h1>
           <p class="lead">
             Agent Trail is a native macOS menu-bar app that puts your coding projects and live
-            <strong>Claude</strong>, <strong>Codex</strong>, and <strong>Grok</strong> sessions in one panel.
+            <strong>Claude</strong>, <strong>Codex</strong>, <strong>Grok</strong>, <strong>GitHub Copilot</strong>,
+            <strong>OpenCode</strong>, and <strong>Cursor</strong> sessions in one panel.
             See recorded edits and trends, who is working or waiting, and jump back to the session.
           </p>
           <div class="cta">
             <!-- Update with each release, along with the version in the meta line below. -->
-            <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.13">
+            <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.14">
               <svg width="18" height="18" aria-hidden="true"><use href="#i-download"/></svg>
-              Download 0.1.0-alpha.13
+              Download 0.1.0-alpha.14
             </a>
             <a class="btn btn-ghost" href="#install">Build from source</a>
           </div>
@@ -253,7 +254,7 @@
             <ul class="fine-list">
               <li>A command that never exits keeps its session Working until it ends or the session closes.</li>
               <li>A job that fully detaches, with no command still waiting on it, cannot be tied to a session. Keep a command waiting on it, such as a loop that polls for the job to finish.</li>
-              <li>Claude sessions only. Codex and Grok status is unchanged.</li>
+              <li>Background commands count for Claude sessions only. A Cursor chat shows Working in background while a subagent it sent to the background runs; other assistants’ status is unchanged.</li>
               <li><code>AgentTrailInspect --live</code> reports <code>backgroundSince</code>.</li>
             </ul>
           </article>
@@ -273,7 +274,7 @@
         <div class="feature-row">
           <div class="feature-copy">
             <h3>One card per project, live status on each</h3>
-            <p>A project is the Git checkout where an assistant’s confirmed edits actually landed. Claude, Codex, and Grok working in the same repository share one card, even when they were started in different folders, and the card shows what each of them is doing now.</p>
+            <p>A project is the Git checkout where an assistant’s confirmed edits actually landed. Claude, Codex, Grok, Copilot, OpenCode, and Cursor working in the same repository share one card, even when they were started in different folders, and the card shows what each of them is doing now.</p>
             <ul class="checks">
               <li>A 30-day sparkline, recorded edits with the change from the previous 30 days, and a profile mix bar.</li>
               <li>The Pulse strip: live sessions, edits in the last 7 days, active projects, and your day streak.</li>
@@ -283,7 +284,7 @@
           </div>
           <div class="feature-media live-media">
             <div class="status-board" role="list" aria-label="Live status per project">
-              <div class="status-chip" role="listitem"><svg width="16" height="16" class="c-needs" aria-hidden="true"><use href="#i-hand"/></svg><b class="t-needs">Needs input</b><span>Claude asked, or Grok has a permission request</span></div>
+              <div class="status-chip" role="listitem"><svg width="16" height="16" class="c-needs" aria-hidden="true"><use href="#i-hand"/></svg><b class="t-needs">Needs input</b><span>Claude asked, or Grok, the Copilot CLI, OpenCode, or Cursor waits on a question or approval</span></div>
               <div class="status-chip" role="listitem"><span class="dot dot-working"></span><b class="t-working">Working</b><span>An active turn, or a command it started still running</span></div>
               <div class="status-chip" role="listitem"><span class="dot dot-idle"></span><b>Idle</b><span>The turn ended. It doesn’t mean you need to reply</span></div>
               <div class="status-chip" role="listitem"><span class="dot dot-unknown"></span><b>Unknown</b><span>No verified status. Never guessed from edits</span></div>
@@ -301,7 +302,9 @@
               <li><strong>Claude Code</strong> sessions open through Claude’s session link. With several Claude instances, macOS gives that link only to the one launched first, so another instance’s sessions bring that instance forward with a hint naming the session.</li>
               <li><strong><code>claude</code> in a terminal</strong> brings that terminal forward, or the Claude window whose terminal pane runs it.</li>
               <li><strong>Codex</strong> threads open through <code>codex://threads</code> when the Codex app owns them.</li>
-              <li><strong>Grok</strong> brings forward the terminal it runs in.</li>
+              <li><strong>Grok</strong> and the <strong>Copilot CLI</strong> bring forward the terminal they run in.</li>
+              <li><strong>OpenCode</strong> brings its desktop app forward; it has no link to one session.</li>
+              <li><strong>Cursor</strong> chats open in Cursor’s Agents window through its chat link; a side chat opens through its parent chat.</li>
             </ul>
             <p class="fine">Agent Trail acts only when you click, press the switcher’s shortcut, or open a link, and only on apps already running. It never launches, quits, or restarts an assistant, and needs no Automation or Accessibility permission.</p>
           </div>
@@ -445,8 +448,35 @@
                 <dt>Jump</dt><dd>Brings its terminal forward</dd>
               </dl>
             </article>
+            <article class="assistant">
+              <h4><span class="dot"></span>GitHub Copilot</h4>
+              <dl>
+                <dt>Runs in</dt><dd>Copilot Chat in VS Code, or the Copilot CLI</dd>
+                <dt>Edits</dt><dd>An edit VS Code applied, or a successful Copilot CLI edit</dd>
+                <dt>Live</dt><dd>Copilot CLI: Needs input for permission requests and questions, Working, Idle. Copilot Chat in VS Code: history only</dd>
+                <dt>Jump</dt><dd>Brings the Copilot CLI’s terminal forward</dd>
+              </dl>
+            </article>
+            <article class="assistant">
+              <h4><span class="dot"></span>OpenCode</h4>
+              <dl>
+                <dt>Runs in</dt><dd>The terminal, the desktop app, or <code>opencode serve</code></dd>
+                <dt>Edits</dt><dd>A completed <code>edit</code>, <code>write</code>, or <code>patch</code></dd>
+                <dt>Live</dt><dd>OpenCode 2: Working, and Needs input for questions and file approvals; shell and subagent approvals show as Working</dd>
+                <dt>Jump</dt><dd>Brings the desktop app forward</dd>
+              </dl>
+            </article>
+            <article class="assistant">
+              <h4><span class="dot"></span>Cursor</h4>
+              <dl>
+                <dt>Runs in</dt><dd>Agent chats in the Cursor app, or the Cursor CLI</dd>
+                <dt>Edits</dt><dd>An edit or delete Cursor recorded as applied; Cursor CLI edits are not counted yet</dd>
+                <dt>Live</dt><dd>App chats in Cursor 3.29+: Needs input, Working (including background subagents and side chats). None for the CLI</dd>
+                <dt>Jump</dt><dd>Opens the chat in Cursor’s Agents window</dd>
+              </dl>
+            </article>
           </div>
-          <p class="fine">Gemini CLI, OpenCode, and Cursor are not supported yet. Shell commands and external editors are not attributed: this is a record of supported agent activity, not a complete audit of file changes.</p>
+          <p class="fine">Gemini CLI and Qwen Code are not supported yet. Shell commands and external editors are not attributed: this is a record of supported agent activity, not a complete audit of file changes.</p>
         </div>
       </div>
     </section>
@@ -463,7 +493,7 @@
           <article class="card">
             <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 9V7a3.5 3.5 0 017 0v2"/><rect x="4.5" y="9" width="11" height="8" rx="2"/></svg></span>
             <h3>Read-only</h3>
-            <p>It reads the assistants’ private on-disk formats and never writes them. No hooks, no injected code, and no edits to assistant data. Codex turn metadata is opened read-only, and the Map runs <code>git</code> read-only with network access turned off.</p>
+            <p>It reads the assistants’ private on-disk formats and never writes them. No hooks, no injected code, and no edits to assistant data. Codex turn metadata and the OpenCode and Cursor databases are opened read-only, and the Map runs <code>git</code> read-only with network access turned off.</p>
           </article>
           <article class="card">
             <span class="pv-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="10" height="10" rx="2"/><path d="M8 2.5v2.5M12 2.5v2.5M8 15v2.5M12 15v2.5M2.5 8h2.5M2.5 12h2.5M15 8h2.5M15 12h2.5"/></svg></span>
@@ -514,12 +544,12 @@ open "dist/Agent Trail.app"</code></pre>
           <article class="card install-card">
             <div class="install-head">
               <h3>Download the alpha</h3>
-              <span class="badge badge-muted">0.1.0-alpha.13</span>
+              <span class="badge badge-muted">0.1.0-alpha.14</span>
             </div>
             <p>A universal ZIP for Apple Silicon and Intel Macs, with a SHA-256 checksum.</p>
             <p class="warn">Builds are ad-hoc signed and <strong>not notarized</strong>, so macOS stops the first launch. Close the warning, then choose <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security and enter your login password. <a href="https://github.com/NotYaz/agent-trail#install">All steps</a>.</p>
             <div class="cta">
-              <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.13">
+              <a class="btn btn-primary" href="https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.14">
                 <svg width="18" height="18" aria-hidden="true"><use href="#i-download"/></svg>
                 Latest release
               </a>
@@ -628,7 +658,7 @@ open "dist/Agent Trail.app"</code></pre>
         <a href="https://github.com/NotYaz/agent-trail/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/NotYaz/agent-trail/blob/main/CONTRIBUTING.md">Contributing</a>
       </nav>
-      <p class="footer-note">An independent project, not affiliated with Anthropic, OpenAI, xAI, or other assistant vendors.</p>
+      <p class="footer-note">An independent project, not affiliated with Anthropic, OpenAI, xAI, GitHub, Anysphere, the makers of OpenCode, or other assistant vendors.</p>
     </div>
   </footer>
 </body>

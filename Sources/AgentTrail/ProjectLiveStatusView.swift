@@ -376,7 +376,7 @@ struct ProjectLiveStatusView: View {
         case .working:
             if let since = session.details.backgroundSince {
                 let time = since.formatted(date: .omitted, time: .shortened)
-                explanation = "\(sourceName(session.sourceID)) finished its turn, but a command it started at \(time) is still running in the background."
+                explanation = "\(sourceName(session.sourceID)) finished its turn, but a command or subagent it started at \(time) is still running in the background."
             } else {
                 explanation = "\(sourceName(session.sourceID)) has an active turn or reports working. This does not claim a file is being written."
             }

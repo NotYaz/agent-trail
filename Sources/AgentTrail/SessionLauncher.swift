@@ -184,7 +184,8 @@ enum SessionLauncher {
     /// profile's instance is the one macOS hands links to (the one launched
     /// first), else the profile's instance comes forward with a hint; a Claude
     /// session started in a terminal skips this and goes to its terminal; (2) a Codex thread link
-    /// when the ChatGPT app owns the thread and runs; (3) the running host app,
+    /// when the ChatGPT app owns the thread and runs, or a Cursor chat link when one
+    /// Cursor app runs; (3) the running host app,
     /// the instance the session runs under when several run;
     /// (4) the session's own app, else the folder in a running preferred
     /// editor, else Finder. `report` is called once, possibly later.
@@ -286,7 +287,8 @@ enum SessionLauncher {
         guard session.details.hostBundleID == cursorBundleID else { return false }
         let running = runningApplications(cursorBundleID).filter { $0.activationPolicy == .regular }
         guard running.count == 1, let app = running.first, let bundleURL = app.bundleURL,
-              let url = cursorChatURL(session.sessionID) else { return false }
+              // A side chat opens through its parent, beside which Cursor shows it.
+              let url = cursorChatURL(session.details.parentThreadID ?? session.sessionID) else { return false }
         openLink(url, in: bundleURL) { recipient in
             report(recipient != nil ? .done : activateWithHint(app, context: context))
         }
@@ -307,8 +309,9 @@ enum SessionLauncher {
         return components.url
     }
 
-    /// Step 3: the app that owns the session (a terminal for Grok or terminal Claude, Claude
-    /// Desktop when either runs in its terminal pane, an editor or the ChatGPT app for Codex),
+    /// Step 3: the app that owns the session (a terminal for Grok, the Copilot CLI, Qwen Code or
+    /// terminal Claude, Claude Desktop when either runs in its terminal pane, an editor or the ChatGPT app
+    /// for Codex, the OpenCode desktop app, or Cursor),
     /// when it is running.
     private static func activateHost(of session: LiveAgentSession, source: AgentSource?,
                                      context: JumpContext) -> JumpOutcome? {

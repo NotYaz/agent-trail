@@ -1,154 +1,366 @@
 import Foundation
+import SQLite3
 import XCTest
 @testable import AgentTrailCore
 
-/// Cursor 3.29 live status from each chat's transcript and the running Cursor
-/// app, as seen on 3.29.15: about a second into a turn the transcript ends
-/// with your message; `turn_ended` closes it, with status `error` after Stop.
+/// Cursor 3.29 live status, as a live trace on 3.29.15 recorded it: sending a
+/// message saves the chat with `unfinishedRunAt` (and `status` "aborted"); the
+/// turn's end, Stop or quit saves it without; a question waiting for you is an
+/// `ask_question` message whose `additionalData.status` is "pending", with the
+/// header's `hasBlockingPendingActions` set; each turn's transcript ends with
+/// `turn_ended`.
 final class CursorLiveActivityProviderTests: XCTestCase {
-    private var root: URL!
-    private var home: URL!
-    private var data: URL!
+    private var f: CursorFixture!
+    private var writer: OpaquePointer?
+    private var transcriptHome: URL!
     private let pid: Int32 = 44_383
-    /// The Cursor app started ten minutes ago.
-    private let appStart = Date().addingTimeInterval(-600)
-    private let project = "/Users/someone/Dev/cursor-trail-test"
+    /// The Cursor app started at fixture second 100.
+    private let appStart: TimeInterval = 100
 
     override func setUpWithError() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("cursor-live-\(UUID().uuidString)", isDirectory: true)
-        home = root.appendingPathComponent("home/.cursor", isDirectory: true)
-        data = root.appendingPathComponent("Cursor", isDirectory: true)
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        f = try CursorFixture()
+        transcriptHome = f.root.appendingPathComponent("user-home/.cursor", isDirectory: true)
+        try FileManager.default.createDirectory(at: transcriptHome, withIntermediateDirectories: true)
+        try f.headerTable([])
+        // Cursor keeps the database open in WAL mode while it runs.
+        XCTAssertEqual(sqlite3_open(f.database.path, &writer), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(writer, "PRAGMA journal_mode=WAL;", nil, nil, nil), SQLITE_OK)
     }
 
     override func tearDownWithError() throws {
-        try? FileManager.default.removeItem(at: root)
+        sqlite3_close(writer)
+        f.remove()
     }
 
-    private var source: AgentSource {
-        AgentSource(id: "cursor", name: "Cursor", configDirectory: home.path, userDataDirectory: data.path, assistant: .cursor)
+    private func micros(_ seconds: TimeInterval) -> UInt64 { UInt64(f.date(seconds).timeIntervalSince1970 * 1_000_000) }
+
+    /// A Cursor app for the fixture's data folder, started at `appStart`.
+    private func provider(apps: [CursorLiveActivityProvider.CursorApp]? = nil, alive: Bool = true) -> CursorLiveActivityProvider {
+        let apps = apps ?? [.init(pid: pid, start: micros(appStart), userDataDirectory: f.userData.path)]
+        let starts = Dictionary(uniqueKeysWithValues: apps.map { ($0.pid, $0.start) })
+        return CursorLiveActivityProvider(processStartTimes: { pids in alive ? starts.filter { pids.contains($0.key) } : [:] },
+                                          cursorApps: { apps }, transcriptHome: transcriptHome)
     }
 
-    private func micros(_ date: Date) -> UInt64 { UInt64(date.timeIntervalSince1970 * 1_000_000) }
+    // Records, as Cursor 3.29 saves them.
 
-    private func setTime(_ url: URL, _ date: Date) throws {
-        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
+    /// `type`: the subagent's `subagentTypeName` ("general-purpose" for a Task
+    /// subagent, "side-chat" for a side chat); nil for a main chat.
+    private func header(_ id: String, updated: TimeInterval?, blocking: Bool = false, subagent: Bool = false,
+                        type: String? = nil) throws {
+        var value = f.head(id, folder: f.project.path)
+        value["hasBlockingPendingActions"] = blocking
+        try f.insert("INSERT OR REPLACE INTO composerHeaders (composerId, workspaceId, lastUpdatedAt, isArchived, isSubagent, subagentTypeName, value) VALUES (?, NULL, ?, 0, ?, ?, ?)",
+                     rows: [[id, updated.map { f.ms($0) }, subagent || type != nil ? 1 : 0, type ?? "", value]])
     }
 
-    private func line(_ object: [String: Any]) throws -> String {
-        // Cursor writes keys in this order: role or type first.
-        if let role = object["role"] as? String {
-            let message = try JSONSerialization.data(withJSONObject: object["message"] ?? [:])
-            return "{\"role\":\"\(role)\",\"message\":\(String(decoding: message, as: UTF8.self))}"
+    private func chat(_ id: String, updated: TimeInterval, running: TimeInterval? = nil, created: TimeInterval = 0,
+                      extra: [String: Any] = [:]) throws {
+        var fields: [String: Any] = ["_v": 18, "workspaceIdentifier": ["id": "w", "uri": f.uri(f.project.path)]]
+        if let running {
+            fields["unfinishedRunAt"] = f.ms(running)
+            fields["status"] = "aborted"
         }
-        return "{\"type\":\"\(object["type"] ?? "")\",\"status\":\"\(object["status"] ?? "")\"}"
+        for (key, value) in extra { fields[key] = value }
+        try f.put([("composerData:\(id)", f.composer(id, bubbles: [], created: created, updated: updated, extra: fields))])
     }
 
-    private func user(_ text: String = "PRIVATE_PROMPT_MARKER") -> [String: Any] {
-        ["role": "user", "message": ["content": [["type": "text", "text": text]]]]
+    /// The chat's newest message: a header page entry and its body.
+    private func last(_ id: String, bubble: String, started: TimeInterval, tool: String?, answer: String? = nil) throws {
+        var body: [String: Any] = ["_v": 3, "type": 2, "bubbleId": bubble, "text": ""]
+        if let tool {
+            var former: [String: Any] = ["name": tool, "status": "completed"]
+            if let answer { former["additionalData"] = ["status": answer] }
+            body["toolFormerData"] = former
+        }
+        try f.put([("composerConvHeaders:\(id):000000", [["bubbleId": "u1", "type": 1],
+                                                         ["bubbleId": bubble, "type": 2, "startedAtMs": f.ms(started)]]),
+                   ("bubbleId:\(id):\(bubble)", body)])
     }
 
-    private func assistant() -> [String: Any] {
-        ["role": "assistant", "message": ["content": [["type": "tool_use", "name": "Shell", "input": ["command": "PRIVATE"]]]]]
-    }
-
-    private let ended: [String: Any] = ["type": "turn_ended", "status": "success"]
-
-    /// Writes a chat's transcript under `slug` and dates it.
     @discardableResult
-    private func transcript(_ id: String, slug: String = "Users-someone-Dev-cursor-trail-test", lines: [[String: Any]],
-                            at date: Date, subagentOf parent: String? = nil, raw: String? = nil) throws -> URL {
-        var folder = home.appendingPathComponent("projects/\(slug)/agent-transcripts/\(parent ?? id)", isDirectory: true)
-        if parent != nil { folder = folder.appendingPathComponent("subagents", isDirectory: true) }
+    private func transcript(_ id: String, ending: String, at seconds: TimeInterval) throws -> URL {
+        let folder = transcriptHome.appendingPathComponent("projects/Users-someone-app/agent-transcripts/\(id)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appendingPathComponent("\(id).jsonl")
-        let text = try raw ?? (lines.map { try line($0) }.joined(separator: "\n") + "\n")
-        try text.write(to: file, atomically: true, encoding: .utf8)
-        try setTime(file, date)
+        let opening = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PRIVATE_PROMPT_MARKER\"}]}}"
+        let lines = ending == "turn_ended" ? [opening, "{\"type\":\"turn_ended\",\"status\":\"success\"}"] : [opening]
+        try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: f.date(seconds)], ofItemAtPath: file.path)
         return file
     }
 
-    /// A Cursor app for this profile's data folder, started at `appStart`;
-    /// every chat id maps to `project`.
-    /// Folder lookups, by the chat ids asked for.
-    private var lookups: [[String]] = []
-
-    private func provider(apps: [CursorLiveActivityProvider.CursorApp]? = nil, alive: Bool = true,
-                          folders: [String: String]? = nil) -> CursorLiveActivityProvider {
-        let apps = apps ?? [.init(pid: pid, start: micros(appStart), userDataDirectory: data.path)]
-        let starts = Dictionary(uniqueKeysWithValues: apps.map { ($0.pid, $0.start) })
-        let project = self.project
-        return CursorLiveActivityProvider(
-            processStartTimes: { pids in alive ? starts.filter { pids.contains($0.key) } : [:] },
-            cursorApps: { apps },
-            folderLookup: { [weak self] _, ids in
-                self?.lookups.append(ids)
-                if let folders { return folders.filter { ids.contains($0.key) } }
-                return Dictionary(uniqueKeysWithValues: ids.map { ($0, canonicalPath(project)) })
-            },
-            transcriptHome: home)
+    private func statuses(_ snapshot: LiveSnapshot) -> [String: LiveStatus] {
+        Dictionary(uniqueKeysWithValues: snapshot.sessions.map { ($0.sessionID, $0.status) })
     }
 
-    func testATranscriptEndingWithYourMessageIsWorkingUntilItsTurnEnds() throws {
-        let opened = Date().addingTimeInterval(-10)
-        // Running: this turn's message is the last line.
-        try transcript("8aae7e0e-fa5c-4409-aa06-26615e7adc92", lines: [user(), assistant(), ended, user()], at: opened)
-        // Finished, and stopped (Stop writes status error).
-        try transcript("11111111-1111-4111-8111-111111111111", lines: [user(), assistant(), ended], at: opened)
-        try transcript("22222222-2222-4222-8222-222222222222",
-                       lines: [user(), ["type": "turn_ended", "status": "error"]], at: opened)
-        // An assistant line last: the turn's closing write is under way.
-        try transcript("33333333-3333-4333-8333-333333333333", lines: [user(), assistant()], at: opened)
-        // A subagent's transcript is not a chat of its own.
-        try transcript("44444444-4444-4444-8444-444444444444", lines: [user()], at: opened,
-                       subagentOf: "11111111-1111-4111-8111-111111111111")
-        let snapshot = provider().scan(sources: [source])
-        XCTAssertEqual(Set(snapshot.sessions.map(\.sessionID)),
-                       ["8aae7e0e-fa5c-4409-aa06-26615e7adc92", "33333333-3333-4333-8333-333333333333"])
-        let session = try XCTUnwrap(snapshot.sessions.first { $0.sessionID.hasPrefix("8aae") })
-        XCTAssertEqual(session.status, .working)
-        XCTAssertEqual(session.projectPath, canonicalPath(project))
+    // Tests.
+
+    func testARunSinceTheAppStartedIsWorking() throws {
+        try header("c1", updated: 200)
+        try chat("c1", updated: 200, running: 200)
+        // Left by a Cursor that quit or crashed before this one started.
+        try header("c2", updated: 50)
+        try chat("c2", updated: 50, running: 50)
+        // A subagent's run: its parent shows instead.
+        try header("c3", updated: 200)
+        try chat("c3", updated: 200, running: 200, extra: ["subagentInfo": ["parentComposerId": "c1"]])
+        // Finished.
+        try header("c4", updated: 210)
+        try chat("c4", updated: 210)
+        let snapshot = provider().scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["c1": .working])
+        let session = try XCTUnwrap(snapshot.sessions.first)
+        XCTAssertEqual(session.details.stateSince, f.date(200))
+        XCTAssertEqual(session.projectPath, canonicalPath(f.project.path))
         XCTAssertEqual(session.pid, pid)
         XCTAssertEqual(session.details.hostBundleID, "com.todesktop.230313mzl4w4u92")
-        XCTAssertEqual(session.details.stateSince.map { Int($0.timeIntervalSince1970) }, Int(opened.timeIntervalSince1970))
-        XCTAssertEqual(snapshot.notices, [])
     }
 
-    func testOnlyARunningCursorStartedBeforeTheWriteVouchesForTheTurn() throws {
-        // Left open when an earlier Cursor quit mid-turn: written before this app started.
-        try transcript("55555555-5555-4555-8555-555555555555", lines: [user()], at: appStart.addingTimeInterval(-60))
-        try transcript("66666666-6666-4666-8666-666666666666", lines: [user()], at: Date().addingTimeInterval(-5))
-        XCTAssertEqual(provider().scan(sources: [source]).sessions.map(\.sessionID), ["66666666-6666-4666-8666-666666666666"])
-        // Cursor not running.
-        XCTAssertEqual(provider(apps: []).scan(sources: [source]).sessions, [])
-        // Cursor running for another data folder only.
-        let other = CursorLiveActivityProvider.CursorApp(pid: pid, start: micros(appStart), userDataDirectory: "/tmp/elsewhere")
-        XCTAssertEqual(provider(apps: [other]).scan(sources: [source]).sessions, [])
-        // Gone (or its PID reused) by the time the transcripts were read.
-        XCTAssertEqual(provider(alive: false).scan(sources: [source]).sessions, [])
-    }
-
-    func testAChatWithoutAKnownFolderIsNotShown() throws {
-        try transcript("77777777-7777-4777-8777-777777777777", lines: [user()], at: Date().addingTimeInterval(-5))
-        XCTAssertEqual(provider(folders: [:]).scan(sources: [source]).sessions, [])
-    }
-
-    /// The app writes transcripts to ~/.cursor whatever CLI home the profile
-    /// names, a chat's folder is looked up once, and a transcript that did not
-    /// change is not read again.
-    func testFoldersAreLookedUpOnceAndTranscriptsFollowTheirChanges() throws {
-        let custom = AgentSource(id: "cursor", name: "Cursor", configDirectory: root.appendingPathComponent("cli-home").path,
-                                 userDataDirectory: data.path, assistant: .cursor)
-        let id = "88888888-8888-4888-8888-888888888888"
-        let file = try transcript(id, lines: [user()], at: Date().addingTimeInterval(-20))
+    func testAPendingQuestionNeedsInputUntilItIsAnswered() throws {
+        try header("c1", updated: 300, blocking: true)
+        try chat("c1", updated: 300)
+        try last("c1", bubble: "q1", started: 305, tool: "ask_question", answer: "pending")
         let reader = provider()
-        XCTAssertEqual(reader.scan(sources: [custom]).sessions.map(\.sessionID), [id])
-        XCTAssertEqual(reader.scan(sources: [custom]).sessions.map(\.sessionID), [id])
-        XCTAssertEqual(lookups, [[id]], "the folder is remembered")
-        // The turn ends: the file changes, so it is read again.
-        try (try line(user()) + "\n" + line(ended) + "\n").write(to: file, atomically: true, encoding: .utf8)
-        try setTime(file, Date().addingTimeInterval(-10))
-        XCTAssertEqual(reader.scan(sources: [custom]).sessions, [])
+        var snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["c1": .waiting])
+        XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(305))
+        // Answered: the agent goes on.
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 320)
+        try last("c1", bubble: "q1", started: 305, tool: "ask_question", answer: "submitted")
+        snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["c1": .working])
+        XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(320))
+    }
+
+    func testABlockedChatNeedsInputFromWhenItWasFirstSeen() throws {
+        try header("c1", updated: 300, blocking: true)
+        try chat("c1", updated: 300, running: 300)
+        let reader = provider()
+        let first = Date()
+        XCTAssertEqual(reader.scan(sources: [f.source], now: first).sessions.first?.status, .waiting)
+        let again = reader.scan(sources: [f.source], now: first.addingTimeInterval(9))
+        XCTAssertEqual(again.sessions.first?.details.stateSince, first)
+        // An old flag from before this app started claims nothing.
+        try header("c1", updated: 50, blocking: true)
+        try chat("c1", updated: 50)
+        XCTAssertEqual(reader.scan(sources: [f.source]).sessions, [])
+    }
+
+    /// A subagent waiting for approval, as traced on 3.29.15: Cursor copies the
+    /// subagent's blocked flag to its parent's header, so the parent shows
+    /// Needs input. The subagent itself (its header has no `lastUpdatedAt`,
+    /// its transcript sits in the parent's `subagents` folder) never shows.
+    func testASubagentsApprovalShowsAsNeedsInputOnItsParent() throws {
+        try header("p1", updated: 300, blocking: true)
+        try chat("p1", updated: 300, running: 300)
+        try last("p1", bubble: "t1", started: 302, tool: "task_v2", answer: "loading")
+        try header("s1", updated: nil, blocking: true, subagent: true)
+        try chat("s1", updated: 303, running: 303, extra: ["subagentInfo": ["parentComposerId": "p1", "rootParentConversationId": "p1"]])
+        try last("s1", bubble: "x1", started: 309, tool: "run_terminal_command_v2", answer: "pending")
+        let folder = transcriptHome.appendingPathComponent("projects/Users-someone-app/agent-transcripts/p1/subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "{\"role\":\"user\"}\n".write(to: folder.appendingPathComponent("s1.jsonl"), atomically: true, encoding: .utf8)
+        let reader = provider()
+        XCTAssertEqual(statuses(reader.scan(sources: [f.source])), ["p1": .waiting])
+        // Allowed: both flags clear, and the parent works on.
+        try header("p1", updated: 300)
+        try header("s1", updated: nil, subagent: true)
+        XCTAssertEqual(statuses(reader.scan(sources: [f.source])), ["p1": .working])
+    }
+
+    /// A side chat, as traced on 3.29.15: its header row is a subagent's
+    /// (`isSubagent` 1, type "side-chat") but carries `lastUpdatedAt`, its run
+    /// marker and blocked flag are its own, and its parent isn't flagged. It
+    /// shows on its own, and Jump goes through its parent.
+    func testASideChatShowsOnItsOwn() throws {
+        let side: [String: Any] = ["parentComposerId": "p1", "subagentType": 0, "subagentTypeName": "side-chat"]
+        try header("p1", updated: 300)
+        try chat("p1", updated: 300)
+        try header("s1", updated: 320, type: "side-chat")
+        try chat("s1", updated: 320, running: 320, extra: ["subagentInfo": side])
+        // A Task subagent running beside it still shows through its parent only,
+        // even when a transcript of its own makes it a candidate.
+        try header("t1", updated: nil, type: "general-purpose")
+        try chat("t1", updated: 322, running: 322, extra: ["subagentInfo": ["parentComposerId": "p1", "subagentTypeName": "general-purpose"]])
+        try transcript("t1", ending: "message", at: 323)
+        let reader = provider()
+        var snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["s1": .working])
+        XCTAssertEqual(snapshot.sessions.first?.details.parentThreadID, "p1")
+        XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(320))
+        // Its approval flags only the side chat.
+        try header("s1", updated: 320, blocking: true, type: "side-chat")
+        snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["s1": .waiting])
+        XCTAssertEqual(snapshot.sessions.first?.details.parentThreadID, "p1")
+    }
+
+    /// A subagent sent to the background, as traced on 3.29.15: the parent's
+    /// turn ends (no run marker) while the task's page entry reads
+    /// `grouping.taskStatus` "running"; when the subagent ends it reads
+    /// "success" and the parent wakes for a turn of its own.
+    private func task(_ status: String, started: TimeInterval) -> [String: Any] {
+        ["bubbleId": "t\(Int(started))", "type": 2, "startedAtMs": f.ms(started), "completedAtMs": f.ms(started + 1),
+         "grouping": ["toolCallCase": "taskToolCall", "toolFormerStatus": "loading", "taskStatus": status]]
+    }
+
+    private func message(_ bubble: String, at seconds: TimeInterval) -> [String: Any] {
+        ["bubbleId": bubble, "type": 2, "startedAtMs": f.ms(seconds)]
+    }
+
+    private func pages(_ id: String, _ pages: [[[String: Any]]]) throws {
+        try f.put(pages.enumerated().map { ("composerConvHeaders:\(id):" + String(format: "%06d", $0.offset), $0.element) })
+    }
+
+    func testABackgroundSubagentKeepsItsParentWorking() throws {
+        try header("p1", updated: 300)
+        try chat("p1", updated: 300)
+        try pages("p1", [[message("u1", at: 300), task("running", started: 305), message("a1", at: 307)]])
+        let reader = provider()
+        let snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["p1": .working])
+        XCTAssertEqual(snapshot.sessions.first?.details.backgroundSince, f.date(305))
+        XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(305))
+        // The subagent ended.
+        try pages("p1", [[message("u1", at: 300), task("success", started: 305), message("a1", at: 307)]])
+        XCTAssertEqual(reader.scan(sources: [f.source]).sessions, [])
+        // A task left running by a Cursor that quit before this one started claims nothing.
+        try pages("p1", [[message("u0", at: 40), task("running", started: 50), message("a1", at: 52)]])
+        XCTAssertEqual(reader.scan(sources: [f.source]).sessions, [])
+    }
+
+    /// Pages hold 256 messages; a task still running on an earlier page counts
+    /// while that page was written since the app started.
+    func testABackgroundSubagentOnAnEarlierPageStillCounts() throws {
+        try header("p1", updated: 400)
+        try chat("p1", updated: 400)
+        try pages("p1", [[message("u1", at: 300), task("running", started: 305)],
+                         [message("u2", at: 400), message("a2", at: 402)]])
+        let snapshot = provider().scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["p1": .working])
+        XCTAssertEqual(snapshot.sessions.first?.details.backgroundSince, f.date(305))
+    }
+
+    /// A fork copies its original's page entries, and nothing updates the
+    /// copy: a running task from before the chat was created doesn't count.
+    func testAForkedCopyOfARunningTaskDoesNotCount() throws {
+        try header("f1", updated: 330)
+        try chat("f1", updated: 330, created: 320)
+        try pages("f1", [[message("u1", at: 300), task("running", started: 305), message("u2", at: 330)]])
+        XCTAssertEqual(provider().scan(sources: [f.source]).sessions, [])
+    }
+
+    /// A run of its own comes first; once a transcript ends that run, the
+    /// background subagent still keeps the chat Working in background.
+    func testARunComesBeforeABackgroundSubagent() throws {
+        try header("p1", updated: 300)
+        try chat("p1", updated: 300, running: 310)
+        try pages("p1", [[message("u1", at: 300), task("running", started: 305), message("u2", at: 310)]])
+        let reader = provider()
+        var snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["p1": .working])
+        XCTAssertNil(snapshot.sessions.first?.details.backgroundSince)
+        XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(310))
+        try transcript("p1", ending: "turn_ended", at: 320)
+        snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["p1": .working])
+        XCTAssertEqual(snapshot.sessions.first?.details.backgroundSince, f.date(305))
+    }
+
+    func testATurnEndedInTheTranscriptEndsTheRun() throws {
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 300)
+        try transcript("c1", ending: "turn_ended", at: 310)
+        XCTAssertEqual(provider().scan(sources: [f.source]).sessions, [])
+        // A turn_ended from before this run doesn't end it.
+        try transcript("c1", ending: "turn_ended", at: 290)
+        XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["c1": .working])
+    }
+
+    /// The previous turn's end line can land just after you send again; it
+    /// doesn't hide the new run.
+    func testATurnEndedRightAfterASendDoesNotHideTheNewRun() throws {
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 300)
+        try transcript("c1", ending: "turn_ended", at: 301)
+        XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["c1": .working])
+    }
+
+    func testCloudAndBackgroundAgentChatsAreNotShown() throws {
+        try header("b1", updated: 300)
+        try chat("b1", updated: 300, running: 300, extra: ["createdFromBackgroundAgent": ["bcId": "bc-1"]])
+        try header("b2", updated: 300)
+        try chat("b2", updated: 300, running: 300, extra: ["createdFromBackgroundAgent": [:]])
+        XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["b2": .working], "an empty marker is a local chat")
+    }
+
+    /// A rollback-journal database with stray -wal and -shm files is not read;
+    /// the journal mode comes from SQLite, not from a file handle of ours.
+    func testOnlyAWALDatabaseIsRead() throws {
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 300)
+        XCTAssertEqual(sqlite3_exec(writer, "PRAGMA journal_mode=DELETE;", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(writer)
+        writer = nil
+        FileManager.default.createFile(atPath: f.database.path + "-wal", contents: Data())
+        FileManager.default.createFile(atPath: f.database.path + "-shm", contents: Data())
+        guard case .unavailable = CursorLiveActivityProvider.readStates(f.database, since: 0, extra: []) else {
+            return XCTFail("a rollback-journal database must not be read")
+        }
+    }
+
+    func testAChatWhoseHeaderIsBehindIsFoundThroughItsTranscript() throws {
+        try header("c1", updated: nil)
+        try chat("c1", updated: 300, running: 300)
+        try transcript("c1", ending: "message", at: 303)
+        XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["c1": .working])
+    }
+
+    func testWithoutTheDatabaseATranscriptKeepsAKnownChatWorking() throws {
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 300)
+        try transcript("c1", ending: "message", at: 303)
+        try transcript("c2", ending: "message", at: 303)
+        let reader = provider()
+        XCTAssertEqual(statuses(reader.scan(sources: [f.source])), ["c1": .working])
+        // Cursor's database can't be read now (its WAL files are gone).
+        sqlite3_close(writer)
+        writer = nil
+        try? FileManager.default.removeItem(atPath: f.database.path + "-wal")
+        try? FileManager.default.removeItem(atPath: f.database.path + "-shm")
+        let snapshot = reader.scan(sources: [f.source])
+        XCTAssertEqual(statuses(snapshot), ["c1": .working], "c2's folder was never known")
+        XCTAssertEqual(snapshot.sessions.first?.details.stateSince, f.date(303))
+        XCTAssertNil(FileStat.of(f.database.path + "-shm"), "no file is created in Cursor's folder")
+    }
+
+    func testRemoteAndMultiRootWorkspacesAreNotShown() throws {
+        for id in ["r1", "m1", "p1"] { try header(id, updated: 300) }
+        try chat("r1", updated: 300, running: 300, extra: [
+            "workspaceIdentifier": ["id": "z", "uri": ["scheme": "vscode-remote", "path": "/srv/app"]],
+            "trackedGitRepos": [["repoPath": "/srv/app"]]])
+        try chat("m1", updated: 300, running: 300, extra: [
+            "workspaceIdentifier": ["id": "w", "configPath": ["scheme": "file", "fsPath": "/Users/someone/both.code-workspace"]],
+            "trackedGitRepos": [["repoPath": f.project.path]]])
+        // A file URI saved without fsPath still names its folder.
+        try chat("p1", updated: 300, running: 300, extra: [
+            "workspaceIdentifier": ["id": "y", "uri": ["scheme": "file", "path": f.project.path]]])
+        XCTAssertEqual(statuses(provider().scan(sources: [f.source])), ["p1": .working])
+    }
+
+    func testOnlyARunningCursorForTheProfilesDataFolderCounts() throws {
+        try header("c1", updated: 300)
+        try chat("c1", updated: 300, running: 300)
+        XCTAssertEqual(provider(apps: []).scan(sources: [f.source]).sessions, [])
+        let other = CursorLiveActivityProvider.CursorApp(pid: pid, start: micros(appStart), userDataDirectory: "/tmp/elsewhere")
+        XCTAssertEqual(provider(apps: [other]).scan(sources: [f.source]).sessions, [])
+        // Gone (or its PID reused) by the time the database was read.
+        XCTAssertEqual(provider(alive: false).scan(sources: [f.source]).sessions, [])
+        // Started after this run: the run was left by an earlier Cursor.
+        let later = CursorLiveActivityProvider.CursorApp(pid: pid, start: micros(400), userDataDirectory: f.userData.path)
+        XCTAssertEqual(provider(apps: [later]).scan(sources: [f.source]).sessions, [])
     }
 
     func testTheInstanceMustUseTheProfilesDataFolder() {
@@ -162,47 +374,20 @@ final class CursorLiveActivityProviderTests: XCTestCase {
         XCTAssertNil(CursorLiveActivityProvider.instance(for: custom, among: [plain, older]))
     }
 
-    func testFoldersComeFromCursorsChatHeaderThenItsRecord() throws {
-        let f = try CursorFixture()
-        defer { f.remove() }
-        try f.headerTable([("h1", nil, f.head("h1", folder: f.project.path))])
-        var remote = f.head("r1", folder: "/home/someone/app")
-        remote["workspaceIdentifier"] = ["id": "x", "uri": ["scheme": "vscode-remote", "fsPath": "/home/someone/app",
-                                                              "path": "/home/someone/app"]]
-        try f.headerTable([("r1", nil, remote)])
-        try f.put([("composerData:c1", f.composer("c1", bubbles: [], created: 0, updated: 1,
-                                                    extra: ["trackedGitRepos": [["repoPath": f.project.path]]]))])
-        // A file URI saved without fsPath, a remote chat with a repository, and a multi-root workspace.
-        var bare = f.head("p1", folder: f.project.path)
-        bare["workspaceIdentifier"] = ["id": "y", "uri": ["scheme": "file", "path": f.project.path]]
-        try f.headerTable([("p1", nil, bare)])
-        try f.put([("composerData:r2", f.composer("r2", bubbles: [], created: 0, updated: 1, extra: [
-            "workspaceIdentifier": ["id": "z", "uri": ["scheme": "vscode-remote", "path": "/srv/app"]],
-            "trackedGitRepos": [["repoPath": "/srv/app"]]])),
-                   ("composerData:m1", f.composer("m1", bubbles: [], created: 0, updated: 1, extra: [
-            "workspaceIdentifier": ["id": "w", "configPath": ["scheme": "file", "fsPath": "/Users/someone/both.code-workspace"]],
-            "trackedGitRepos": [["repoPath": f.project.path]]]))])
-        // History leaves a rollback-journal database alone just after a change; so does this.
-        XCTAssertEqual(CursorLiveActivityProvider.readFolders(f.userData, ids: ["h1"]), [:])
-        try setTime(f.database, Date().addingTimeInterval(-30))
-        let folders = CursorLiveActivityProvider.readFolders(f.userData, ids: ["h1", "r1", "c1", "missing", "p1", "r2", "m1"])
-        XCTAssertEqual(folders, ["h1": canonicalPath(f.project.path), "c1": canonicalPath(f.project.path),
-                                 "p1": canonicalPath(f.project.path)])
-    }
-
     func testTheLastLineIsFoundFromItsOpeningBytes() throws {
+        let file = transcriptHome.appendingPathComponent("line.jsonl")
         func kind(_ raw: String) throws -> CursorLiveActivityProvider.LastLine {
-            let file = try transcript("99999999-9999-4999-8999-999999999999", lines: [], at: Date(), raw: raw)
+            try raw.write(to: file, atomically: true, encoding: .utf8)
             return CursorLiveActivityProvider.lastLine(of: file, size: UInt64(try Data(contentsOf: file).count))
         }
-        let end = try line(ended)
-        let message = try line(user())
+        let end = "{\"type\":\"turn_ended\",\"status\":\"success\"}"
+        let message = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PRIVATE\"}]}}"
         XCTAssertEqual(try kind(message), .message, "a file of one line")
         XCTAssertEqual(try kind(end + "\n" + message + "\n\n"), .message, "trailing newlines")
         XCTAssertEqual(try kind(message + "\r\n" + end + "\r\n"), .turnEnded)
         XCTAssertEqual(try kind(message + "\n{\"type\":\"turn_ended\",\"status\":\"aborted\"}\n"), .turnEnded)
         // A prompt longer than one read chunk still opens with its role.
-        let long = try line(user(String(repeating: "x", count: 200_000)))
+        let long = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"" + String(repeating: "x", count: 200_000) + "\"}]}}"
         XCTAssertEqual(try kind(end + "\n" + long + "\n"), .message)
         // A kind this version does not know never claims a running turn.
         XCTAssertEqual(try kind(message + "\n{\"type\":\"turn_paused\"}\n"), .other)
