@@ -373,6 +373,32 @@ final class CursorActivityProviderTests: XCTestCase {
         XCTAssertEqual(project.activities.first?.editMoments.map(\.date).max(), f.date(30))
     }
 
+    /// An edit call seen while running is read again when the chat is next
+    /// parsed, even when it completes in place: no new header entry and no
+    /// change to the chat's record, only the header's lastUpdatedAt.
+    func testARunningEditThatCompletesInPlaceIsReadAgain() throws {
+        let f = try CursorFixture()
+        defer { f.remove() }
+        let file = f.project.appendingPathComponent("a.txt").path
+        let call = "r1/t:call-1\nfc_1_0"
+        try f.headerTable([("c1", nil, f.head("c1", folder: f.project.path))])
+        try f.put([
+            ("composerData:c1", f.composer("c1", bubbles: [], created: 0, updated: 40, extra: ["_v": 18])),
+            ("composerConvHeaders:c1:000000", [["bubbleId": "u1", "type": 1], ["bubbleId": call, "type": 2]]),
+            ("bubbleId:c1:u1", f.userBubble("u1", at: 1)),
+            ("bubbleId:c1:" + call, f.tool(call, name: "edit_file_v2", status: "loading", call: "tool_1", path: file, at: 10,
+                                           result: nil))
+        ])
+        let provider = f.provider()
+        XCTAssertEqual(provider.scan(sources: [f.source]).projects.first?.recordedEditCount ?? 0, 0)
+        var head = f.head("c1", folder: f.project.path)
+        head["lastUpdatedAt"] = f.ms(50)
+        try f.headerTable([("c1", nil, head)])
+        try f.put([("bubbleId:c1:" + call, f.tool(call, name: "edit_file_v2", call: "tool_1", path: file, at: 10,
+                                                   result: f.applied()))])
+        XCTAssertEqual(provider.scan(sources: [f.source]).projects.first?.recordedEditCount, 1)
+    }
+
     func testUnreadableBubbleIsReportedAndTheOthersStillCount() throws {
         let f = try CursorFixture()
         defer { f.remove() }

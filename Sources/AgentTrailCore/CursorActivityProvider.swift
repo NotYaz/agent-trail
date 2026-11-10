@@ -644,9 +644,10 @@ public final class CursorActivityProvider: ActivityProvider {
                 composer.resetBubbles()
                 composer.fingerprint = fingerprint
                 composer.length = chat.length
-            } else if composer.fingerprint != fingerprint {
+            } else if composer.fingerprint != fingerprint || composer.pending.contains(where: { $0.inFlight == true }) {
                 // The length is recorded when the reread finishes, so a chat
-                // whose reread was interrupted is parsed again next time.
+                // whose reread was interrupted is parsed again next time. An
+                // edit call that was running is checked again until it ends.
                 composer.length = nil
                 tasks.append(ComposerTask(id: id, fingerprint: fingerprint, length: chat.length))
             } else {
@@ -1378,6 +1379,11 @@ struct CursorPendingBubble: Codable, Equatable {
     var id: String
     /// The nearest earlier bubble's time, for a bubble that records none.
     var before: Date?
+    /// An edit call that was still running. Its chat is read again at each
+    /// listing that parses it, even when the chat's fingerprint is unchanged:
+    /// in Cursor 3.29 a call can complete in its own bubble without a new
+    /// header entry or a change to the chat's record.
+    var inFlight: Bool? = nil
 }
 
 struct CursorBlockProof: Codable, Equatable {
@@ -1450,7 +1456,7 @@ struct CursorComposer: Codable, Equatable {
         let status = row[1].string ?? ""
         guard status == "completed" else {
             if !CursorActivityProvider.finalStatuses.contains(status) {
-                pending.append(CursorPendingBubble(id: bubble, before: before))
+                pending.append(CursorPendingBubble(id: bubble, before: before, inFlight: true))
             }
             return created
         }
