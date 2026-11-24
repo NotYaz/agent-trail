@@ -8,7 +8,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
-**[0.1.0-alpha.14](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.14) · Public alpha · macOS 14+ · [MIT license](LICENSE) · [Changelog](CHANGELOG.md) · [Website](https://agent-trail.app/)**
+**[0.1.0-alpha.15](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.15) · Public alpha · macOS 14+ · [MIT license](LICENSE) · [Changelog](CHANGELOG.md) · [Website](https://agent-trail.app/)**
 
 [![CI](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml)
 
@@ -20,7 +20,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 ## Install
 
-**Download** `Agent-Trail-macOS-universal2.zip` from the [0.1.0-alpha.14 release](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.14), not the "Source code" archives: one app for Apple Silicon and Intel Macs on macOS 14 or later.
+**Download** `Agent-Trail-macOS-universal2.zip` from the [0.1.0-alpha.15 release](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.15), not the "Source code" archives: one app for Apple Silicon and Intel Macs on macOS 14 or later.
 
 1. Unzip it and move **Agent Trail** to your Applications folder.
 2. Open it. This alpha is ad-hoc signed and **not Apple-notarized**, so macOS stops the first launch. Close the warning without choosing **Move to Trash**. Within the next hour, open **System Settings › Privacy & Security**, click **Open Anyway** next to the Agent Trail message, then confirm with **Open Anyway** (**Open** on macOS 14) and your login password. You do this once per release. On macOS 14 you can instead Control-click the app, choose **Open**, and click **Open** again.

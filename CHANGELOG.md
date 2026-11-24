@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.15 — 2026-11-24
 
 - **Open sessions in either Claude instance.** macOS hands every `claude://` link to the Claude instance launched first, so Jump could open only that instance's sessions; another instance's got a hint. That instance changes whenever one restarts, for example for Claude's forced update restart, so Jump into one account worked some days and not others. Turn on **⋯ › Claude instances › Open sessions in either instance** (shown with two or more Claude profiles) and Jump sends the link straight to the session's own instance, whatever the launch order. This needs Automation permission for Claude: macOS asks once, when you turn it on. It stays off by default, and declining keeps the hint, which now says where the switch is. Longer hints stay on screen a little longer. The menu says whether macOS allowed it, with a button to the Automation settings when it didn't.
 - Jump logs each outcome, and how each Claude link was delivered, to the macOS unified log (`log show --info --predicate 'subsystem == "local.agenttrail.app"'`), without titles, session ids, links, or paths.
