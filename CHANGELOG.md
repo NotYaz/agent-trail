@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.15 — 2026-11-24
+
+- **Open sessions in either Claude instance.** macOS hands every `claude://` link to the Claude instance launched first, so Jump could open only that instance's sessions; another instance's got a hint. That instance changes whenever one restarts, for example for Claude's forced update restart, so Jump into one account worked some days and not others. Turn on **⋯ › Claude instances › Open sessions in either instance** (shown with two or more Claude Desktop profiles or running instances) and Jump sends the link straight to the session's own instance, whatever the launch order. This needs Automation permission for Claude, which macOS asks for once: when you turn the switch on if Claude is running, otherwise at the first Jump that needs it. Sessions of the instance launched first never need it. The switch is off by default; then Agent Trail sends no Apple Event and never asks macOS about access, and the hint for another instance's session now says where the switch is. If you decline, the hint says Automation access to Claude is off, and the panel points to System Settings › Privacy & Security › Automation. Turning the switch off doesn't remove the permission; System Settings does. The menu says whether macOS allowed it, with a button to the Automation settings when it didn't.
+- Jump logs each outcome, and how each Claude link was delivered (route, process ID, status code), to the macOS unified log, where it is kept for later: `log show --last 1d --predicate 'subsystem == "local.agenttrail.app"'`. Titles, session ids, links, and paths are never logged.
+- Hints can take three lines, and longer ones stay on screen up to 7 seconds instead of 3.5.
+
 ## 0.1.0-alpha.14 — 2026-11-10
 
 - **GitHub Copilot.** A Copilot profile reads Copilot Chat in VS Code and the Copilot CLI (with the Copilot app and VS Code's Copilot CLI sessions, which write the same files), and their projects share cards with the other assistants.

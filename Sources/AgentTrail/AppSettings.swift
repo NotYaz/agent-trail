@@ -25,15 +25,20 @@ enum AppSettings {
         static let mapShowsDetails = "mapShowsDetails"
         /// `AssistantKind` raw values whose "found on this Mac" suggestion was dismissed.
         static let dismissedAssistantSuggestions = "dismissedAssistantSuggestions"
+        /// Send a Claude link straight to the session's own instance when macOS
+        /// would hand it to another (needs Automation access to Claude). Off by default.
+        static let directClaudeLinks = "directClaudeLinks"
     }
 
-    /// The four switches default to on. The preferred apps have no default:
-    /// the first installed app in the launcher's order is used until one is chosen.
+    /// The four display switches default to on, and direct Claude links to off.
+    /// The preferred apps have no default: the first installed app in the
+    /// launcher's order is used until one is chosen.
     static let boolDefaults: [String: Bool] = [
         Key.showSessionTitles: true,
         Key.statusAnimates: true,
         Key.statusShowsCount: true,
-        Key.statusShowsWorkingCount: true
+        Key.statusShowsWorkingCount: true,
+        Key.directClaudeLinks: false
     ]
 
     /// Safe to call more than once; registered defaults never overwrite a stored choice.
@@ -45,6 +50,7 @@ enum AppSettings {
     static var statusAnimates: Bool { bool(Key.statusAnimates) }
     static var statusShowsCount: Bool { bool(Key.statusShowsCount) }
     static var statusShowsWorkingCount: Bool { bool(Key.statusShowsWorkingCount) }
+    static var directClaudeLinks: Bool { bool(Key.directClaudeLinks) }
 
     /// An unknown stored value reads as the default, as a hand-edited Bool does.
     static var sessionShortcut: SessionShortcut {

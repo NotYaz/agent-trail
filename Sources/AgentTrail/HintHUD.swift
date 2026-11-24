@@ -13,15 +13,18 @@ enum HintHUD {
     /// without it the hint sits at the top-right of the main screen.
     static var anchorProvider: (() -> NSRect?)?
 
-    static func show(_ text: String, duration: TimeInterval = 3.5) {
+    static func show(_ text: String, duration: TimeInterval? = nil) {
         show(text, symbol: nil, duration: duration)
     }
 
     /// `symbol` is an SF Symbol shown before the text in secondary ink.
-    static func show(_ text: String, symbol: String?, duration: TimeInterval = 3.5) {
+    /// Without a `duration`, a hint stays 3.5 seconds, longer ones up to 7
+    /// so their extra line can be read.
+    static func show(_ text: String, symbol: String?, duration: TimeInterval? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        controller.present(trimmed, symbol: symbol, duration: min(max(duration, 1), 15))
+        let shown = duration ?? min(max(3.5, Double(trimmed.count) / 20), 7)
+        controller.present(trimmed, symbol: symbol, duration: min(max(shown, 1), 15))
     }
 
     /// Fades the current hint out early, for example when the panel opens.
@@ -117,7 +120,8 @@ private final class HintHUDController {
 
         label.font = .systemFont(ofSize: 12, weight: .medium)
         label.textColor = .labelColor
-        label.maximumNumberOfLines = 2
+        // Three lines: a long title can take two, and a note keeps its own line.
+        label.maximumNumberOfLines = 3
         label.lineBreakMode = .byTruncatingTail
         label.cell?.truncatesLastVisibleLine = true
         label.preferredMaxLayoutWidth = Self.maxTextWidth

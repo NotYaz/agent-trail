@@ -8,7 +8,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 **Private by design:** no network, no account, no telemetry, no hooks. It never writes to your assistants' files.
 
-**[0.1.0-alpha.14](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.14) · Public alpha · macOS 14+ · [MIT license](LICENSE) · [Changelog](CHANGELOG.md) · [Website](https://agent-trail.app/)**
+**[0.1.0-alpha.15](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.15) · Public alpha · macOS 14+ · [MIT license](LICENSE) · [Changelog](CHANGELOG.md) · [Website](https://agent-trail.app/)**
 
 [![CI](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/NotYaz/agent-trail/actions/workflows/ci.yml)
 
@@ -20,7 +20,7 @@ A read-only macOS menu-bar app. Each Git repository gets one card across Claude,
 
 ## Install
 
-**Download** `Agent-Trail-macOS-universal2.zip` from the [0.1.0-alpha.14 release](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.14), not the "Source code" archives: one app for Apple Silicon and Intel Macs on macOS 14 or later.
+**Download** `Agent-Trail-macOS-universal2.zip` from the [0.1.0-alpha.15 release](https://github.com/NotYaz/agent-trail/releases/tag/v0.1.0-alpha.15), not the "Source code" archives: one app for Apple Silicon and Intel Macs on macOS 14 or later.
 
 1. Unzip it and move **Agent Trail** to your Applications folder.
 2. Open it. This alpha is ad-hoc signed and **not Apple-notarized**, so macOS stops the first launch. Close the warning without choosing **Move to Trash**. Within the next hour, open **System Settings › Privacy & Security**, click **Open Anyway** next to the Agent Trail message, then confirm with **Open Anyway** (**Open** on macOS 14) and your login password. You do this once per release. On macOS 14 you can instead Control-click the app, choose **Open**, and click **Open** again.
@@ -72,7 +72,7 @@ Routine refreshes keep the last complete history visible while the next scan fin
 
 Each card's main button opens the session that most needs you: one waiting for input first (**Answer**), then a working one (**Open**), then an idle one (**Resume**). It shows the profile, the session title, and how long the session has been in that state when the assistant records it. The ⌄ menu next to it lists every live session, plus **Open in** your editor or terminal at that worktree, **Reveal in Finder**, **Copy path**, a recorded pull request, and **Bring {profile} forward**. Each session row in **Details** has its own ↗.
 
-- **Claude Desktop:** opens that Code session with Claude's `claude://code/continue` link. This link is not publicly documented and may change. With several Claude instances (for example Main and Second), macOS hands every `claude://` link to the instance that was launched first, whichever one is in front (seen on macOS 15). Agent Trail sends the link only for that instance's sessions. For a session in another instance, it brings that instance forward and shows a short hint naming the session to pick, since the link would open the first instance's Code home instead.
+- **Claude Desktop:** opens that Code session with Claude's `claude://code/continue` link. This link is not publicly documented and may change. With several Claude instances (for example Main and Second), macOS hands every `claude://` link to the instance that was launched first, whichever one is in front (seen on macOS 15), so a link for another instance's session would open the first instance's Code home. By default, Agent Trail opens links only for the first instance's sessions; for a session in another instance, it brings that instance forward and shows a short hint naming the session to pick and where the switch below is. Turn on **⋯ › Claude instances › Open sessions in either instance** to open those sessions directly too: Agent Trail then sends the link straight to the session's own instance, as the same "open URL" Apple Event macOS would send. macOS asks once whether Agent Trail may control Claude (Automation): when you turn the switch on if Claude is running, otherwise at the first Jump that needs it. Sessions of the first instance never need it. If you decline, Jump keeps showing the hint, which then says Automation access to Claude is off; you can allow it later in System Settings › Privacy & Security › Automation.
 - **Claude in a terminal:** brings forward the terminal app `claude` runs in, when the process environment identifies it, and names the folder of the tab to pick, since a terminal session has no title. In Claude Desktop's own terminal pane, that is the Claude instance holding the pane. It never sends a terminal session to a Claude Desktop Code session.
 - **Codex:** opens the thread with `codex://threads/<id>` when the Codex desktop app owns it; otherwise it brings the owning app forward.
 - **Grok:** brings forward the terminal app it runs in, when the process environment identifies it, including Claude Desktop's terminal pane.
@@ -81,7 +81,7 @@ Each card's main button opens the session that most needs you: one waiting for i
 - **Cursor:** opens the chat with Cursor's `cursor://anysphere.cursor-deeplink/agent?id=<chat>` link, which brings Cursor forward and selects the chat in its Agents window. No link reaches the chat pane of an editor window, and this link is not documented by Cursor, so it may change. With several Cursor instances running, or if the link can't be opened, Jump brings Cursor forward instead.
 - **Otherwise:** it brings the assistant's app forward, or shows the folder in your running editor or Finder.
 
-Agent Trail opens a session or brings an app forward only after you click, press the switcher's shortcut, or open an `agenttrail://` link (see [Switch from the keyboard](#switch-from-the-keyboard)), and only when that app is already running. It never launches, quits, kills, or restarts an assistant, and it needs no Automation or Accessibility permission. **Open in** menu items can open your editor or terminal.
+Agent Trail opens a session or brings an app forward only after you click, press the switcher's shortcut, or open an `agenttrail://` link (see [Switch from the keyboard](#switch-from-the-keyboard)), and only when that app is already running. It never launches, quits, kills, or restarts an assistant, and it needs no Accessibility permission. It needs Automation permission for Claude only if you turn on **Open sessions in either instance**, and then sends Claude nothing but session links. **Open in** menu items can open your editor or terminal.
 
 ### Switch from the keyboard
 
@@ -135,7 +135,7 @@ Cursor is not a default profile either. When Agent Trail finds Cursor history on
 
 ### Two Claude accounts
 
-Many people keep a work and a personal Claude Desktop instance open side by side, each with its own user-data folder and Claude config folder. The default **Claude · Second** profile covers the common layout; add any other instance in **Profiles…**. Both accounts' Code sessions then appear on the same project cards. macOS hands `claude://` links only to the Claude instance launched first, so **Jump** opens that instance's sessions directly and brings any other instance forward with a hint naming the session (see [Jump to the work](#jump-to-the-work)). Links go to whichever instance has been running longest: to jump straight into the account you use most, open its instance first, and note that restarting an instance (for example for an update) changes which one that is.
+Many people keep a work and a personal Claude Desktop instance open side by side, each with its own user-data folder and Claude config folder. The default **Claude · Second** profile covers the common layout; add any other instance in **Profiles…**. Both accounts' Code sessions then appear on the same project cards. macOS hands `claude://` links only to the Claude instance launched first, so by default **Jump** opens that instance's sessions directly and brings any other instance forward with a hint naming the session (see [Jump to the work](#jump-to-the-work)). Links go to whichever instance has been running longest, and restarting an instance (for example for an update) changes which one that is. To open sessions in either instance whatever the launch order, turn on **⋯ › Claude instances › Open sessions in either instance** and allow Agent Trail to control Claude when macOS asks.
 
 A settings file that already exists is left as it is. Add Codex, Grok, Copilot, OpenCode, and Cursor from **Profiles…**, or add the entries below and choose **Reload profiles**. Agent Trail does not merge new default profiles into a saved file.
 
