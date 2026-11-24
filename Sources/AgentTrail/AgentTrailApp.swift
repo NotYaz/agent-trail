@@ -675,7 +675,8 @@ struct AgentTrailShell: View {
     /// Titles affect cards, menus and hints, so that switch sits at the top
     /// level with the theme; the three icon switches live under "Menu bar",
     /// the system-wide shortcut under "Session switcher", and direct Claude
-    /// links, shown only with several Claude profiles, under "Claude instances".
+    /// links, shown with several Claude profiles or running instances, under
+    /// "Claude instances".
     @ViewBuilder private var displayMenuItems: some View {
         Toggle("Show session titles", isOn: $showSessionTitles)
         Picker("Theme", selection: themeSelection) {

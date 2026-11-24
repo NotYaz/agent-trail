@@ -4,9 +4,13 @@ import os
 
 /// "Open sessions in either instance": direct Claude links (see DirectLink).
 extension AppStore {
-    /// Claude profiles with a desktop app; the ⋯ menu offers direct links when there are several.
+    /// The ⋯ menu offers direct links with several Claude Desktop profiles, or
+    /// several running Claude instances (one may have no profile), and keeps
+    /// the switch reachable once it is on, so it can be turned off.
     var hasSeveralClaudeInstances: Bool {
         sources.filter { $0.assistant == .claude && $0.bundleIdentifier == SessionLauncher.claudeBundleID }.count > 1
+            || SessionLauncher.runningClaudeCount > 1
+            || AppSettings.directClaudeLinks
     }
 
     /// Where an access answer came from, which decides what is said about it.
@@ -58,9 +62,16 @@ extension AppStore {
     }
 
     private func recordClaudeLinkAccess(_ permission: OSStatus, from check: ClaudeLinkCheck) {
-        Logger(subsystem: "local.agenttrail.app", category: "jump")
-            .info("Claude link access: permission \(permission, privacy: .public)")
-        guard let access = DirectLink.access(for: permission) else { return }
+        let answer = DirectLink.access(for: permission)
+        let log = Logger(subsystem: "local.agenttrail.app", category: "jump")
+        // Saved (notice) when the answer changes; the same answer again, as at
+        // every panel open, stays in memory (info).
+        if answer == claudeLinkAccess {
+            log.info("Claude link access: permission \(permission, privacy: .public)")
+        } else {
+            log.notice("Claude link access: permission \(permission, privacy: .public)")
+        }
+        guard let access = answer else { return }
         let wasDenied = claudeLinkAccess == .denied
         claudeLinkAccess = access
         // Access allowed again in System Settings: the old explanation no longer holds.

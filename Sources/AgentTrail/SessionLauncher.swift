@@ -185,7 +185,8 @@ enum SessionLauncher {
     // MARK: Jump
 
     /// Jump outcomes and how Claude links were delivered. Never titles, session
-    /// ids, links or paths.
+    /// ids, links or paths. Notice level, since macOS saves only notice and above:
+    /// a Jump that went wrong is asked about later, with `log show`.
     private static let log = Logger(subsystem: "local.agenttrail.app", category: "jump")
 
     /// The launcher order: (1) a Claude Desktop link to this profile's
@@ -209,7 +210,7 @@ enum SessionLauncher {
             case .hint: result = "hint"
             case .failed: result = "failed"
             }
-            log.info("Jump \(assistant, privacy: .public): \(result, privacy: .public)")
+            log.notice("Jump \(assistant, privacy: .public): \(result, privacy: .public)")
             reportOutcome(outcome)
         }
         // `claude` in a terminal belongs to that terminal, not to Claude Desktop.
@@ -249,18 +250,21 @@ enum SessionLauncher {
               let sessionID = session.details.desktopSessionID, isDesktopSessionID(sessionID),
               let url = URL(string: "claude://code/continue?session=\(sessionID)") else {
             // No usable link: bring the profile's own instance forward and say what to pick.
-            log.info("Claude link: none for this session")
+            log.notice("Claude link: none for this session")
             report(focusProfile(source, hint: hint))
             return
         }
         let running = runningApplications(claudeBundleID)
         guard let pid = InstanceController.runningInstances(sources: [source])[source.id],
               let instance = running.first(where: { $0.processIdentifier == pid }) else {
-            log.info("Claude link: no single running instance matches the profile")
+            log.notice("Claude link: no single running instance matches the profile")
             report(focusProfile(source, hint: hint))
             return
         }
         let sendsToProcess = AppSettings.directClaudeLinks
+        // The ⋯ menu shows the switch while several Claude instances run, so the
+        // hint names it only then.
+        let switchNote = running.count > 1 ? directLinksNote : nil
         // Undelivered, the note says why, or where the switch is while it is off.
         let finish = { (delivered: Bool, note: String?) in
             guard delivered else {
@@ -281,7 +285,7 @@ enum SessionLauncher {
         }
         let fallback = {
             guard sendsToProcess else {
-                finish(false, directLinksNote)
+                finish(false, switchNote)
                 return
             }
             send()
@@ -302,19 +306,24 @@ enum SessionLauncher {
                 guard recipient == pid else {
                     // Nil when the link failed. Another pid means the instances changed
                     // since the check, and that instance already has the link.
-                    log.info("Claude link: opening with the bundle reached pid \(recipient ?? 0, privacy: .public), not \(pid, privacy: .public)")
+                    log.notice("Claude link: opening with the bundle reached pid \(recipient ?? 0, privacy: .public), not \(pid, privacy: .public)")
                     fallback()
                     return
                 }
-                log.info("Claude link: opened with the bundle in pid \(pid, privacy: .public)")
+                log.notice("Claude link: opened with the bundle in pid \(pid, privacy: .public)")
                 finish(true, nil)
             }
         case .process?:
             send()
         case nil:
-            log.info("Claude link: pid \(pid, privacy: .public) is not the instance launched first, and direct links are off")
-            finish(false, directLinksNote)
+            log.notice("Claude link: pid \(pid, privacy: .public) is not the instance launched first, and direct links are off")
+            finish(false, switchNote)
         }
+    }
+
+    /// Running Claude Desktop instances, of any profile or none.
+    static var runningClaudeCount: Int {
+        runningApplications(claudeBundleID).count
     }
 
     /// Where to turn on direct links, for a Jump that could not open the
@@ -346,7 +355,7 @@ enum SessionLauncher {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = DirectLink.send(link, to: pid, askIfNeeded: true)
             DispatchQueue.main.async {
-                log.info("Claude link: sent to pid \(pid, privacy: .public), permission \(result.permission, privacy: .public), status \(result.status, privacy: .public)")
+                log.notice("Claude link: sent to pid \(pid, privacy: .public), permission \(result.permission, privacy: .public), status \(result.status, privacy: .public)")
                 // The outcome first, so the store's note about access comes after the Jump's hint.
                 completion(result.status == noErr, DirectLink.access(for: result.permission) == .denied)
                 claudeLinkPermissionAnswered?(result.permission)
