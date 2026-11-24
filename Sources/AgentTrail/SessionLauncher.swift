@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import AgentTrailCore
+import os
 
 // MARK: - Labels
 
@@ -152,10 +153,13 @@ struct JumpContext {
 
 // MARK: - Launcher
 
-/// Opens the work behind a live session. It uses only NSWorkspace and
-/// NSRunningApplication: no Apple Events, AppleScript, Accessibility or
-/// Automation. A session link is opened only in an app that is already
-/// running, addressed by that app's bundle; an assistant is never launched.
+/// Opens the work behind a live session. It uses NSWorkspace and
+/// NSRunningApplication: no AppleScript or Accessibility. The one Apple Event,
+/// a Claude link sent straight to the session's own Claude process when macOS
+/// would hand it to another instance, goes out only when the user turned on
+/// direct links and macOS granted Automation access to Claude (see
+/// DirectLink). A session link goes only to an app that is already running;
+/// an assistant is never launched.
 @MainActor
 enum SessionLauncher {
     static let claudeBundleID = "com.anthropic.claudefordesktop"
@@ -180,9 +184,15 @@ enum SessionLauncher {
 
     // MARK: Jump
 
-    /// The launcher order: (1) a Claude Desktop link, sent only when this
-    /// profile's instance is the one macOS hands links to (the one launched
-    /// first), else the profile's instance comes forward with a hint; a Claude
+    /// Jump outcomes and how Claude links were delivered. Never titles, session
+    /// ids, links or paths.
+    private static let log = Logger(subsystem: "local.agenttrail.app", category: "jump")
+
+    /// The launcher order: (1) a Claude Desktop link to this profile's
+    /// instance, opened with Claude's bundle when macOS hands links to that
+    /// instance (the one launched first), else sent to its process when direct
+    /// links are on, else the instance comes forward with a hint that names
+    /// the switch for direct links; a Claude
     /// session started in a terminal skips this and goes to its terminal; (2) a Codex thread link
     /// when the ChatGPT app owns the thread and runs, or a Cursor chat link when one
     /// Cursor app runs; (3) the running host app,
@@ -190,7 +200,18 @@ enum SessionLauncher {
     /// (4) the session's own app, else the folder in a running preferred
     /// editor, else Finder. `report` is called once, possibly later.
     static func jump(_ session: LiveAgentSession, source: AgentSource?, context: JumpContext,
-                     report: @escaping (JumpOutcome) -> Void) {
+                     report reportOutcome: @escaping (JumpOutcome) -> Void) {
+        let assistant = source?.assistant.rawValue ?? "unknown"
+        let report = { (outcome: JumpOutcome) in
+            let result: String
+            switch outcome {
+            case .done: result = "done"
+            case .hint: result = "hint"
+            case .failed: result = "failed"
+            }
+            log.info("Jump \(assistant, privacy: .public): \(result, privacy: .public)")
+            reportOutcome(outcome)
+        }
         // `claude` in a terminal belongs to that terminal, not to Claude Desktop.
         if let source, source.assistant == .claude, !source.bundleIdentifier.isEmpty, !session.details.startedInTerminal {
             jumpToClaude(session, source: source, context: context, report: report)
@@ -218,26 +239,33 @@ enum SessionLauncher {
     private static func jumpToClaude(_ session: LiveAgentSession, source: AgentSource, context: JumpContext,
                                      report: @escaping (JumpOutcome) -> Void) {
         let hint = pickHint(app: source.name, title: context.title, noun: "session", folder: context.folder)
+        // A note sits on the hint's own last line; a shorter title keeps the
+        // hint within its three lines, so the note is never cut off.
+        let hintWithNote = { (note: String) in
+            pickHint(app: source.name, title: context.title, noun: "session", folder: context.folder,
+                     titleLimit: 40) + "\n" + note
+        }
         guard source.bundleIdentifier == claudeBundleID,
               let sessionID = session.details.desktopSessionID, isDesktopSessionID(sessionID),
               let url = URL(string: "claude://code/continue?session=\(sessionID)") else {
             // No usable link: bring the profile's own instance forward and say what to pick.
+            log.info("Claude link: none for this session")
             report(focusProfile(source, hint: hint))
             return
         }
-        // Several Claude instances share one bundle id, and macOS hands every link
-        // to the one launched first, whichever is in front. A link for another
-        // instance's session would reach that first instance, which opens its own
-        // Code home, so those sessions get a hint instead.
-        guard let instance = linkRecipient(for: source), let bundleURL = instance.bundleURL else {
+        let running = runningApplications(claudeBundleID)
+        guard let pid = InstanceController.runningInstances(sources: [source])[source.id],
+              let instance = running.first(where: { $0.processIdentifier == pid }) else {
+            log.info("Claude link: no single running instance matches the profile")
             report(focusProfile(source, hint: hint))
             return
         }
-        openLink(url, in: bundleURL) { recipient in
-            // Nil when the link failed. Another pid means the instances changed since
-            // the check, and that instance already has the link: say what to pick.
-            guard recipient == instance.processIdentifier else {
-                report(focusProfile(source, hint: hint))
+        let sendsToProcess = AppSettings.directClaudeLinks
+        // Undelivered, the note says why, or where the switch is while it is off.
+        let finish = { (delivered: Bool, note: String?) in
+            guard delivered else {
+                // The note goes in the hint itself: a separate message would be replaced by it.
+                report(focusProfile(source, hint: note.map(hintWithNote) ?? hint))
                 return
             }
             // Claude shows its own window for a link; this makes sure the
@@ -245,21 +273,90 @@ enum SessionLauncher {
             _ = InstanceController.focus(source: source)
             report(.done)
         }
+        // Bundle failed or reached another instance: its process, else a hint.
+        let send = {
+            sendLink(url, to: instance) { delivered, accessDenied in
+                finish(delivered, accessDenied ? "Automation access to Claude is off" : nil)
+            }
+        }
+        let fallback = {
+            guard sendsToProcess else {
+                finish(false, directLinksNote)
+                return
+            }
+            send()
+        }
+        // Several Claude instances share one bundle id, and macOS hands every link
+        // opened with that bundle to the one launched first, whichever is in front.
+        // That instance would open its own Code home for another instance's
+        // session, so a link for any other instance goes to its process when
+        // direct links are on, and otherwise is not sent.
+        let instances = running.map { LinkRecipient.Instance(pid: $0.processIdentifier, launchDate: $0.launchDate) }
+        switch LinkRecipient.delivery(to: pid, among: instances, sendsToProcess: sendsToProcess) {
+        case .bundle?:
+            guard let bundleURL = instance.bundleURL else {
+                fallback()
+                return
+            }
+            openLink(url, in: bundleURL) { recipient in
+                guard recipient == pid else {
+                    // Nil when the link failed. Another pid means the instances changed
+                    // since the check, and that instance already has the link.
+                    log.info("Claude link: opening with the bundle reached pid \(recipient ?? 0, privacy: .public), not \(pid, privacy: .public)")
+                    fallback()
+                    return
+                }
+                log.info("Claude link: opened with the bundle in pid \(pid, privacy: .public)")
+                finish(true, nil)
+            }
+        case .process?:
+            send()
+        case nil:
+            log.info("Claude link: pid \(pid, privacy: .public) is not the instance launched first, and direct links are off")
+            finish(false, directLinksNote)
+        }
+    }
+
+    /// Where to turn on direct links, for a Jump that could not open the
+    /// session because they are off.
+    private static let directLinksNote = "To open it directly, turn on ⋯ › Claude instances"
+
+    /// Called on the main thread with each permission answer from a direct link.
+    static var claudeLinkPermissionAnswered: ((OSStatus) -> Void)?
+
+    /// Any running Claude instance, for asking macOS about access to Claude:
+    /// the answer covers every instance, since they share one app.
+    static func anyClaudeProcess() -> pid_t? {
+        let running = runningApplications(claudeBundleID)
+        return (running.first { $0.activationPolicy == .regular } ?? running.first)?.processIdentifier
+    }
+
+    /// Sends a Claude link straight to one instance's process (see DirectLink).
+    /// macOS asks the user first if it has no answer about access to Claude.
+    /// `completion` gets whether that Claude accepted the link, and whether
+    /// macOS denied access.
+    private static func sendLink(_ url: URL, to app: NSRunningApplication,
+                                 completion: @escaping (_ delivered: Bool, _ accessDenied: Bool) -> Void) {
+        let pid = app.processIdentifier
+        let link = url.absoluteString
+        guard !app.isTerminated else {
+            completion(false, false)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = DirectLink.send(link, to: pid, askIfNeeded: true)
+            DispatchQueue.main.async {
+                log.info("Claude link: sent to pid \(pid, privacy: .public), permission \(result.permission, privacy: .public), status \(result.status, privacy: .public)")
+                // The outcome first, so the store's note about access comes after the Jump's hint.
+                completion(result.status == noErr, DirectLink.access(for: result.permission) == .denied)
+                claudeLinkPermissionAnswered?(result.permission)
+            }
+        }
     }
 
     private static func focusProfile(_ source: AgentSource, hint: String) -> JumpOutcome {
         if let error = InstanceController.focus(source: source) { return .failed(error) }
         return .hint(hint, symbol: "sidebar.left")
-    }
-
-    /// The running Claude that receives claude:// links, and only when it is
-    /// this profile's instance.
-    private static func linkRecipient(for source: AgentSource) -> NSRunningApplication? {
-        let running = runningApplications(claudeBundleID)
-        let instances = running.map { LinkRecipient.Instance(pid: $0.processIdentifier, launchDate: $0.launchDate) }
-        guard let pid = LinkRecipient.pid(among: instances),
-              InstanceController.runningInstances(sources: [source])[source.id] == pid else { return nil }
-        return running.first { $0.processIdentifier == pid }
     }
 
     /// Returns false when step 2 does not apply, so the next step runs.
@@ -494,8 +591,9 @@ enum SessionLauncher {
     // MARK: Helpers
 
     /// "In Claude · Second, pick “Landing copy pass”" or "…, pick the tab in orbit".
-    private static func pickHint(app: String, title: String?, noun: String, folder: String) -> String {
-        if let title = SessionLabel.clean(title, limit: 60) { return "In \(app), pick “\(title)”" }
+    private static func pickHint(app: String, title: String?, noun: String, folder: String,
+                                 titleLimit: Int = 60) -> String {
+        if let title = SessionLabel.clean(title, limit: titleLimit) { return "In \(app), pick “\(title)”" }
         return "In \(app), pick the \(noun) in \(folder)"
     }
 

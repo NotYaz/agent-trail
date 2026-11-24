@@ -23,5 +23,6 @@
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSAppleEventsUsageDescription</key><string>With “Open sessions in either instance” on, Agent Trail sends Claude its own session links, so Jump opens a session in the Claude instance it belongs to. It sends Claude nothing else.</string>
 </dict>
 </plist>

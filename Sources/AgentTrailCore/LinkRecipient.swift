@@ -34,4 +34,30 @@ public enum LinkRecipient {
         }
         return tied ? nil : earliest?.pid
     }
+
+    /// How a link reaches one instance.
+    public enum Route: Equatable, Sendable {
+        /// Open the link with the app's bundle: macOS hands it to this instance.
+        case bundle
+        /// macOS would hand it to another instance, or the order is unknown: send
+        /// it to this instance's process.
+        case process
+    }
+
+    /// `.bundle` when the instance with `pid` is the only one or the one launched
+    /// first, else `.process`.
+    public static func route(to pid: Int32, among instances: [Instance]) -> Route {
+        if instances.count == 1, instances[0].pid == pid { return .bundle }
+        return self.pid(among: instances) == pid ? .bundle : .process
+    }
+
+    /// How Jump delivers a link to the instance with `pid`: with the bundle when
+    /// macOS hands links to it, else to its process when `sendsToProcess` (the
+    /// user allowed direct links), else not at all, and Jump shows a hint.
+    public static func delivery(to pid: Int32, among instances: [Instance], sendsToProcess: Bool) -> Route? {
+        switch route(to: pid, among: instances) {
+        case .bundle: return .bundle
+        case .process: return sendsToProcess ? .process : nil
+        }
+    }
 }

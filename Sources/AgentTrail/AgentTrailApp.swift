@@ -430,6 +430,7 @@ struct AgentTrailShell: View {
     @AppStorage(AppSettings.Key.statusShowsCount) private var statusShowsCount = true
     @AppStorage(AppSettings.Key.colorTheme) private var colorTheme: ColorTheme = .classic
     @AppStorage(AppSettings.Key.sessionShortcut) private var sessionShortcut: SessionShortcut = .standard
+    @AppStorage(AppSettings.Key.directClaudeLinks) private var directClaudeLinks = false
 
     /// `height` exists for `--height` renders; the live popover is always 680pt.
     init(store: AppStore, animatesCharts: Bool = true, height: CGFloat = AgentTrailShell.panelHeight) {
@@ -673,7 +674,8 @@ struct AgentTrailShell: View {
 
     /// Titles affect cards, menus and hints, so that switch sits at the top
     /// level with the theme; the three icon switches live under "Menu bar",
-    /// and the system-wide shortcut under "Session switcher".
+    /// the system-wide shortcut under "Session switcher", and direct Claude
+    /// links, shown only with several Claude profiles, under "Claude instances".
     @ViewBuilder private var displayMenuItems: some View {
         Toggle("Show session titles", isOn: $showSessionTitles)
         Picker("Theme", selection: themeSelection) {
@@ -708,6 +710,37 @@ struct AgentTrailShell: View {
             }
         }
         .disabled(store.demoMode)
+        if store.hasSeveralClaudeInstances {
+            Menu("Claude instances") {
+                Toggle("Open sessions in either instance", isOn: directClaudeLinksBinding)
+                Divider()
+                ForEach(claudeLinkNotes, id: \.self) { Text($0) }
+                if directClaudeLinks && store.claudeLinkAccess == .denied {
+                    Button("Open Automation Settings…") { store.openAutomationSettings() }
+                }
+            }
+            .disabled(store.demoMode)
+        }
+    }
+
+    /// The switch writes the setting, and turning it on asks macOS for access to Claude.
+    private var directClaudeLinksBinding: Binding<Bool> {
+        Binding(get: { directClaudeLinks }, set: { on in
+            directClaudeLinks = on
+            store.setDirectClaudeLinks(on)
+        })
+    }
+
+    private var claudeLinkNotes: [String] {
+        guard directClaudeLinks else {
+            return ["macOS sends links only to the Claude opened first",
+                    "On, Agent Trail asks macOS for access to Claude"]
+        }
+        switch store.claudeLinkAccess {
+        case .allowed: return ["Allowed in Privacy & Security › Automation"]
+        case .denied: return ["macOS denied Agent Trail access to Claude"]
+        case .unknown: return ["macOS asks the first time Jump needs it"]
+        }
     }
 
     /// Switches the drawing theme before the stored choice rebuilds the panel.

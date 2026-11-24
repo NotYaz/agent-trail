@@ -33,6 +33,8 @@ final class AppStore: ObservableObject {
     @Published private(set) var projectOverviews: [ProjectOverview] = []
     /// Set by SessionSwitcher when macOS refuses the switcher's shortcut; the ⋯ menu shows it.
     @Published var shortcutIssue: String?
+    /// What macOS last answered about sending Claude links directly; the ⋯ menu shows it.
+    @Published var claudeLinkAccess: ClaudeLinkAccess = .unknown
     @Published var sources: [AgentSource] = []
     @Published var notices: [String] = []
     @Published var isScanning = false
@@ -114,7 +116,12 @@ final class AppStore: ObservableObject {
     @Published var growthAnchor: GrowthAnchor?
     /// False while the popover is closed, so continuous effects can stop.
     @Published var isPanelVisible = true {
-        didSet { if isPanelVisible && !oldValue && !isMapWindowVisible { refreshMap(force: true) } }
+        didSet {
+            guard isPanelVisible && !oldValue else { return }
+            if !isMapWindowVisible { refreshMap(force: true) }
+            // Access may have changed in System Settings, or Claude started since the last check.
+            if AppSettings.directClaudeLinks && !demoMode { checkClaudeLinkAccess(ask: false) }
+        }
     }
     /// True while the Map window is on screen and not covered or minimized.
     /// Each surface rebuilds the map only when the other is not already showing it.
@@ -255,6 +262,7 @@ final class AppStore: ObservableObject {
             refresh()
         } else {
             reloadProfiles()
+            observeClaudeLinkAccess()
         }
     }
 
